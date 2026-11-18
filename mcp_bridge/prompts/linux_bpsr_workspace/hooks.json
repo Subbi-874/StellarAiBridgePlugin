@@ -1,0 +1,16 @@
+{
+  "bpsr-tool-sandbox": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/subbi/bpsr/.agents/bpsr_guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

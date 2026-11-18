@@ -1,0 +1,239 @@
+using System;
+using System.Globalization;
+using System.Linq;
+using System.Text.Json.Nodes;
+using Stellar.AgyBridge.Behaviors;
+using Stellar.AgyBridge.Character;
+using Stellar.AgyBridge.Core;
+using Stellar.AgyBridge.Fishing;
+using Stellar.AgyBridge.Locomotion;
+using Stellar.AgyBridge.World;
+using Stellar.Abstractions.Services;
+
+namespace Stellar.AgyBridge.Commands;
+
+/// <summary>v0.8.0–v0.9.0 command set: revive, mount, interaction accept, locate, loadout/outfit presets, monster seek, auto-ready, dungeon entry, stickers.</summary>
+public static class ExtendedCommands
+{
+    public static void RegisterAll(
+        CommandRegistry registry,
+        IPluginServices services,
+        BridgeConfig config,
+        WorldStateService world,
+        CrossMapNavigator navigator,
+        AutoCombatKeeper autoCombat,
+        PlayerMoveDriver moveDriver,
+        LocomotionBoostController boost,
+        BehaviorRunner behaviors,
+        ReviveService revive,
+        MountService mount,
+        InteractionInviteService interaction,
+        RequestSenderService sender,
+        PlayerLocatorService locator,
+        LoadoutPresetService loadouts,
+        OutfitPresetService outfits,
+        MonsterLocator monsters,
+        AutoReadyService autoReady,
+        DungeonEntryService dungeonEntry,
+        StickerService stickers,
+        AutoFishingIntegration autoFishing,
+        TraversalGimmickService traversal,
+        Action? onUiStateChanged = null)
+    {
+        static JsonObject Blocked(BridgeConfig cfg, string key, string err) => new()
+        {
+            ["ok"] = false,
+            ["policy_key"] = key,
+            ["mode"] = (int)cfg.GetFeatureMode(key),
+            ["admin_locked"] = cfg.IsAdminLocked(key),
+            ["error"] = err
+        };
+
+        // Wraps a handler with a feature-gate check so every gated command is guarded identically.
+        void Gated(string method, string policyKey, Func<JsonObject?, JsonObject> handler)
+        {
+            registry.Register(new DelegateBridgeCommand(method, p =>
+            {
+                if (!config.CheckFeatureExecution(policyKey, out string gateErr))
+                    return Blocked(config, policyKey, gateErr);
+                return handler(p);
+            }));
+        }
+
+        void Open(string method, Func<JsonObject?, JsonObject> handler)
+            => registry.Register(new DelegateBridgeCommand(method, handler));
+
+        // 1. Revive (passive auto-revive checks IsFeatureEnabled(AutoRevive); explicit command only blocked by AdminLock)
+        registry.Register(new DelegateBridgeCommand("revive", p =>
+        {
+            if (config.IsAdminLocked(FeaturePolicyKeys.AutoRevive))
+                return Blocked(config, FeaturePolicyKeys.AutoRevive, "'사망 시 자동 부활 (무료)' 기능은 어드민락(2)으로 잠겨 있습니다.");
+            return revive.RequestRevive(
+                p?["type"]?.GetValue<int>(),
+                p?["dry_run"]?.GetValue<bool>() ?? false);
+        }));
+        Open("get_revive_status", _ => revive.GetStatusJson().WithOk());
+
+        // 2. Mount
+        Gated("ride", FeaturePolicyKeys.Ride, mount.Execute);
+        Gated("request_ride", FeaturePolicyKeys.Ride, sender.RequestRide);
+
+        // 3. Interaction accept (armed per commander; also auto-accepts commander party leader transfer)
+        Gated("accept_interaction", FeaturePolicyKeys.InteractionAccept, interaction.Arm);
+        Gated("accept_request", FeaturePolicyKeys.InteractionAccept, interaction.Arm);
+        Gated("request_interaction", FeaturePolicyKeys.InteractionAccept, sender.RequestInteraction);
+        Open("get_interaction_status", _ => interaction.GetStatusJson().WithOk());
+
+        // 5. Player location / 6. follow pre-check
+        Gated("query_player_location", FeaturePolicyKeys.PlayerLocate, locator.QueryLocation);
+        Open("check_follow_reachable", locator.CheckFollowJson);
+
+        // 7. Loadout presets
+        Open("list_loadouts", _ => loadouts.List());
+        Gated("switch_loadout", FeaturePolicyKeys.LoadoutSwitch, loadouts.Switch);
+
+        // 8. Outfit presets
+        Open("list_outfits", _ => outfits.List());
+        Gated("switch_outfit", FeaturePolicyKeys.OutfitSwitch, outfits.Switch);
+
+        // 9. Monster seek
+        Open("find_monster", p =>
+        {
+            string q = p?["query"]?.GetValue<string>() ?? p?["name"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrWhiteSpace(q))
+                return new JsonObject { ["ok"] = false, ["error"] = "Missing 'query' (monster name or id)" };
+            var found = monsters.FindMonsters(q);
+            return new JsonObject
+            {
+                ["ok"] = true,
+                ["matches"] = new JsonArray(found.Take(20).Select(m => (JsonNode)new JsonObject
+                {
+                    ["id"] = m.Id,
+                    ["name"] = m.Name,
+                    ["monster_type"] = m.MonsterType
+                }).ToArray())
+            };
+        });
+
+        Gated("seek_monster", FeaturePolicyKeys.FollowMove, p =>
+        {
+            string q = p?["monster"]?.GetValue<string>() ?? p?["query"]?.GetValue<string>() ?? p?["name"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrWhiteSpace(q))
+                return new JsonObject { ["ok"] = false, ["error"] = "Missing 'monster' (name or id)" };
+
+            float radius = p?["stop_distance"]?.GetValue<float>() ?? 6.0f;
+            bool engage = p?["engage"]?.GetValue<bool>() ?? false;
+            var behavior = new SeekMonsterBehavior(services, config, world, navigator, autoCombat, moveDriver, boost, monsters, q, radius, engage);
+            var snap = behaviors.StartBehavior(behavior);
+            onUiStateChanged?.Invoke();
+
+            string phase = snap["phase"]?.GetValue<string>() ?? "";
+            bool failedAtStart = phase is "monster_not_found" or "no_spawn_found";
+            var res = new JsonObject { ["ok"] = !failedAtStart, ["behavior"] = snap };
+            if (failedAtStart) res["error"] = snap["detail"]?.GetValue<string>() ?? phase;
+            return res;
+        });
+
+        // 10. Auto Ready-Check (passive auto-ready checks IsFeatureEnabled(AutoReady); explicit command only blocked by AdminLock)
+        registry.Register(new DelegateBridgeCommand("ready_check", _ =>
+        {
+            if (config.IsAdminLocked(FeaturePolicyKeys.AutoReady))
+                return Blocked(config, FeaturePolicyKeys.AutoReady, "'던전·레이드·월드보스 자동 준비' 기능은 어드민락(2)으로 잠겨 있습니다.");
+            return autoReady.ConfirmNow();
+        }));
+        Open("get_ready_status", _ => autoReady.GetStatusJson().WithOk());
+
+        // 11. Leader Dungeon / Raid / Unstable Space / World Boss Entry
+        Open("list_dungeons", dungeonEntry.ListDungeons);
+        Gated("enter_dungeon", FeaturePolicyKeys.DungeonEnter, dungeonEntry.Enter);
+
+        // 12. Built-in Game Stickers (per-channel AdminLock enforced inside WorldStateService.SendSticker)
+        Open("list_stickers", stickers.ListStickers);
+        Open("send_sticker", p =>
+        {
+            var res = stickers.Send(p);
+            if (!res["ok"]!.GetValue<bool>())
+            {
+                string ch = p?["channel"]?.GetValue<string>() ?? "party";
+                string pol = FeaturePolicyKeys.FromSendChannel(ch) ?? FeaturePolicyKeys.SendParty;
+                res["admin_locked"] = config.IsAdminLocked(pol);
+            }
+            return res;
+        });
+
+        // 13. Auto Fishing (Stellar.AutoFishing integration)
+        Open("list_fishing_spots", p => autoFishing.ListFishingSpots(p?["query"]?.GetValue<string>(), world.GetLocalSceneId()));
+
+        Gated("fish", FeaturePolicyKeys.AutoFish, p =>
+        {
+            string spot = (p?["spot"]?.GetValue<string>()
+                           ?? p?["destination"]?.GetValue<string>()
+                           ?? p?["query"]?.GetValue<string>()
+                           ?? "").Trim();
+            int count = p?["count"]?.GetValue<int>() ?? 0;
+
+            var behavior = new FishAtSpotBehavior(
+                services,
+                config,
+                world,
+                navigator,
+                autoCombat,
+                moveDriver,
+                boost,
+                autoFishing,
+                mount,
+                spot,
+                count);
+
+            var snap = behaviors.StartBehavior(behavior);
+            onUiStateChanged?.Invoke();
+
+            string phase = snap["phase"]?.GetValue<string>() ?? "";
+            bool failedAtStart = phase is "autofishing_plugin_missing" or "fishing_spot_not_found" or "fishing_gear_missing";
+            var res = new JsonObject { ["ok"] = !failedAtStart, ["behavior"] = snap };
+            if (failedAtStart) res["error"] = snap["detail"]?.GetValue<string>() ?? phase;
+            return res;
+        });
+
+        // 14. Traversal field/dungeon gimmicks (Wind Tunnel, Glider Launch, Intra-map Teleporter)
+        Open("list_gimmicks", p =>
+        {
+            string? query = p?["query"]?.GetValue<string>();
+            float radius = p?["radius"]?.GetValue<float>() ?? 45f;
+            return traversal.ListGimmicks(query, radius);
+        });
+
+        Gated("use_gimmick", FeaturePolicyKeys.FollowMove, p =>
+        {
+            string query = (p?["gimmick"]?.GetValue<string>()
+                            ?? p?["query"]?.GetValue<string>()
+                            ?? p?["destination"]?.GetValue<string>()
+                            ?? "").Trim();
+
+            var behavior = new UseGimmickBehavior(
+                services,
+                config,
+                world,
+                autoCombat,
+                moveDriver,
+                boost,
+                traversal,
+                query);
+
+            var snap = behaviors.StartBehavior(behavior);
+            onUiStateChanged?.Invoke();
+
+            string phase = snap["phase"]?.GetValue<string>() ?? "";
+            bool failedAtStart = phase is "gimmick_not_found" or "gimmick_trigger_failed";
+            var res = new JsonObject { ["ok"] = !failedAtStart, ["behavior"] = snap };
+            if (failedAtStart) res["error"] = snap["detail"]?.GetValue<string>() ?? phase;
+            return res;
+        });
+    }
+
+    private static JsonObject WithOk(this JsonObject o)
+    {
+        o["ok"] = true;
+        return o;
+    }
+}

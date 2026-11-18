@@ -1,0 +1,17 @@
+{
+  "ingame-bot-tool-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "..\\..\\.venv\\Scripts\\python.exe ..\\tool_guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+# Python virtual environment & caches
+mcp_bridge/.venv/
+.venv/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# Runtime logs, local databases, and secrets
+mcp_bridge/bridge.log*
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+.env
+.env.*
+
+# .NET build artifacts
+plugin/bin/
+plugin/obj/
+bin/
+obj/
+
+# Local pre-refactor backups & IDE files
+_backup_pre_v080/
+.vs/
+.idea/
+*.user
+*.suo
+
+# Local planning notes
+/TODO.md
+/개선점.md
