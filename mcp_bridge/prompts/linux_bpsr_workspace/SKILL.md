@@ -4,7 +4,7 @@ description: >-
   블루 프로토콜: 스타 레조넌스(Blue Protocol: Star Resonance) 인게임 캐릭터 제어·조회 통합 매뉴얼.
   명령권자(UID) 권한 규칙, 어드민락 보안 정책, 채널 이동·자동 낚시(Stellar.AutoFishing 연동)·자동 부활·자동 준비·던전/레이드/불안정공간/월드보스 입장·퇴장·자동 장판회피·이동형 필드기믹·파티 위임·프리셋·감정표현·내장 이모티콘 규칙,
   인게임 채팅 응답용 JSON actions 스키마(<current_trigger_message> + 명령권한=있음 제어 요청 시 열람) 및
-  외부 직접 제어용 bridge_cli.py 사용법(<current_trigger_message> 미포함 직접 제어 시 사용)을 모두 담고 있다.
+  조회·제어용 bridge_cli.py 사용법(외부 직접 제어 및 명령권한=있음 채팅 사전 조회/다단계 실행 시 사용)을 모두 담고 있다.
 ---
 
 # Stellar AGY Bridge 통합 제어 매뉴얼 (`stellar-bridge`)
@@ -17,7 +17,8 @@ description: >-
 
 1. **입력 경로에 따른 도구 사용 구분 (엄격 분리)**:
    - **인게임 채팅 응답 (`<current_trigger_message>` 포함 입력)**:
-     - 이 문서를 `read_file`로 열람해 아래 **3장(인게임 채팅 응답용 JSON `actions` 스키마)** 규격만 확인한 뒤, **절대 `run_command`나 `bridge_cli.py`를 직접 실행하지 말고** `{"reply_text": "...", "sticker": "...", "actions": [...]}` 순수 JSON 객체만 출력하세요(실행과 권한·어드민락 최종 검증은 윈도우 브릿지가 수행함).
+     - `명령권한=없음`: 아래 3·4장 실행 없이 `"actions": []`로 거절·대화 응답만 출력하세요(`run_command` 호출 금지).
+     - `명령권한=있음`: 단순 1단계 명령은 아래 **3장 JSON `actions` 스키마** 규격으로 즉시 반환하고, **사전 인게임 목록·상태 조회나 다단계 확인·실행이 필요한 경우**에는 `run_command`로 **4장 `bridge_cli.py --client "<내 캐릭터명>" ...`** 를 여러 번 호출해 확인·판단할 수 있습니다(단, CLI로 이미 직접 실행 완료한 제어 동작은 중복 실행 방지를 위해 최종 JSON `actions`에 넣지 말고 `[]`로 두며, `send-chat`/`send-sticker` CLI 직접 호출은 금지하고 최종 JSON `reply_text`·`sticker`로 출력하세요).
    - **외부 직접 제어 (`<current_trigger_message>` 미포함 일반 지시)**:
      - 아래 **4장(`bridge_cli.py` 전용 CLI 사용법)** 에 명시된 `python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py ...` 단일 명령만 `run_command`로 실행하고, 결과를 한국어로 보고하세요.
 2. **블루 프로토콜 브릿지 외 리눅스 시스템·파일 명령 절대 금지**:
@@ -110,7 +111,7 @@ description: >-
 ---
 
 ## 3. [인게임 채팅 응답용] JSON `actions` 스키마 명세
-*(입력에 `<current_trigger_message>`가 있고 `명령권한=있음`일 때만 아래 객체를 `actions` 배열에 추가 — `run_command` 호출 금지!)*
+*(입력에 `<current_trigger_message>`가 있고 `명령권한=있음`일 때 단순 1단계 명령을 `actions` 배열에 반환. 이미 4장 `bridge_cli.py`로 직접 실행 완료한 제어 동작은 `actions`에 중복 추가하지 말 것)*
 
 대상 유저 지정 시 동일닉 방지를 위해 `[온라인 파티/친구/길드원 UID 목록]` 또는 발신자의 **숫자 UID 문자열**(예: `"15977376"`)을 최우선으로 넣고, 목록에 없을 때만 닉네임을 넣으세요. `[어드민락 잠금 항목]`에 해당하는 액션은 절대 넣지 마세요.
 
@@ -180,11 +181,11 @@ description: >-
 
 ---
 
-## 4. [외부 직접 제어용] 전용 CLI 사용법 (`bridge_cli.py`)
-*(입력에 `<current_trigger_message>`가 없는 일반 직접 제어 요청일 때만 `run_command`로 실행)*
+## 4. 전용 CLI 사용법 (`bridge_cli.py`)
+*(외부 직접 제어 요청 또는 `<current_trigger_message>` + `명령권한=있음` 채팅에서 사전 조회·다단계 확인/실행이 필요할 때 `run_command`로 호출. 멀티 클라 환경에서는 `--client "<내 캐릭터명>"` 권장, 채팅 모드에서는 `send-chat`/`send-sticker` 직접 호출 금지)*
 
 ```bash
-python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py [--client <conn_id>] <명령> [옵션]
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py [--client <conn_id|캐릭터명|UID>] <명령> [옵션]
 ```
 
 ### A. 상태 · 멀티클라이언트 · 인원(UID) · 명령권자/정책 조회

@@ -44,18 +44,18 @@ BRIDGE_TOKEN = os.getenv("STELLAR_BRIDGE_TOKEN") or _FILE_ENV.get("STELLAR_BRIDG
 
 
 _DEFAULT_CONN_ID = ""
+_RESOLVED_CONN_CACHE: dict[str, str] = {}
 
 
-def bridge_call(
+def _raw_post_call(
     method: str,
     params: dict[str, Any] | None = None,
     timeout: float = 15.0,
     conn_id: str = "",
 ) -> dict[str, Any]:
     body: dict[str, Any] = {"method": method, "params": params or {}, "timeout": timeout}
-    target_conn = (conn_id or _DEFAULT_CONN_ID).strip()
-    if target_conn:
-        body["conn_id"] = target_conn
+    if conn_id:
+        body["conn_id"] = conn_id
     payload = json.dumps(body).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if BRIDGE_TOKEN:
@@ -69,6 +69,41 @@ def bridge_call(
         return {"ok": False, "http_status": he.code, "error": body_err or str(he)}
     except Exception as exc:
         return {"ok": False, "bridge_url": BRIDGE_URL, "error": f"Bridge unreachable: {exc}"}
+
+
+def _resolve_conn_selector(sel: str) -> str:
+    q = (sel or "").strip()
+    if not q or q.lower().startswith("client-"):
+        return q
+    if q in _RESOLVED_CONN_CACHE:
+        return _RESOLVED_CONN_CACHE[q]
+
+    res = _raw_post_call("list_clients", {}, timeout=5.0)
+    clients = res.get("clients") if isinstance(res, dict) else None
+    if isinstance(clients, list):
+        q_low = q.lower()
+        for c in clients:
+            if not isinstance(c, dict):
+                continue
+            cid = str(c.get("conn_id") or "").strip()
+            if not cid:
+                continue
+            char_id = str(c.get("char_id") or "").strip()
+            char_name = str(c.get("char_name") or "").strip().lower()
+            if (char_id and char_id == q) or (char_name and char_name == q_low):
+                _RESOLVED_CONN_CACHE[q] = cid
+                return cid
+    return ""
+
+
+def bridge_call(
+    method: str,
+    params: dict[str, Any] | None = None,
+    timeout: float = 15.0,
+    conn_id: str = "",
+) -> dict[str, Any]:
+    target_conn = _resolve_conn_selector((conn_id or _DEFAULT_CONN_ID).strip())
+    return _raw_post_call(method, params, timeout=timeout, conn_id=target_conn)
 
 
 def bridge_call_wait(
@@ -110,7 +145,7 @@ def main() -> None:
         "--client",
         dest="conn_id",
         default=argparse.SUPPRESS,
-        help="Optional target client conn_id (e.g. client-1) without switching active client",
+        help="Optional target client conn_id (e.g. client-1) or character name/UID without switching active client",
     )
 
     parser = argparse.ArgumentParser(description="Stellar AGY Bridge remote helper")
@@ -118,7 +153,7 @@ def main() -> None:
         "--client",
         dest="conn_id",
         default="",
-        help="Optional target client conn_id (e.g. client-1) without switching active client",
+        help="Optional target client conn_id (e.g. client-1) or character name/UID without switching active client",
     )
     _raw_sub = parser.add_subparsers(dest="cmd", required=True)
 

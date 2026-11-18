@@ -35,7 +35,8 @@ $skillDir = "$RemoteRoot/.agents/skills/stellar-bridge"
 $map = @(
     @{ Local = "GEMINI.md";      Remote = "$RemoteRoot/GEMINI.md" },
     @{ Local = "SKILL.md";       Remote = "$skillDir/SKILL.md" },
-    @{ Local = "bridge_cli.py";  Remote = "$skillDir/scripts/bridge_cli.py" }
+    @{ Local = "bridge_cli.py";  Remote = "$skillDir/scripts/bridge_cli.py" },
+    @{ Local = "bpsr_guard.py";  Remote = "$RemoteRoot/.agents/bpsr_guard.py" }
 )
 
 foreach ($m in $map) {
@@ -80,8 +81,8 @@ try {
         Write-Host "Updated $($m.Remote)  (backup: .bak_$stamp)"
     }
 
-    # 3. Syntax-check the CLI on the server
-    & ssh @sshOpts "${User}@${HostName}" "python3 -m py_compile '$skillDir/scripts/bridge_cli.py' && echo bridge_cli.py syntax OK"
+    # 3. Syntax-check the scripts on the server
+    & ssh @sshOpts "${User}@${HostName}" "python3 -m py_compile '$skillDir/scripts/bridge_cli.py' '$RemoteRoot/.agents/bpsr_guard.py' && echo 'bridge_cli.py & bpsr_guard.py syntax OK'"
 }
 finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

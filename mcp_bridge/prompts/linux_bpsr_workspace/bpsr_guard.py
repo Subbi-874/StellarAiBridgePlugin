@@ -3,12 +3,13 @@
 PreToolUse safety & search-cap guard for /home/subbi/bpsr.
 1. Caps search_web calls to MAX_WEB_SEARCHES (default 2) per conversationId so unsearchable topics never loop.
 2. Blocks all non-BPSR Linux system/file tools (blocks arbitrary shell commands, local file reads outside /home/subbi/bpsr/.agents/skills, file writes/edits, directory scans).
-3. Blocks run_command completely when handling passive in-game chat triggers (<current_trigger_message>).
+3. Allows bridge_cli.py for authorized commanders (명령권한=있음) while blocking non-commanders (명령권한=없음) and direct send-chat/send-sticker calls during <current_trigger_message>.
 """
 import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import sys
 import time
@@ -107,6 +108,48 @@ def _is_allowed_bridge_command(cmd_line: str) -> bool:
         return False
 
 
+def _is_non_commander_trigger(last_input: str) -> bool:
+    if "<current_trigger_message>" not in last_input:
+        return False
+    tail = last_input.split("</recent_chat_history>", 1)[-1]
+    m = re.search(
+        r"<current_trigger_message>\s*\r?\n발신자:[^\r\n]*,\s*명령권한=(있음|없음)\)",
+        tail,
+    )
+    return m is None or m.group(1) != "있음"
+
+
+def _is_direct_chat_send_subcommand(cmd_line: str) -> bool:
+    try:
+        tokens = shlex.split((cmd_line or "").strip())
+    except ValueError:
+        return True
+    if len(tokens) < 3:
+        return False
+    pos: list[str] = []
+    i = 2
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--client":
+            i += 2
+            continue
+        if tok.startswith("--client="):
+            i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        pos.append(tok.lower())
+        i += 1
+    if not pos:
+        return False
+    if pos[0] in ("send-chat", "send-sticker"):
+        return True
+    if pos[0] == "call" and len(pos) >= 2 and pos[1] in ("send_chat", "send_sticker"):
+        return True
+    return False
+
+
 def main() -> None:
     try:
         raw = sys.stdin.read()
@@ -163,20 +206,27 @@ def main() -> None:
         return
 
     if tname == "run_command":
-        if is_ingame_chat_trigger:
+        cmd_line = str(args.get("CommandLine") or args.get("command") or "")
+        if not _is_allowed_bridge_command(cmd_line):
             _deny(
-                "인게임 채팅 자동응답 모드(<current_trigger_message>)에서는 시스템 명령어나 브릿지 CLI를 직접 실행할 수 없습니다. "
-                "지정된 {\"reply_text\": \"...\", \"actions\": [...]} JSON 객체만 출력하세요."
+                "보안 정책상 블루 프로토콜 브릿지 스크립트(python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py ...) "
+                "외의 일반 리눅스 시스템·파일 명령어는 실행할 수 없습니다."
             )
             return
-        cmd_line = str(args.get("CommandLine") or args.get("command") or "")
-        if _is_allowed_bridge_command(cmd_line):
-            _allow()
-            return
-        _deny(
-            "보안 정책상 블루 프로토콜 브릿지 스크립트(python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py ...) "
-            "외의 일반 리눅스 시스템·파일 명령어는 실행할 수 없습니다."
-        )
+        if is_ingame_chat_trigger:
+            if _is_non_commander_trigger(last_input):
+                _deny(
+                    "권한 없는 발신자(명령권한=없음)의 인게임 채팅 요청에서는 bridge_cli.py를 실행할 수 없습니다. "
+                    "actions는 []로 두고 거절 답변만 출력하세요."
+                )
+                return
+            if _is_direct_chat_send_subcommand(cmd_line):
+                _deny(
+                    "인게임 채팅 자동응답 모드에서는 send-chat/send-sticker를 CLI로 직접 호출하지 마세요. "
+                    "최종 JSON의 reply_text와 sticker 필드로 자동 전송됩니다."
+                )
+                return
+        _allow()
         return
 
     _deny(f"도구 '{tname}'는 블루 프로토콜 전용 에이전트 보안 정책에 의해 차단되어 있습니다.")
