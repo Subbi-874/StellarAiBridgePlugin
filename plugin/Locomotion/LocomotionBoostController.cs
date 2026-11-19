@@ -187,7 +187,8 @@ public sealed class LocomotionBoostController
                 PathNavigator.IsWallAhead,
                 PathNavigator.IsClimbableStepAhead,
                 PathNavigator.IsDetouring,
-                PathNavigator.IsCliffAhead);
+                PathNavigator.IsCliffAhead,
+                PathNavigator.IsDropVaultAhead);
         }
         else
         {
@@ -256,7 +257,8 @@ public sealed class LocomotionBoostController
         bool wallAhead = false,
         bool stepAhead = false,
         bool isDetouring = false,
-        bool cliffAhead = false)
+        bool cliffAhead = false,
+        bool dropVaultAhead = false)
     {
         EnsureResolved();
         TickPendingReleases(dt);
@@ -314,6 +316,30 @@ public sealed class LocomotionBoostController
             _progressWindowTimer = 0f;
             _sidestepFlipTimer = 0f;
             _activeBoostMode = "detour_run";
+            return _activeBoostMode;
+        }
+
+        // Priority Gate C.5: Controlled drop-vault over a verified low railing/rim onto lower safe ground
+        if (dropVaultAhead)
+        {
+            _jumpTriggerTimer = 0f;
+            _rapidJumpActiveTimer = 0f;
+            _stuckCounter = 0;
+            _hasProgressAnchor = false;
+            _progressWindowTimer = 0f;
+
+            if (_config.EnableObstacleJump
+                && HasStaminaForBoost()
+                && _rapidJumpPulseCooldown <= 0f
+                && !_jumpHeld
+                && InvokeJump(true))
+            {
+                _jumpHeld = true;
+                _jumpReleaseTimer = 0.08f;
+                _rapidJumpPulseCooldown = 0.55f;
+            }
+
+            _activeBoostMode = "jump_drop_vault";
             return _activeBoostMode;
         }
 

@@ -93,7 +93,10 @@ public sealed class SmartPathNavigator
         _services = services;
         _config = config;
         _sensor = sensor;
-        _localAStar = new LocalPhysicsPathfinder(services, sensor);
+        _localAStar = new LocalPhysicsPathfinder(services, sensor)
+        {
+            MaxSafeDropHeight = Math.Clamp(_config.MaxSafeDropHeight, 2.5f, 12.0f)
+        };
     }
 
     public string ActiveNavMode { get; private set; } = "direct";
@@ -101,6 +104,7 @@ public sealed class SmartPathNavigator
     public bool IsClimbableStepAhead { get; private set; }
     public bool IsDetouring { get; private set; }
     public bool IsCliffAhead { get; private set; }
+    public bool IsDropVaultAhead { get; private set; }
     public bool HasIntermediateWaypoint { get; private set; }
 
     public void Reset()
@@ -132,6 +136,7 @@ public sealed class SmartPathNavigator
         IsClimbableStepAhead = false;
         IsDetouring = false;
         IsCliffAhead = false;
+        IsDropVaultAhead = false;
         HasIntermediateWaypoint = false;
         ActiveNavMode = "direct";
 
@@ -150,16 +155,21 @@ public sealed class SmartPathNavigator
         long targetKey = 0L,
         bool allowLedgeClimb = false)
     {
+        IsDropVaultAhead = false;
+
         if (!_config.EnableSmartPathfinding)
         {
             IsWallAhead = false;
             IsClimbableStepAhead = false;
             IsDetouring = false;
             IsCliffAhead = false;
+            IsDropVaultAhead = false;
             HasIntermediateWaypoint = false;
             ActiveNavMode = "direct";
             return goalPos;
         }
+
+        _localAStar.MaxSafeDropHeight = Math.Clamp(_config.MaxSafeDropHeight, 2.5f, 12.0f);
 
         if (allowLedgeClimb && !_detourActive)
         {
@@ -176,6 +186,7 @@ public sealed class SmartPathNavigator
                 IsClimbableStepAhead = false;
                 IsDetouring = false;
                 IsCliffAhead = false;
+                IsDropVaultAhead = false;
                 HasIntermediateWaypoint = false;
                 ActiveNavMode = "ledge_climb";
                 return goalPos;
@@ -186,7 +197,16 @@ public sealed class SmartPathNavigator
             _repathCooldown -= dt;
 
         // Layer 1 (AutoGather NavMesh) -> Layer 1.5 (Real-time 2.5D Physics A*)
-        Vector3 desiredPt = ResolveDesiredWaypoint(dt, sceneId, localPos, goalPos, targetKey, out bool usingCorridor, out string? corridorLabel);
+        Vector3 desiredPt = ResolveDesiredWaypoint(
+            dt,
+            sceneId,
+            localPos,
+            goalPos,
+            targetKey,
+            out bool usingCorridor,
+            out string? corridorLabel,
+            out bool isDropOffStep,
+            out bool isDropOffVault);
 
         Vector3 toDesired = desiredPt - localPos;
         toDesired.y = 0f;
@@ -196,6 +216,7 @@ public sealed class SmartPathNavigator
             IsClimbableStepAhead = false;
             IsDetouring = false;
             IsCliffAhead = false;
+            IsDropVaultAhead = false;
             HasIntermediateWaypoint = false;
             ActiveNavMode = usingCorridor ? (corridorLabel ?? $"navmesh({_wpIndex + 1}/{_waypoints.Count})") : "direct";
             return goalPos;
@@ -207,7 +228,17 @@ public sealed class SmartPathNavigator
         // Layer 2: Real-time 3D multi-whisker physics probes + committed wall-following
         if (_sensor.IsReady)
         {
-            return ComputePhysicsSteer(dt, localPos, desiredPt, wantDir, distToDesired, usingCorridor, corridorLabel);
+            return ComputePhysicsSteer(
+                dt,
+                localPos,
+                desiredPt,
+                goalPos,
+                wantDir,
+                distToDesired,
+                usingCorridor,
+                corridorLabel,
+                isDropOffStep,
+                isDropOffVault);
         }
 
         return ComputeBlindFallbackSteer(dt, localPos, desiredPt, wantDir, usingCorridor, corridorLabel);
@@ -232,7 +263,89 @@ public sealed class SmartPathNavigator
         _avoidAnchorPos = Vector3.zero;
     }
 
-    private float ProbeCorridorClearance(Vector3 localPos, Vector3 dir, float maxDist, float radius, bool checkGround)
+    private bool HasSafeGroundAt(Vector3 samplePos, float refY, bool allowSafeDrop, float maxDropDepth)
+    {
+        return _sensor.HasGroundNear(samplePos)
+            || (allowSafeDrop && _sensor.TrySampleSafeDropGround(samplePos.x, refY, samplePos.z, maxDropDepth, out _));
+    }
+
+    private bool ShouldAllowSafeDrop(
+        Vector3 localPos,
+        Vector3 desiredPt,
+        Vector3 goalPos,
+        bool isDropOffStep,
+        out float maxDropDepth)
+    {
+        float cfgMax = Math.Clamp(_config.MaxSafeDropHeight, 2.5f, 12.0f);
+        if (isDropOffStep)
+        {
+            maxDropDepth = Math.Clamp((localPos.y - desiredPt.y) + 2.0f, 3.8f, cfgMax);
+            return true;
+        }
+
+        float goalDrop = localPos.y - goalPos.y;
+        if (goalDrop >= 1.20f && goalDrop <= cfgMax + 1.5f)
+        {
+            maxDropDepth = Math.Clamp(goalDrop + 2.5f, 3.8f, cfgMax);
+            return true;
+        }
+
+        float desiredDrop = localPos.y - desiredPt.y;
+        if (desiredDrop >= 1.20f && desiredDrop <= cfgMax + 1.5f)
+        {
+            maxDropDepth = Math.Clamp(desiredDrop + 2.5f, 3.8f, cfgMax);
+            return true;
+        }
+
+        if (_localAStar.LastSearchExhaustedSmallIsland || _cornerEscapeStage >= 2)
+        {
+            maxDropDepth = cfgMax;
+            return true;
+        }
+
+        maxDropDepth = 3.8f;
+        return false;
+    }
+
+    private bool CanVaultDropAhead(Vector3 localPos, Vector3 dir, float distToDesired, float maxDropDepth)
+    {
+        if (!_sensor.IsReady || dir.sqrMagnitude < 1e-4f)
+            return false;
+
+        float wallDist = Math.Clamp(distToDesired, 1.35f, 2.2f);
+        if (_sensor.IsTallWallAhead(localPos, dir, wallDist))
+            return false;
+
+        float clearDist = MathF.Min(wallDist, 2.2f);
+        Vector3 chestFrom = new(localPos.x, localPos.y + 1.40f, localPos.z);
+        if (_sensor.ProbeClearDistance(chestFrom, dir, clearDist, 0.32f, ignoreStep: true) < clearDist - 0.08f)
+            return false;
+
+        Vector3 headFrom = new(localPos.x, localPos.y + 1.95f, localPos.z);
+        if (_sensor.ProbeClearDistance(headFrom, dir, clearDist, 0.30f, ignoreStep: true) < clearDist - 0.08f)
+            return false;
+
+        float[] sampleSteps = { 1.25f, 1.85f, 2.35f };
+        foreach (float step in sampleSteps)
+        {
+            Vector3 p = localPos + dir * step;
+            if (_sensor.TrySampleSafeDropGround(p.x, localPos.y, p.z, maxDropDepth, out float gy)
+                && _sensor.CanDropOff3D(localPos, new Vector3(p.x, gy, p.z), 0.32f, out _))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private float ProbeCorridorClearance(
+        Vector3 localPos,
+        Vector3 dir,
+        float maxDist,
+        float radius,
+        bool checkGround,
+        bool allowSafeDrop = false,
+        float maxDropDepth = 3.8f)
     {
         Vector3 waistFrom = new(localPos.x, localPos.y + 0.65f, localPos.z);
         Vector3 chestFrom = new(localPos.x, localPos.y + 1.30f, localPos.z);
@@ -241,11 +354,11 @@ public sealed class SmartPathNavigator
         float clear = MathF.Min(waist, chest);
         if (checkGround && clear >= 0.9f)
         {
-            if (!_sensor.HasGroundNear(localPos + dir * MathF.Min(clear, 1.15f)))
+            if (!HasSafeGroundAt(localPos + dir * MathF.Min(clear, 1.15f), localPos.y, allowSafeDrop, maxDropDepth))
                 return 0f;
-            if (clear >= 2.2f && !_sensor.HasGroundNear(localPos + dir * 2.2f))
+            if (clear >= 2.2f && !HasSafeGroundAt(localPos + dir * 2.2f, localPos.y, allowSafeDrop, maxDropDepth))
                 return 0.90f;
-            if (clear >= 3.6f && !_sensor.HasGroundNear(localPos + dir * 3.6f))
+            if (clear >= 3.6f && !HasSafeGroundAt(localPos + dir * 3.6f, localPos.y, allowSafeDrop, maxDropDepth))
                 return MathF.Min(clear, 1.95f);
         }
         return clear;
@@ -267,7 +380,12 @@ public sealed class SmartPathNavigator
         return false;
     }
 
-    private Vector3 ApplyRimHoldIfNeeded(Vector3 localPos, Vector3 chosenTarget, bool localGrounded)
+    private Vector3 ApplyRimHoldIfNeeded(
+        Vector3 localPos,
+        Vector3 chosenTarget,
+        bool localGrounded,
+        bool allowSafeDrop = false,
+        float maxDropDepth = 3.8f)
     {
         if (!localGrounded || !_sensor.IsReady)
             return chosenTarget;
@@ -277,11 +395,12 @@ public sealed class SmartPathNavigator
         if (outDir.sqrMagnitude > 1e-4f)
         {
             Vector3 flatDir = outDir.normalized;
-            if (!_sensor.HasGroundNear(localPos + flatDir * 1.20f))
+            if (!HasSafeGroundAt(localPos + flatDir * 1.20f, localPos.y, allowSafeDrop, maxDropDepth))
             {
                 IsCliffAhead = true;
                 IsWallAhead = true;
                 IsClimbableStepAhead = false;
+                IsDropVaultAhead = false;
                 ActiveNavMode = "cliff_hold";
                 return localPos;
             }
@@ -293,11 +412,17 @@ public sealed class SmartPathNavigator
         float dt,
         Vector3 localPos,
         Vector3 desiredPt,
+        Vector3 goalPos,
         Vector3 wantDir,
         float distToDesired,
         bool usingCorridor,
-        string? corridorLabel)
+        string? corridorLabel,
+        bool isDropOffStep,
+        bool isDropOffVault)
     {
+        IsDropVaultAhead = false;
+        bool allowSafeDrop = ShouldAllowSafeDrop(localPos, desiredPt, goalPos, isDropOffStep, out float maxDropDepth);
+
         float stepMoved = _hasLastLocalPos ? HorizontalDist(localPos, _lastLocalPos) : 0f;
         if (stepMoved > 4.5f)
             stepMoved = 0f;
@@ -318,8 +443,8 @@ public sealed class SmartPathNavigator
         // Active corner-pocket escape hold: keep driving out along escape heading without U-turning back in
         if (_escapeHoldTimer > 0f && _travelHeading.sqrMagnitude > 0.25f)
         {
-            if (ProbeCorridorClearance(localPos, _travelHeading, 1.6f, 0.34f, localGrounded) < 1.15f)
-                _travelHeading = PickBest360Heading(localPos, _travelHeading, wantDir, localGrounded, preferForward: false);
+            if (ProbeCorridorClearance(localPos, _travelHeading, 1.6f, 0.34f, localGrounded, allowSafeDrop, maxDropDepth) < 1.15f)
+                _travelHeading = PickBest360Heading(localPos, _travelHeading, wantDir, localGrounded, preferForward: false, allowSafeDrop, maxDropDepth);
 
             _committedSteerDir = _committedSteerDir.sqrMagnitude > 0.25f
                 ? Vector3.Slerp(_committedSteerDir, _travelHeading, Math.Clamp(dt * 14f, 0.25f, 1f)).normalized
@@ -331,11 +456,11 @@ public sealed class SmartPathNavigator
             IsWallAhead = true;
             IsClimbableStepAhead = false;
             ActiveNavMode = $"corner_escape(stage{_cornerEscapeStage})";
-            return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.5f, localGrounded);
+            return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.5f, localGrounded, allowSafeDrop, maxDropDepth);
         }
 
         float probeDist = Math.Clamp(distToDesired, 1.45f, 5.2f);
-        float directClear = ProbeCorridorClearance(localPos, wantDir, probeDist, 0.40f, localGrounded);
+        float directClear = ProbeCorridorClearance(localPos, wantDir, probeDist, 0.40f, localGrounded, allowSafeDrop, maxDropDepth);
         bool primaryBlocked = directClear < probeDist - 0.08f;
         if (!primaryBlocked && (desiredPt.y - localPos.y) >= 1.35f)
         {
@@ -345,9 +470,23 @@ public sealed class SmartPathNavigator
                 primaryBlocked = true;
         }
 
+        if (allowSafeDrop
+            && (isDropOffVault || (primaryBlocked && CanVaultDropAhead(localPos, wantDir, distToDesired, maxDropDepth)))
+            && !_sensor.IsTallWallAhead(localPos, wantDir, Math.Clamp(distToDesired, 1.35f, 2.2f)))
+        {
+            ClearDetourState();
+            IsDetouring = false;
+            IsWallAhead = false;
+            IsClimbableStepAhead = true;
+            IsDropVaultAhead = true;
+            IsCliffAhead = true;
+            ActiveNavMode = isDropOffStep ? "local_astar+drop_vault" : "drop_vault";
+            return distToDesired >= 1.8f ? desiredPt : (localPos + wantDir * 2.2f);
+        }
+
         if (_detourActive)
         {
-            if (!CanExitDetourToDirect(localPos, desiredPt, wantDir, distToDesired, primaryBlocked, localGrounded))
+            if (!CanExitDetourToDirect(localPos, desiredPt, wantDir, distToDesired, primaryBlocked, localGrounded, allowSafeDrop, maxDropDepth))
             {
                 primaryBlocked = true;
             }
@@ -365,7 +504,7 @@ public sealed class SmartPathNavigator
                     if (clearDir.sqrMagnitude < 1e-4f)
                         clearDir = wantDir;
                     ActiveNavMode = "clearing_corner";
-                    return ApplyRimHoldIfNeeded(localPos, localPos + clearDir * 5.0f, localGrounded);
+                    return ApplyRimHoldIfNeeded(localPos, localPos + clearDir * 5.0f, localGrounded, allowSafeDrop, maxDropDepth);
                 }
 
                 ClearDetourState();
@@ -382,10 +521,12 @@ public sealed class SmartPathNavigator
             IsDetouring = false;
             IsClimbableStepAhead = lowBlocked;
             IsWallAhead = false;
-            ActiveNavMode = usingCorridor
-                ? (corridorLabel ?? $"navmesh({_wpIndex + 1}/{_waypoints.Count})")
-                : (lowBlocked ? "step_up" : "direct");
-            return ApplyRimHoldIfNeeded(localPos, desiredPt, localGrounded);
+            ActiveNavMode = isDropOffStep
+                ? $"{corridorLabel ?? "local_astar"}+drop"
+                : (usingCorridor
+                    ? (corridorLabel ?? $"navmesh({_wpIndex + 1}/{_waypoints.Count})")
+                    : (lowBlocked ? "step_up" : "direct"));
+            return ApplyRimHoldIfNeeded(localPos, desiredPt, localGrounded, allowSafeDrop, maxDropDepth);
         }
 
         // Obstacle blocks direct vector -> World-space Tangent-Bug / Hand-on-Wall corridor following
@@ -405,19 +546,19 @@ public sealed class SmartPathNavigator
             _avoidSampleTimer = 0f;
             _hasAvoidAnchor = false;
             _cornerEscapeStage = 0;
-            _travelHeading = PickInitialDetourHeading(localPos, wantDir, localGrounded, out _wallSide);
+            _travelHeading = PickInitialDetourHeading(localPos, wantDir, localGrounded, allowSafeDrop, maxDropDepth, out _wallSide);
             _committedSteerDir = _travelHeading;
         }
         else
         {
-            UpdateAvoidanceProgress(dt, localPos, wantDir, localGrounded);
+            UpdateAvoidanceProgress(dt, localPos, wantDir, localGrounded, allowSafeDrop, maxDropDepth);
             if (_escapeHoldTimer > 0f && _committedSteerDir.sqrMagnitude > 0.25f)
             {
                 ActiveNavMode = $"corner_escape(stage{_cornerEscapeStage})";
-                return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.5f, localGrounded);
+                return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.5f, localGrounded, allowSafeDrop, maxDropDepth);
             }
 
-            _travelHeading = StepCorridorHeading(localPos, wantDir, localGrounded);
+            _travelHeading = StepCorridorHeading(localPos, wantDir, localGrounded, allowSafeDrop, maxDropDepth);
         }
 
         _committedSteerDir = _committedSteerDir.sqrMagnitude > 0.25f
@@ -431,7 +572,7 @@ public sealed class SmartPathNavigator
         ActiveNavMode = usingCorridor
             ? $"{corridorPrefix}({relYaw:+0;-0}deg,{_travelledPathMeters:F1}m)"
             : $"wall_follow({relYaw:+0;-0}deg,{_travelledPathMeters:F1}m)";
-        return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.0f, localGrounded);
+        return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.0f, localGrounded, allowSafeDrop, maxDropDepth);
     }
 
     private bool CanExitDetourToDirect(
@@ -440,7 +581,9 @@ public sealed class SmartPathNavigator
         Vector3 wantDir,
         float distToDesired,
         bool primaryBlocked,
-        bool localGrounded)
+        bool localGrounded,
+        bool allowSafeDrop,
+        float maxDropDepth)
     {
         if (primaryBlocked)
             return false;
@@ -460,7 +603,7 @@ public sealed class SmartPathNavigator
 
         if (distToDesired <= 6.8f
             && MathF.Abs(desiredPt.y - localPos.y) <= 1.65f
-            && ProbeCorridorClearance(localPos, wantDir, distToDesired, 0.44f, localGrounded) >= distToDesired - 0.15f)
+            && ProbeCorridorClearance(localPos, wantDir, distToDesired, 0.44f, localGrounded, allowSafeDrop, maxDropDepth) >= distToDesired - 0.15f)
         {
             return true;
         }
@@ -494,7 +637,13 @@ public sealed class SmartPathNavigator
         return true;
     }
 
-    private Vector3 PickInitialDetourHeading(Vector3 localPos, Vector3 wantDir, bool checkGround, out int wallSide)
+    private Vector3 PickInitialDetourHeading(
+        Vector3 localPos,
+        Vector3 wantDir,
+        bool checkGround,
+        bool allowSafeDrop,
+        float maxDropDepth,
+        out int wallSide)
     {
         float maxClear = 0f;
         float clearPlus135 = 0f;
@@ -504,7 +653,7 @@ public sealed class SmartPathNavigator
         {
             float yaw = All360Offsets[i];
             Vector3 dir = RotateY(wantDir, yaw);
-            float clear = ProbeCorridorClearance(localPos, dir, 7.5f, 0.34f, checkGround);
+            float clear = ProbeCorridorClearance(localPos, dir, 7.5f, 0.34f, checkGround, allowSafeDrop, maxDropDepth);
             _allDirs[i] = dir;
             _allClear[i] = clear;
             if (clear > maxClear)
@@ -562,17 +711,22 @@ public sealed class SmartPathNavigator
         return bestDir.sqrMagnitude > 1e-4f ? bestDir.normalized : -wantDir;
     }
 
-    private Vector3 StepCorridorHeading(Vector3 localPos, Vector3 wantDir, bool checkGround)
+    private Vector3 StepCorridorHeading(
+        Vector3 localPos,
+        Vector3 wantDir,
+        bool checkGround,
+        bool allowSafeDrop,
+        float maxDropDepth)
     {
         if (_travelHeading.sqrMagnitude < 0.25f)
-            return PickInitialDetourHeading(localPos, wantDir, checkGround, out _wallSide);
+            return PickInitialDetourHeading(localPos, wantDir, checkGround, allowSafeDrop, maxDropDepth, out _wallSide);
 
         float maxForwardClear = 0f;
         int maxIdx = 4; // 0 deg
         for (int i = 0; i < ForwardOffsets.Length; i++)
         {
             Vector3 candDir = RotateY(_travelHeading, ForwardOffsets[i]);
-            float clear = ProbeCorridorClearance(localPos, candDir, 6.8f, 0.34f, checkGround);
+            float clear = ProbeCorridorClearance(localPos, candDir, 6.8f, 0.34f, checkGround, allowSafeDrop, maxDropDepth);
             _fwdDirs[i] = candDir;
             _fwdClear[i] = clear;
             if (clear > maxForwardClear)
@@ -588,7 +742,7 @@ public sealed class SmartPathNavigator
             _wallSide = -(_wallSide != 0 ? _wallSide : 1);
             _detourCommitTimer = 0.90f;
             _avoidStuckTimer = 0f;
-            return PickBest360Heading(localPos, -_travelHeading, wantDir, checkGround, preferForward: true);
+            return PickBest360Heading(localPos, -_travelHeading, wantDir, checkGround, preferForward: true, allowSafeDrop, maxDropDepth);
         }
 
         int innerSign = -(_wallSide != 0 ? _wallSide : 1);
@@ -644,7 +798,14 @@ public sealed class SmartPathNavigator
         return fallback.sqrMagnitude > 1e-4f ? fallback.normalized : _travelHeading;
     }
 
-    private Vector3 PickBest360Heading(Vector3 localPos, Vector3 baseDir, Vector3 wantDir, bool checkGround, bool preferForward)
+    private Vector3 PickBest360Heading(
+        Vector3 localPos,
+        Vector3 baseDir,
+        Vector3 wantDir,
+        bool checkGround,
+        bool preferForward,
+        bool allowSafeDrop,
+        float maxDropDepth)
     {
         Vector3 refDir = baseDir.sqrMagnitude > 1e-4f ? baseDir.normalized : wantDir;
         float maxClear = 0f;
@@ -653,7 +814,7 @@ public sealed class SmartPathNavigator
         for (int i = 0; i < All360Offsets.Length; i++)
         {
             Vector3 dir = RotateY(refDir, All360Offsets[i]);
-            float clear = ProbeCorridorClearance(localPos, dir, 7.5f, 0.34f, checkGround);
+            float clear = ProbeCorridorClearance(localPos, dir, 7.5f, 0.34f, checkGround, allowSafeDrop, maxDropDepth);
             _allDirs[i] = dir;
             _allClear[i] = clear;
             if (clear > maxClear)
@@ -689,7 +850,13 @@ public sealed class SmartPathNavigator
         return bestDir.sqrMagnitude > 1e-4f ? bestDir.normalized : refDir;
     }
 
-    private Vector3 PickUnstuckHeading(Vector3 localPos, Vector3 currentHeading, float excludeHalfAngle, bool checkGround)
+    private Vector3 PickUnstuckHeading(
+        Vector3 localPos,
+        Vector3 currentHeading,
+        float excludeHalfAngle,
+        bool checkGround,
+        bool allowSafeDrop,
+        float maxDropDepth)
     {
         Vector3 refDir = currentHeading.sqrMagnitude > 1e-4f ? currentHeading.normalized : Vector3.forward;
         float bestSideScore = float.NegativeInfinity;
@@ -701,7 +868,7 @@ public sealed class SmartPathNavigator
         {
             float offset = All360Offsets[i];
             Vector3 dir = RotateY(refDir, offset);
-            float clear = ProbeCorridorClearance(localPos, dir, 6.5f, 0.34f, checkGround);
+            float clear = ProbeCorridorClearance(localPos, dir, 6.5f, 0.34f, checkGround, allowSafeDrop, maxDropDepth);
             float score = clear + (MathF.Abs(offset) < 135f ? 0.25f : 0f);
 
             if (score > bestAnyScore)
@@ -721,7 +888,13 @@ public sealed class SmartPathNavigator
         return chosen.sqrMagnitude > 1e-4f ? chosen.normalized : -refDir;
     }
 
-    private void UpdateAvoidanceProgress(float dt, Vector3 localPos, Vector3 wantDir, bool checkGround)
+    private void UpdateAvoidanceProgress(
+        float dt,
+        Vector3 localPos,
+        Vector3 wantDir,
+        bool checkGround,
+        bool allowSafeDrop,
+        float maxDropDepth)
     {
         if (!_hasAvoidAnchor)
         {
@@ -745,7 +918,7 @@ public sealed class SmartPathNavigator
             if (_avoidStuckTimer >= 0.90f && _cornerEscapeStage == 0)
             {
                 _cornerEscapeStage = 1;
-                _travelHeading = PickUnstuckHeading(localPos, _travelHeading, excludeHalfAngle: 45f, checkGround);
+                _travelHeading = PickUnstuckHeading(localPos, _travelHeading, excludeHalfAngle: 45f, checkGround, allowSafeDrop, maxDropDepth);
                 _committedSteerDir = _travelHeading;
                 _escapeHoldTimer = 0.95f;
                 _detourCommitTimer = 0.95f;
@@ -754,7 +927,7 @@ public sealed class SmartPathNavigator
             {
                 _cornerEscapeStage = 2;
                 _wallSide = -(_wallSide != 0 ? _wallSide : 1);
-                _travelHeading = PickBest360Heading(localPos, -_travelHeading, wantDir, checkGround, preferForward: true);
+                _travelHeading = PickBest360Heading(localPos, -_travelHeading, wantDir, checkGround, preferForward: true, allowSafeDrop, maxDropDepth);
                 _committedSteerDir = _travelHeading;
                 _escapeHoldTimer = 1.35f;
                 _detourCommitTimer = 1.35f;
@@ -779,6 +952,7 @@ public sealed class SmartPathNavigator
     {
         IsWallAhead = false;
         IsClimbableStepAhead = false;
+        IsDropVaultAhead = false;
 
         if (_blindArcTimer > 0f)
         {
@@ -827,10 +1001,14 @@ public sealed class SmartPathNavigator
         Vector3 goalPos,
         long targetKey,
         out bool usingCorridor,
-        out string? corridorLabel)
+        out string? corridorLabel,
+        out bool isDropOffStep,
+        out bool isDropOffVault)
     {
         usingCorridor = false;
         corridorLabel = null;
+        isDropOffStep = false;
+        isDropOffVault = false;
 
         if (sceneId > 0 && sceneId != _lastNavSceneId)
         {
@@ -852,6 +1030,19 @@ public sealed class SmartPathNavigator
 
         if (TryResolveNavMeshWaypoint(dt, sceneId, localPos, goalPos, targetKey, out Vector3 navWp))
         {
+            if (_sensor.IsReady && (localPos.y - navWp.y) >= 1.60f)
+            {
+                Vector3 astarGoal = distToGoal <= 28.0f ? goalPos : navWp;
+                if (TryResolveLocalAStarWaypoint(dt, localPos, astarGoal, targetKey, distToGoal, localPos.y - navWp.y, out Vector3 astarOffNavWp, out string? offNavLabel))
+                {
+                    usingCorridor = true;
+                    corridorLabel = offNavLabel;
+                    isDropOffStep = _localAStar.ActiveSegmentIsDropOff;
+                    isDropOffVault = _localAStar.ActiveSegmentRequiresVault;
+                    return astarOffNavWp;
+                }
+            }
+
             usingCorridor = true;
             HasIntermediateWaypoint = _wpIndex < _waypoints.Count - 1;
             return navWp;
@@ -862,6 +1053,8 @@ public sealed class SmartPathNavigator
         {
             usingCorridor = true;
             corridorLabel = astarLabel;
+            isDropOffStep = _localAStar.ActiveSegmentIsDropOff;
+            isDropOffVault = _localAStar.ActiveSegmentRequiresVault;
             return astarWp;
         }
 

@@ -22,4 +22,15 @@ public interface IPhysicsWalkabilityProbe
     bool IsBlocked(Vector3 from, Vector3 to, float radius, bool ignoreStep = true);
 
     bool CanStep3D(Vector3 fromFloor, Vector3 toFloor, float bodyRadius = 0.36f);
+
+    bool TrySampleSafeDropGround(
+        float x,
+        float refY,
+        float z,
+        float maxDropDepth,
+        out float groundY,
+        float minDropDepth = 0.85f,
+        float radius = 0.24f);
+
+    bool CanDropOff3D(Vector3 fromFloor, Vector3 toFloor, float bodyRadius, out bool requiresVault);
 }

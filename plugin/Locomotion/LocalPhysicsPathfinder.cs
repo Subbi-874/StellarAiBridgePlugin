@@ -30,6 +30,20 @@ public sealed class LocalPhysicsPathfinder
         }
     }
 
+    private readonly struct PathPoint
+    {
+        public readonly Vector3 Pos;
+        public readonly bool IsDropOff;
+        public readonly bool RequiresVault;
+
+        public PathPoint(Vector3 pos, bool isDropOff = false, bool requiresVault = false)
+        {
+            Pos = pos;
+            IsDropOff = isDropOff;
+            RequiresVault = requiresVault;
+        }
+    }
+
     private sealed class GridNode
     {
         public long Key;
@@ -44,6 +58,8 @@ public sealed class LocalPhysicsPathfinder
         public int ParentIndex;
         public int Depth;
         public bool Closed;
+        public bool ViaDropOff;
+        public bool ViaDropVault;
     }
 
     private static readonly Offset2D[] CardinalOffsets =
@@ -73,9 +89,10 @@ public sealed class LocalPhysicsPathfinder
     public float MaxSearchSpan { get; set; } = 75.0f;
     public float SearchMargin { get; set; } = 18.0f;
     public float MinStartRadius { get; set; } = 24.0f;
+    public float MaxSafeDropHeight { get; set; } = 8.5f;
 
     // Active double-buffered path state
-    private readonly List<Vector3> _activeWaypoints = new(32);
+    private readonly List<PathPoint> _activeWaypoints = new(32);
     private int _activeIndex;
     private long _activeTargetKey;
     private Vector3 _activeGoal;
@@ -104,6 +121,8 @@ public sealed class LocalPhysicsPathfinder
     private readonly PriorityQueue<int, float> _open = new(256);
     private readonly Dictionary<long, float> _groundCache = new(1024);
     private readonly HashSet<long> _noGroundCache = new(512);
+    private readonly Dictionary<long, float> _dropGroundCache = new(512);
+    private readonly HashSet<long> _noDropGroundCache = new(256);
     private readonly Dictionary<long, float> _blockedUntilTime = new(64);
     private readonly bool[] _cardinalOk = new bool[4];
 
@@ -115,6 +134,9 @@ public sealed class LocalPhysicsPathfinder
 
     public bool HasActivePath => _activeWaypoints.Count > 0 && _activeIndex < _activeWaypoints.Count;
     public bool IsSearching => _searchInProgress;
+    public bool LastSearchExhaustedSmallIsland { get; private set; }
+    public bool ActiveSegmentIsDropOff => HasActivePath && _activeWaypoints[_activeIndex].IsDropOff;
+    public bool ActiveSegmentRequiresVault => HasActivePath && _activeWaypoints[_activeIndex].RequiresVault;
     public int ActiveWaypointIndex => _activeIndex;
     public int ActiveWaypointCount => _activeWaypoints.Count;
 
@@ -128,6 +150,7 @@ public sealed class LocalPhysicsPathfinder
         _wpStuckTimer = 0f;
         _bestWpDist = float.MaxValue;
         _activeDiag = "";
+        LastSearchExhaustedSmallIsland = false;
 
         ClearSearchState();
         _blockedUntilTime.Clear();
@@ -142,6 +165,8 @@ public sealed class LocalPhysicsPathfinder
         _open.Clear();
         _groundCache.Clear();
         _noGroundCache.Clear();
+        _dropGroundCache.Clear();
+        _noDropGroundCache.Clear();
         _expandedCount = 0;
         _bestClosedFallbackIdx = -1;
         _bestClosedFallbackH = float.MaxValue;
@@ -178,6 +203,7 @@ public sealed class LocalPhysicsPathfinder
             _activeIsPartial = false;
             _wpStuckTimer = 0f;
             _bestWpDist = float.MaxValue;
+            LastSearchExhaustedSmallIsland = false;
             ClearSearchState();
             _searchCooldown = 0f;
         }
@@ -195,7 +221,7 @@ public sealed class LocalPhysicsPathfinder
         bool needFrontierExtension = _activeIsPartial
             && HasActivePath
             && (_activeIndex >= _activeWaypoints.Count - 2
-                || HorizontalDist(localPos, _activeWaypoints[^1]) <= 6.0f);
+                || HorizontalDist(localPos, _activeWaypoints[^1].Pos) <= 6.0f);
 
         if (!_searchInProgress && _searchCooldown <= 0f && (!HasActivePath || goalShifted || needFrontierExtension))
         {
@@ -210,9 +236,12 @@ public sealed class LocalPhysicsPathfinder
         }
 
         if (!HasActivePath)
+        {
+            diagNote = _activeDiag;
             return false;
+        }
 
-        waypoint = _activeWaypoints[_activeIndex];
+        waypoint = _activeWaypoints[_activeIndex].Pos;
         isIntermediate = _activeIndex < _activeWaypoints.Count - 1;
         diagNote = _activeDiag;
         return true;
@@ -222,17 +251,18 @@ public sealed class LocalPhysicsPathfinder
     {
         while (_activeIndex < _activeWaypoints.Count - 1)
         {
-            Vector3 wp = _activeWaypoints[_activeIndex];
-            Vector3 nextWp = _activeWaypoints[_activeIndex + 1];
+            Vector3 wp = _activeWaypoints[_activeIndex].Pos;
+            PathPoint nextPt = _activeWaypoints[_activeIndex + 1];
+            Vector3 nextWp = nextPt.Pos;
             float dCur = HorizontalDist(localPos, wp);
             bool onSameBand = MathF.Abs(wp.y - localPos.y) <= 1.85f;
             bool reachedTight = onSameBand && dCur <= 0.65f;
-            bool clearTurn = onSameBand && dCur <= 1.50f && CanShortcut3D(localPos, nextWp);
+            bool clearTurn = onSameBand && !nextPt.IsDropOff && dCur <= 1.50f && CanShortcut3D(localPos, nextWp);
             if (reachedTight || clearTurn)
             {
                 _activeIndex++;
                 _wpStuckTimer = 0f;
-                _bestWpDist = HorizontalDist(localPos, _activeWaypoints[_activeIndex]);
+                _bestWpDist = HorizontalDist(localPos, _activeWaypoints[_activeIndex].Pos);
             }
             else
             {
@@ -240,13 +270,25 @@ public sealed class LocalPhysicsPathfinder
             }
         }
 
-        // Short-range line-of-sight lookahead to advance cleanly past rounded turns without skipping floors
-        if (_activeIndex < _activeWaypoints.Count - 1)
+        // Short-range line-of-sight lookahead to advance cleanly past rounded turns without skipping drop-offs or floors
+        if (_activeIndex < _activeWaypoints.Count - 1 && !_activeWaypoints[_activeIndex].IsDropOff)
         {
             int maxLook = Math.Min(_activeIndex + 2, _activeWaypoints.Count - 1);
             for (int k = maxLook; k > _activeIndex; k--)
             {
-                Vector3 cand = _activeWaypoints[k];
+                bool crossesDrop = false;
+                for (int j = _activeIndex + 1; j <= k; j++)
+                {
+                    if (_activeWaypoints[j].IsDropOff)
+                    {
+                        crossesDrop = true;
+                        break;
+                    }
+                }
+                if (crossesDrop)
+                    continue;
+
+                Vector3 cand = _activeWaypoints[k].Pos;
                 if (HorizontalDist(localPos, cand) <= 10.0f && CanShortcut3D(localPos, cand))
                 {
                     _activeIndex = k;
@@ -260,7 +302,7 @@ public sealed class LocalPhysicsPathfinder
 
     private void TrackProgressOrMarkBlocked(float dt, Vector3 localPos)
     {
-        Vector3 curWp = _activeWaypoints[_activeIndex];
+        Vector3 curWp = _activeWaypoints[_activeIndex].Pos;
         float dist = HorizontalDist(localPos, curWp);
         if (dist < _bestWpDist - 0.30f)
         {
@@ -422,6 +464,7 @@ public sealed class LocalPhysicsPathfinder
             return true;
         }
 
+        LastSearchExhaustedSmallIsland = _expandedCount <= 45;
         ClearSearchState();
         _searchCooldown = 0.85f;
         _activeDiag = "local_astar(no_path)";
@@ -439,23 +482,33 @@ public sealed class LocalPhysicsPathfinder
             var off = CardinalOffsets[i];
             int nx = cur.Ix + off.Dx;
             int nz = cur.Iz + off.Dz;
-            if (!TryEvaluateNeighbor(curIdx, cur, curPos, nx, nz, off.Cost, radius))
-                continue;
-
-            _cardinalOk[i] = true;
-            addedCount++;
+            if (TryEvaluateNeighbor(curIdx, cur, curPos, nx, nz, off.Cost, radius, out bool walkableOk, allowDropOff: true))
+            {
+                _cardinalOk[i] = walkableOk;
+                addedCount++;
+            }
+            else if (TryEvaluateDropNeighbor(curIdx, cur, curPos, cur.Ix + off.Dx * 2, cur.Iz + off.Dz * 2, 2.0f, radius))
+            {
+                // Vault-drop 2 cells out clears wide awning eaves or balcony parapets onto lower street ground.
+                addedCount++;
+            }
         }
 
         for (int i = 0; i < 4; i++)
         {
             var off = DiagonalOffsets[i];
-            if (!allowCornerEscapeDiagonals && (!_cardinalOk[off.OrthoA] || !_cardinalOk[off.OrthoB]))
-                continue;
-
             int nx = cur.Ix + off.Dx;
             int nz = cur.Iz + off.Dz;
-            if (TryEvaluateNeighbor(curIdx, cur, curPos, nx, nz, off.Cost, radius))
-                addedCount++;
+            if (allowCornerEscapeDiagonals || (_cardinalOk[off.OrthoA] && _cardinalOk[off.OrthoB]))
+            {
+                if (TryEvaluateNeighbor(curIdx, cur, curPos, nx, nz, off.Cost, radius, out _, allowDropOff: true))
+                    addedCount++;
+            }
+            else if (cur.Depth <= 3)
+            {
+                if (TryEvaluateDropNeighbor(curIdx, cur, curPos, nx, nz, off.Cost, radius))
+                    addedCount++;
+            }
         }
     }
 
@@ -466,17 +519,25 @@ public sealed class LocalPhysicsPathfinder
         int nx,
         int nz,
         float stepCostFactor,
-        float radius)
+        float radius,
+        out bool walkableOk,
+        bool allowDropOff)
     {
+        walkableOk = false;
+
         if (!TryGetCellGround(nx, nz, cur.Y, out float ny))
-            return false;
+        {
+            return allowDropOff && TryEvaluateDropNeighbor(curIdx, cur, curPos, nx, nz, stepCostFactor, radius);
+        }
 
         float wx = nx * CellSize;
         float wz = nz * CellSize;
         Vector3 candPos = new(wx, ny, wz);
 
         if (!_probe.CanStep3D(curPos, candPos, radius))
-            return false;
+        {
+            return allowDropOff && TryEvaluateDropNeighbor(curIdx, cur, curPos, nx, nz, stepCostFactor, radius);
+        }
 
         if (MathF.Abs(ny - cur.Y) > 0.30f)
         {
@@ -486,42 +547,99 @@ public sealed class LocalPhysicsPathfinder
             if (!_probe.TrySampleGroundHeight(midX, midY, midZ, out float midGy)
                 || MathF.Abs(midGy - midY) > 0.24f)
             {
-                return false;
+                return allowDropOff && TryEvaluateDropNeighbor(curIdx, cur, curPos, nx, nz, stepCostFactor, radius);
             }
         }
+
+        walkableOk = true;
 
         int nyBand = ToYBand(ny);
         long nKey = PackKey(nx, nz, nyBand);
 
-        float penalty = 0f;
-        if (_blockedUntilTime.TryGetValue(nKey, out float until))
-        {
-            if (until > _elapsedSec)
-                penalty = 20.0f;
-            else
-                _blockedUntilTime.Remove(nKey);
-        }
-
+        float penalty = GetBlockedPenalty(nKey);
         float stepDist = stepCostFactor * CellSize;
         float tentativeG = cur.G + stepDist + MathF.Abs(ny - cur.Y) * 0.45f + penalty;
 
+        EnqueueOrRelaxNode(curIdx, cur, nx, nz, nyBand, nKey, wx, ny, wz, tentativeG, viaDropOff: false, viaDropVault: false);
+        return true;
+    }
+
+    private bool TryEvaluateDropNeighbor(
+        int curIdx,
+        GridNode cur,
+        Vector3 curPos,
+        int nx,
+        int nz,
+        float stepCostFactor,
+        float radius)
+    {
+        if (!TryGetDropCellGround(nx, nz, cur.Y, MaxSafeDropHeight, out float dropY))
+            return false;
+
+        float wx = nx * CellSize;
+        float wz = nz * CellSize;
+        Vector3 dropPos = new(wx, dropY, wz);
+        if (!_probe.CanDropOff3D(curPos, dropPos, radius, out bool requiresVault))
+            return false;
+
+        int nyBand = ToYBand(dropY);
+        long nKey = PackKey(nx, nz, nyBand);
+
+        float penalty = GetBlockedPenalty(nKey);
+        float drop = cur.Y - dropY;
+        // High drop penalty ensures connected stairs or ramps are always preferred whenever they exist.
+        float dropPenalty = (requiresVault ? 28.0f : 22.0f) + drop * 3.0f + (stepCostFactor > 1.5f ? 3.0f : 0f);
+        float stepDist = stepCostFactor * CellSize;
+        float tentativeG = cur.G + stepDist + dropPenalty + penalty;
+
+        EnqueueOrRelaxNode(curIdx, cur, nx, nz, nyBand, nKey, wx, dropY, wz, tentativeG, viaDropOff: true, viaDropVault: requiresVault);
+        return true;
+    }
+
+    private float GetBlockedPenalty(long key)
+    {
+        if (_blockedUntilTime.TryGetValue(key, out float until))
+        {
+            if (until > _elapsedSec)
+                return 20.0f;
+            _blockedUntilTime.Remove(key);
+        }
+        return 0f;
+    }
+
+    private void EnqueueOrRelaxNode(
+        int curIdx,
+        GridNode cur,
+        int nx,
+        int nz,
+        int nyBand,
+        long nKey,
+        float wx,
+        float wy,
+        float wz,
+        float tentativeG,
+        bool viaDropOff,
+        bool viaDropVault)
+    {
         if (_nodeByKey.TryGetValue(nKey, out int existingIdx))
         {
             GridNode existing = _nodes[existingIdx];
             if (existing.Closed || tentativeG >= existing.G - 1e-4f)
-                return true;
+                return;
 
             existing.G = tentativeG;
             existing.X = wx;
-            existing.Y = ny;
+            existing.Y = wy;
             existing.Z = wz;
             existing.ParentIndex = curIdx;
             existing.Depth = cur.Depth + 1;
+            existing.ViaDropOff = viaDropOff;
+            existing.ViaDropVault = viaDropVault;
             _open.Enqueue(existingIdx, existing.G + existing.H);
-            return true;
+            return;
         }
 
-        float h = ComputeHeuristic(wx, ny, wz, _searchGoal);
+        float h = ComputeHeuristic(wx, wy, wz, _searchGoal);
         var nextNode = new GridNode
         {
             Key = nKey,
@@ -529,20 +647,21 @@ public sealed class LocalPhysicsPathfinder
             Iz = nz,
             YBand = nyBand,
             X = wx,
-            Y = ny,
+            Y = wy,
             Z = wz,
             G = tentativeG,
             H = h,
             ParentIndex = curIdx,
             Depth = cur.Depth + 1,
-            Closed = false
+            Closed = false,
+            ViaDropOff = viaDropOff,
+            ViaDropVault = viaDropVault
         };
 
         int nextIdx = _nodes.Count;
         _nodes.Add(nextNode);
         _nodeByKey[nKey] = nextIdx;
         _open.Enqueue(nextIdx, nextNode.G + nextNode.H);
-        return true;
     }
 
     private int PickFrontierOrClosedFallback(out bool hasFrontier)
@@ -579,59 +698,81 @@ public sealed class LocalPhysicsPathfinder
 
     private void FinalizeSearch(int endIdx, bool reachedGoal, bool hasFrontier = false)
     {
-        var raw = new List<Vector3>(64);
+        var raw = new List<PathPoint>(64);
         int trace = endIdx;
         int guard = 0;
         while (trace >= 0 && guard++ <= MaxExpandedNodes + 4)
         {
             GridNode n = _nodes[trace];
-            raw.Add(new Vector3(n.X, n.Y, n.Z));
+            raw.Add(new PathPoint(new Vector3(n.X, n.Y, n.Z), n.ViaDropOff, n.ViaDropVault));
             trace = n.ParentIndex;
         }
         raw.Reverse();
 
         if (reachedGoal && raw.Count > 0)
         {
-            Vector3 last = raw[^1];
-            float remH = HorizontalDist(last, _searchGoal);
-            if (remH > 0.25f && (remH < 0.5f || _probe.CanStep3D(last, _searchGoal, 0.30f)))
-                raw.Add(_searchGoal);
+            PathPoint last = raw[^1];
+            float remH = HorizontalDist(last.Pos, _searchGoal);
+            if (remH > 0.25f && (remH < 0.5f || _probe.CanStep3D(last.Pos, _searchGoal, 0.30f)))
+                raw.Add(new PathPoint(_searchGoal));
         }
 
         var smoothed = SmoothPath3D(raw);
         ApplyCornerStandoff(smoothed);
 
+        bool hasDrop = false;
+        foreach (var wp in smoothed)
+        {
+            if (wp.IsDropOff)
+            {
+                hasDrop = true;
+                break;
+            }
+        }
+
         _activeWaypoints.Clear();
         _activeWaypoints.AddRange(smoothed);
         _activeGoal = _searchGoal;
         _activeIsPartial = !reachedGoal;
-        _activeIndex = (_activeWaypoints.Count > 1 && HorizontalDist(_searchStart, _activeWaypoints[0]) < 1.35f) ? 1 : 0;
+        LastSearchExhaustedSmallIsland = false;
+        _activeIndex = (_activeWaypoints.Count > 1 && HorizontalDist(_searchStart, _activeWaypoints[0].Pos) < 1.35f) ? 1 : 0;
         _wpStuckTimer = 0f;
         _bestWpDist = _activeIndex < _activeWaypoints.Count
-            ? HorizontalDist(_searchStart, _activeWaypoints[_activeIndex])
+            ? HorizontalDist(_searchStart, _activeWaypoints[_activeIndex].Pos)
             : float.MaxValue;
         _searchCooldown = 0.20f;
+        string dropTag = hasDrop ? ",+drop" : "";
         _activeDiag = reachedGoal
-            ? $"local_astar({smoothed.Count}wps,{_expandedCount}n)"
-            : $"local_astar_partial({(hasFrontier ? "frontier" : "best")},{_expandedCount}n)";
+            ? $"local_astar({smoothed.Count}wps,{_expandedCount}n{dropTag})"
+            : $"local_astar_partial({(hasFrontier ? "frontier" : "best")},{_expandedCount}n{dropTag})";
 
         ClearSearchState();
     }
 
-    private List<Vector3> SmoothPath3D(List<Vector3> raw)
+    private List<PathPoint> SmoothPath3D(List<PathPoint> raw)
     {
         if (raw.Count <= 2)
-            return new List<Vector3>(raw);
+            return new List<PathPoint>(raw);
 
-        var result = new List<Vector3>(raw.Count) { raw[0] };
+        var result = new List<PathPoint>(raw.Count) { raw[0] };
         int anchor = 0;
 
         while (anchor < raw.Count - 1)
         {
             int nextAnchor = anchor + 1;
-            for (int cand = raw.Count - 1; cand > anchor + 1; cand--)
+            int maxCand = raw.Count - 1;
+            for (int k = anchor + 1; k < raw.Count; k++)
             {
-                if (CanShortcut3D(raw[anchor], raw[cand]))
+                if (raw[k].IsDropOff)
+                {
+                    maxCand = (k == anchor + 1) ? anchor + 1 : k - 1;
+                    break;
+                }
+            }
+
+            for (int cand = maxCand; cand > anchor + 1; cand--)
+            {
+                if (CanShortcut3D(raw[anchor].Pos, raw[cand].Pos))
                 {
                     nextAnchor = cand;
                     break;
@@ -692,16 +833,19 @@ public sealed class LocalPhysicsPathfinder
         return true;
     }
 
-    private void ApplyCornerStandoff(List<Vector3> pts)
+    private void ApplyCornerStandoff(List<PathPoint> pts)
     {
         if (pts.Count < 3)
             return;
 
         for (int i = 1; i < pts.Count - 1; i++)
         {
-            Vector3 prev = pts[i - 1];
-            Vector3 cur = pts[i];
-            Vector3 next = pts[i + 1];
+            if (pts[i - 1].IsDropOff || pts[i].IsDropOff || pts[i + 1].IsDropOff)
+                continue;
+
+            Vector3 prev = pts[i - 1].Pos;
+            Vector3 cur = pts[i].Pos;
+            Vector3 next = pts[i + 1].Pos;
 
             Vector3 inDir = NormalizeXZ(cur.x - prev.x, cur.z - prev.z);
             Vector3 outDir = NormalizeXZ(next.x - cur.x, next.z - cur.z);
@@ -736,7 +880,7 @@ public sealed class LocalPhysicsPathfinder
             if (!_probe.CanStep3D(prev, cand, 0.38f) || !_probe.CanStep3D(cand, next, 0.38f))
                 continue;
 
-            pts[i] = cand;
+            pts[i] = new PathPoint(cand, pts[i].IsDropOff, pts[i].RequiresVault);
         }
     }
 
@@ -765,6 +909,34 @@ public sealed class LocalPhysicsPathfinder
         }
 
         _noGroundCache.Add(gKey);
+        return false;
+    }
+
+    private bool TryGetDropCellGround(int ix, int iz, float refY, float maxDropDepth, out float groundY)
+    {
+        float cx = ix * CellSize;
+        float cz = iz * CellSize;
+        if (cx < _searchMinX || cx > _searchMaxX || cz < _searchMinZ || cz > _searchMaxZ)
+        {
+            groundY = refY;
+            return false;
+        }
+
+        int qy = (int)MathF.Floor(refY / 1.30f);
+        long gKey = PackKey(ix, iz, qy);
+
+        if (_dropGroundCache.TryGetValue(gKey, out groundY))
+            return true;
+        if (_noDropGroundCache.Contains(gKey))
+            return false;
+
+        if (_probe.TrySampleSafeDropGround(cx, refY, cz, maxDropDepth, out groundY))
+        {
+            _dropGroundCache[gKey] = groundY;
+            return true;
+        }
+
+        _noDropGroundCache.Add(gKey);
         return false;
     }
 

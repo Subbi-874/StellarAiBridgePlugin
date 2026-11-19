@@ -90,6 +90,7 @@ public sealed class BridgeConfig
     public float StuckMinProgressMeters { get; set; }
     public float ElevationJumpThresholdMeters { get; set; }
     public float RapidJumpIntervalSec { get; set; }
+    public float MaxSafeDropHeight { get; set; }
 
     // Closest Warp Point Selection (Cross-map & Intra-map)
     public bool EnableClosestTeleport => IsFeatureEnabled(FeaturePolicyKeys.ClosestPortal);
@@ -174,6 +175,7 @@ public sealed class BridgeConfig
         StuckMinProgressMeters = _cfg.Get<float>("stuck_min_progress_meters", 0.48f);
         ElevationJumpThresholdMeters = _cfg.Get<float>("elevation_jump_threshold_meters", 1.10f);
         RapidJumpIntervalSec = _cfg.Get<float>("rapid_jump_interval_sec", 0.24f);
+        MaxSafeDropHeight = Math.Clamp(_cfg.Get<float>("max_safe_drop_height", 8.5f), 2.5f, 12.0f);
 
         bool legacyClosestTp = _cfg.Get<bool>("enable_closest_teleport", true);
         IntraMapTeleportMinDistance = _cfg.Get<float>("intra_map_tp_min_distance", 100.0f);
@@ -755,6 +757,7 @@ public sealed class BridgeConfig
         _cfg.Set("stuck_min_progress_meters", StuckMinProgressMeters);
         _cfg.Set("elevation_jump_threshold_meters", ElevationJumpThresholdMeters);
         _cfg.Set("rapid_jump_interval_sec", RapidJumpIntervalSec);
+        _cfg.Set("max_safe_drop_height", MaxSafeDropHeight);
 
         _cfg.Set("enable_closest_teleport", EnableClosestTeleport);
         _cfg.Set("intra_map_tp_min_distance", IntraMapTeleportMinDistance);

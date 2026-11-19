@@ -367,6 +367,82 @@ public sealed class ZPhysicsSensor : IPhysicsWalkabilityProbe
     }
 
     /// <summary>
+    /// Samples walkable landing ground deeper below an elevated ledge within <paramref name="maxDropDepth"/>
+    /// and verifies the vertical descent shaft is clear of blocking solid ceilings or walls.
+    /// </summary>
+    public bool TrySampleSafeDropGround(
+        float x,
+        float refY,
+        float z,
+        float maxDropDepth,
+        out float groundY,
+        float minDropDepth = 0.85f,
+        float radius = 0.24f)
+    {
+        groundY = refY;
+        if (!EnsureResolved())
+            return false;
+
+        float clampedMax = Math.Clamp(maxDropDepth, 1.5f, 12.0f);
+        if (!TrySampleGroundHeight(x, refY, z, out groundY, upOffset: 0.45f, downDepth: clampedMax, radius: radius))
+            return false;
+
+        float drop = refY - groundY;
+        if (drop < minDropDepth || drop > clampedMax)
+            return false;
+
+        Vector3 shaftTop = new(x, refY + 0.55f, z);
+        Vector3 shaftBottom = new(x, groundY + 0.65f, z);
+        if (shaftTop.y > shaftBottom.y + 0.15f && IsBlocked(shaftTop, shaftBottom, 0.26f, ignoreStep: true))
+            return false;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Validates a one-way safe drop-off from an elevated ledge/platform onto lower ground,
+    /// distinguishing an open ledge drop from a low parapet/railing requiring a vault jump.
+    /// </summary>
+    public bool CanDropOff3D(Vector3 fromFloor, Vector3 toFloor, float bodyRadius, out bool requiresVault)
+    {
+        requiresVault = false;
+
+        float dx = toFloor.x - fromFloor.x;
+        float dz = toFloor.z - fromFloor.z;
+        float hDist = MathF.Sqrt(dx * dx + dz * dz);
+        float drop = fromFloor.y - toFloor.y;
+        if (hDist < 0.25f || hDist > 2.65f || drop < 0.85f || drop > 12.0f)
+            return false;
+
+        float chestRadius = MathF.Max(0.28f, bodyRadius - 0.03f);
+        Vector3 chestFrom = new(fromFloor.x, fromFloor.y + 1.45f, fromFloor.z);
+        Vector3 chestTo = new(toFloor.x, fromFloor.y + 1.45f, toFloor.z);
+        if (IsBlocked(chestFrom, chestTo, chestRadius, ignoreStep: true))
+            return false;
+
+        Vector3 waistFrom = new(fromFloor.x, fromFloor.y + 0.68f, fromFloor.z);
+        Vector3 waistTo = new(toFloor.x, fromFloor.y + 0.68f, toFloor.z);
+        if (IsBlocked(waistFrom, waistTo, bodyRadius, ignoreStep: true))
+        {
+            float headRadius = MathF.Max(0.26f, bodyRadius - 0.06f);
+            Vector3 headFrom = new(fromFloor.x, fromFloor.y + 1.95f, fromFloor.z);
+            Vector3 headTo = new(toFloor.x, fromFloor.y + 1.95f, toFloor.z);
+            if (IsBlocked(headFrom, headTo, headRadius, ignoreStep: true))
+                return false;
+
+            requiresVault = true;
+        }
+
+        float shaftRadius = MathF.Max(0.26f, bodyRadius - 0.06f);
+        Vector3 shaftTop = new(toFloor.x, fromFloor.y + (requiresVault ? 1.35f : 1.05f), toFloor.z);
+        Vector3 shaftBottom = new(toFloor.x, toFloor.y + 0.68f, toFloor.z);
+        if (shaftTop.y > shaftBottom.y + 0.15f && IsBlocked(shaftTop, shaftBottom, shaftRadius, ignoreStep: true))
+            return false;
+
+        return true;
+    }
+
+    /// <summary>
     /// Distinguishes un-climbable full-height walls and staircase sides from low climbable ledges
     /// by checking whether both body height and overhead (y + 2.05m) rays are blocked.
     /// </summary>
