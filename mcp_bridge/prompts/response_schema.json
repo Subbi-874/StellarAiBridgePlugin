@@ -44,7 +44,9 @@
               "use_gimmick",
               "set_goal",
               "cancel_goal",
-              "list_goals"
+              "list_goals",
+              "remember",
+              "forget"
             ]
           },
           "enable": {
@@ -210,6 +212,28 @@
             "items": {
               "type": "object"
             }
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "preference",
+              "relationship",
+              "nickname_alias",
+              "habit",
+              "note"
+            ]
+          },
+          "mem_key": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "subject_uid": {
+            "type": "integer"
+          },
+          "memory_id": {
+            "type": "integer"
           }
         },
         "required": [

@@ -50,6 +50,11 @@ from goal_manager import (  # noqa: F401
     build_goal_from_action,
     parse_priority,
 )
+from memory_store import (  # noqa: F401
+    ALLOWED_MEMORY_CATEGORIES,
+    MemoryStore,
+    SqliteMemoryStore,
+)
 from policy import (  # noqa: F401
     ACTION_POLICY_MAP,
     DEFAULT_FEATURE_MODES,
@@ -86,11 +91,16 @@ class ChatMonitorService:
     actions via `action_executor`, and delivers chunked replies via `chat_output`.
     """
 
-    def __init__(self, dispatch_rpc: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        dispatch_rpc: Callable[..., Awaitable[dict[str, Any]]],
+        memory_store: MemoryStore | None = None,
+    ) -> None:
         self._dispatch = dispatch_rpc
         self._echo_guard = EchoGuard()
         self._output = ChatOutputSender(dispatch_rpc, self._echo_guard)
         self._executor = ActionExecutor(dispatch_rpc)
+        self.memory: MemoryStore = memory_store if memory_store is not None else SqliteMemoryStore(":memory:")
 
         # True = handle triggers automatically via configured LLM backend (remote_bpsr by default);
         # False = push triggers to _trigger_queue for manual wait_for_chat_trigger consumers.
@@ -231,6 +241,10 @@ class ChatMonitorService:
             "agents": self.agents.list_agents(),
             "max_concurrent_llm_calls": self.agents.max_concurrent_llm,
             "rule_promotion_candidates": self.get_rule_promotion_candidates(),
+            "memory": {
+                "db_path": getattr(self.memory, "db_path", ""),
+                "fts5_enabled": bool(getattr(self.memory, "fts5_enabled", False)),
+            },
             "agy_cli_path": config.AGY_CLI_PATH,
             "agy_cli_exists": Path(config.AGY_CLI_PATH).exists(),
             "agy_cli_model": config.AGY_CLI_MODEL,
@@ -282,22 +296,29 @@ class ChatMonitorService:
         if ev_name == "client_hello":
             data = event_msg.get("data") or {}
             cid = int(data.get("local_char_id") or 0)
+            cname = str(data.get("local_char_name") or "")
+            if cid > 0 and cname:
+                self._safe_observe_user(cid, cname)
             if conn_id and cid > 0:
                 self.agents.bind_connection(
                     conn_id,
                     cid,
-                    str(data.get("local_char_name") or ""),
+                    cname,
                     in_world=bool(data.get("in_world", True)),
                 )
             return
 
         if ev_name == "bot_identity_changed":
             data = event_msg.get("data") or {}
+            cid = int(data.get("local_char_id") or 0)
+            cname = str(data.get("local_char_name") or "")
+            if cid > 0 and cname:
+                self._safe_observe_user(cid, cname)
             if conn_id:
                 self.agents.bind_connection(
                     conn_id,
-                    int(data.get("local_char_id") or 0),
-                    str(data.get("local_char_name") or ""),
+                    cid,
+                    cname,
                     in_world=bool(data.get("in_world", False)),
                 )
             return
@@ -385,7 +406,17 @@ class ChatMonitorService:
             return
 
         if ev_name == "gather_completed":
-            g_agent = self.agents.get_by_conn_id(conn_id)
+            gdata = event_msg.get("data") or {}
+            g_agent = self._resolve_agent(
+                conn_id,
+                int(gdata.get("local_char_id") or 0),
+                str(gdata.get("local_char_name") or ""),
+            )
+            rname = gdata.get("resource_name") or gdata.get("resource_query") or "채집물"
+            gcnt = gdata.get("gathered_count") or gdata.get("target_count") or 0
+            fact = f"{rname} {gcnt}회 채집 완료"
+            if g_agent is not None and g_agent.char_id > 0:
+                self._safe_record_event(g_agent.char_id, "gather_completed", fact, outcome="ok")
             gather_entry: tuple[str, int] | None = None
             if g_agent is not None and g_agent.last_gather_trigger is not None:
                 gather_entry = g_agent.last_gather_trigger
@@ -394,10 +425,6 @@ class ChatMonitorService:
                 gather_entry = self._last_gather_trigger_ch.pop(conn_id)
             if gather_entry is not None:
                 ch, target_cid = gather_entry
-                gdata = event_msg.get("data") or {}
-                rname = gdata.get("resource_name") or gdata.get("resource_query") or "채집물"
-                gcnt = gdata.get("gathered_count") or gdata.get("target_count") or 0
-                fact = f"{rname} {gcnt}회 채집 완료"
                 done_txt = await self._render_event_in_persona(conn_id, ch, fact)
                 await self._output.send_notice(ch, done_txt, target_cid, conn_id=conn_id)
             return
@@ -422,6 +449,8 @@ class ChatMonitorService:
         text = str(data.get("text") or "").strip()
         if not text:
             return
+        if sender_id > 0 and sender_name:
+            self._safe_observe_user(sender_id, sender_name)
 
         # Prevent multi-client bot-to-bot ping-pong loops while still allowing human messages from alt characters
         if self._echo_guard.is_recent(text):
@@ -453,6 +482,8 @@ class ChatMonitorService:
             local_cid = int(player.get("char_id") or local_cid)
             local_name = str(player.get("name") or local_name).strip()
 
+        if local_cid > 0 and local_name:
+            self._safe_observe_user(local_cid, local_name)
         if conn_id and local_cid > 0:
             self.agents.bind_connection(conn_id, local_cid, local_name, in_world=True)
             cfg = self._get_cfg(conn_id)
@@ -515,6 +546,8 @@ class ChatMonitorService:
         now_dt: datetime,
         korean_time: str,
         unavailable_labels: list[str] | None = None,
+        active_goals_summary: str = "",
+        memory_context: str = "",
     ) -> tuple[dict[str, Any], str, str, str, str, str]:
         return build_llm_prompts(
             cfg,
@@ -528,6 +561,8 @@ class ChatMonitorService:
             now_dt,
             korean_time,
             unavailable_labels=unavailable_labels,
+            active_goals_summary=active_goals_summary,
+            memory_context=memory_context,
         ).as_tuple()
 
     @staticmethod
@@ -698,6 +733,9 @@ class ChatMonitorService:
         kind, fact = format_task_event_fact(ev_name, data)
         max_age = 60 * 60 if kind == "fish" else 15 * 60
         agent = self.agents.get_by_conn_id(conn_id)
+        if agent is not None and agent.char_id > 0:
+            ev_outcome = "failed" if ("failed" in ev_name or "cancelled" in ev_name) else "ok"
+            self._safe_record_event(agent.char_id, ev_name, fact, outcome=ev_outcome)
         entry: tuple[str, int, float] | None = None
         if agent is not None:
             entry = agent.pop_action_trigger(kind, max_age)
@@ -710,6 +748,244 @@ class ChatMonitorService:
         channel, sender_id, _ = entry
         text = await self._render_event_in_persona(conn_id, channel, fact)
         await self._output.send_notice(channel, text, sender_id, conn_id=conn_id)
+
+    def _safe_observe_user(self, uid: int, name: str) -> None:
+        try:
+            self.memory.observe_user(uid, name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("observe_user failed (uid=%s): %r", uid, exc)
+
+    def _safe_record_event(
+        self,
+        char_id: int,
+        event_type: str,
+        summary: str,
+        *,
+        outcome: str = "info",
+        authority_tier: str = "system",
+        related_uid: int = 0,
+    ) -> None:
+        if char_id <= 0:
+            return
+        try:
+            self.memory.record_event(
+                char_id,
+                event_type,
+                summary,
+                outcome=outcome,
+                authority_tier=authority_tier,
+                related_uid=related_uid,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("record_event failed (char_id=%s): %r", char_id, exc)
+
+    @staticmethod
+    def _resolve_subject_uid(act: dict[str, Any], trig: dict[str, Any], category: str) -> int:
+        raw_sub = act.get("subject_uid")
+        if raw_sub is not None and str(raw_sub).strip():
+            try:
+                val = int(raw_sub)
+                if val > 0:
+                    return val
+            except (TypeError, ValueError):
+                pass
+        raw_tgt = str(act.get("target") or "").strip()
+        if raw_tgt:
+            parsed = _parse_commander_token(raw_tgt)
+            if parsed and parsed[0] > 0:
+                return parsed[0]
+        if category in ("relationship", "nickname_alias"):
+            return max(0, int(trig.get("sender_id") or 0))
+        return 0
+
+    def _handle_memory_action(
+        self,
+        agent: BotAgent | None,
+        trig: dict[str, Any],
+        atype: str,
+        act: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
+        if not bool(trig.get("is_commander", False)):
+            rec = {"action": atype, "res": {"ok": False, "error": "unauthorized"}}
+            return rec, "명령권자만 기억을 저장하거나 삭제할 수 있어요.", None
+
+        bot_cid = agent.char_id if agent is not None else int(trig.get("local_char_id") or 0)
+        if bot_cid <= 0:
+            rec = {"action": atype, "res": {"ok": False, "error": "unbound_bot"}}
+            return rec, "봇 캐릭터 UID가 아직 확인되지 않아 기억을 처리할 수 없어요.", None
+
+        sender_uid = max(0, int(trig.get("sender_id") or 0))
+        if atype == "remember":
+            category = str(act.get("category") or "note").strip().lower() or "note"
+            mem_key = str(act.get("mem_key") or act.get("title") or act.get("name") or "").strip()
+            content = str(act.get("content") or act.get("text") or "").strip()
+            subject_uid = self._resolve_subject_uid(act, trig, category)
+            entry, err = self.memory.upsert_memory(
+                bot_cid,
+                category,
+                mem_key,
+                content,
+                authority_tier="commander",
+                source_uid=sender_uid,
+                subject_uid=subject_uid,
+            )
+            if entry is None:
+                return {"action": atype, "res": {"ok": False, "error": err}}, err, None
+            self._safe_record_event(
+                bot_cid,
+                "memory_saved",
+                f"[{entry.category}] {entry.mem_key}: {entry.content}",
+                outcome="ok",
+                authority_tier="commander",
+                related_uid=sender_uid,
+            )
+            return {"action": atype, "res": {"ok": True, "memory": entry.to_dict()}}, None, None
+
+        # forget
+        raw_mid = 0
+        try:
+            raw_mid = int(act.get("memory_id") or 0)
+        except (TypeError, ValueError):
+            raw_mid = 0
+        mem_key = str(act.get("mem_key") or act.get("title") or act.get("name") or "").strip()
+        category = str(act.get("category") or "").strip().lower()
+        deleted = self.memory.delete_memory(
+            bot_cid,
+            memory_id=raw_mid,
+            mem_key=mem_key,
+            category=category,
+        )
+        if deleted <= 0:
+            return {"action": atype, "res": {"ok": False, "deleted": 0}}, "삭제할 기억을 찾지 못했어요.", None
+        self._safe_record_event(
+            bot_cid,
+            "memory_deleted",
+            f"기억 삭제 ({mem_key or f'id={raw_mid}'}, {deleted}건)",
+            outcome="ok",
+            authority_tier="commander",
+            related_uid=sender_uid,
+        )
+        return {"action": atype, "res": {"ok": True, "deleted": deleted}}, None, None
+
+    def _resolve_target_char_id(self, conn_id: str | None = None, char_id: int = 0) -> tuple[int, str]:
+        if char_id > 0:
+            known = self.agents.get_by_char_id(char_id)
+            if known is not None:
+                return known.char_id, known.char_name
+            user_rec = self.memory.get_user(char_id)
+            return char_id, (user_rec.current_name if user_rec else "")
+        agent = self._resolve_agent(conn_id, 0)
+        if agent is not None:
+            return agent.char_id, agent.char_name
+        return 0, ""
+
+    def get_bot_memories(
+        self,
+        conn_id: str | None = None,
+        char_id: int = 0,
+        query: str = "",
+        category: str = "",
+        subject_uid: int | None = None,
+        include_events: bool = True,
+        limit: int = 30,
+    ) -> dict[str, Any]:
+        target_cid, bot_name = self._resolve_target_char_id(conn_id, char_id)
+        if target_cid <= 0:
+            return {
+                "ok": False,
+                "error": "봇 캐릭터 UID(char_id)가 확인되지 않았습니다.",
+                "agents": self.agents.list_agents(),
+            }
+        memories = [
+            m.to_dict()
+            for m in self.memory.query_memories(
+                target_cid,
+                query=query,
+                subject_uid=subject_uid,
+                category=category,
+                limit=limit,
+            )
+        ]
+        events = (
+            [e.to_dict() for e in self.memory.list_recent_events(target_cid, limit=limit)]
+            if include_events
+            else []
+        )
+        return {
+            "ok": True,
+            "char_id": target_cid,
+            "char_name": bot_name,
+            "memories": memories,
+            "events": events,
+            "allowed_categories": sorted(ALLOWED_MEMORY_CATEGORIES),
+        }
+
+    def save_bot_memory(
+        self,
+        category: str,
+        mem_key: str,
+        content: str,
+        conn_id: str | None = None,
+        char_id: int = 0,
+        subject_uid: int = 0,
+        authority_tier: str = "system",
+        source_uid: int = 0,
+    ) -> dict[str, Any]:
+        target_cid, bot_name = self._resolve_target_char_id(conn_id, char_id)
+        if target_cid <= 0:
+            return {"ok": False, "error": "봇 캐릭터 UID(char_id)가 확인되지 않았습니다."}
+        entry, err = self.memory.upsert_memory(
+            target_cid,
+            category,
+            mem_key,
+            content,
+            authority_tier=authority_tier,
+            source_uid=source_uid,
+            subject_uid=subject_uid,
+        )
+        if entry is None:
+            return {"ok": False, "error": err}
+        self._safe_record_event(
+            target_cid,
+            "memory_saved",
+            f"[{entry.category}] {entry.mem_key}: {entry.content}",
+            outcome="ok",
+            authority_tier=authority_tier,
+            related_uid=subject_uid or source_uid,
+        )
+        return {"ok": True, "char_id": target_cid, "char_name": bot_name, "memory": entry.to_dict()}
+
+    def delete_bot_memory(
+        self,
+        conn_id: str | None = None,
+        char_id: int = 0,
+        memory_id: int = 0,
+        mem_key: str = "",
+        category: str = "",
+    ) -> dict[str, Any]:
+        target_cid, bot_name = self._resolve_target_char_id(conn_id, char_id)
+        if target_cid <= 0:
+            return {"ok": False, "error": "봇 캐릭터 UID(char_id)가 확인되지 않았습니다."}
+        deleted = self.memory.delete_memory(
+            target_cid,
+            memory_id=memory_id,
+            mem_key=mem_key,
+            category=category,
+        )
+        if deleted > 0:
+            self._safe_record_event(
+                target_cid,
+                "memory_deleted",
+                f"기억 삭제 ({mem_key or f'id={memory_id}'}, {deleted}건)",
+                outcome="ok",
+            )
+        return {"ok": True, "char_id": target_cid, "char_name": bot_name, "deleted": deleted}
+
+    def get_known_users(self, query: str = "", limit: int = 50) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "users": [u.to_dict() for u in self.memory.list_users(query=query, limit=limit)],
+        }
 
     def configure_autonomous_mode(
         self,
@@ -1073,6 +1349,17 @@ class ChatMonitorService:
             return
 
         if directive.kind in ("announce_completed", "abort_and_announce"):
+            if agent.char_id > 0:
+                ev_kind = "goal_completed" if directive.kind == "announce_completed" else "goal_aborted"
+                ev_outcome = "ok" if directive.kind == "announce_completed" else "aborted"
+                summary_txt = directive.fact or (directive.goal.title if directive.goal else ev_kind)
+                self._safe_record_event(
+                    agent.char_id,
+                    ev_kind,
+                    summary_txt,
+                    outcome=ev_outcome,
+                    related_uid=directive.requester_uid,
+                )
             if directive.channel and directive.fact and target_conn:
                 out_txt = (
                     directive.fact
@@ -1168,11 +1455,25 @@ class ChatMonitorService:
                     for e in (em_res.get("emotes") or [])
                     if isinstance(e, dict) and e.get("name")
                 ]
-                online_roster_labels = [
-                    f"{m.get('name')}(UID:{m.get('uid')},{m.get('source_badge', '')})"
-                    for m in (roster_res.get("members") or [])[:60]
-                    if isinstance(m, dict) and m.get("uid")
-                ]
+                online_roster_labels: list[str] = []
+                for m in (roster_res.get("members") or [])[:60]:
+                    if isinstance(m, dict) and m.get("uid"):
+                        m_uid = int(m["uid"])
+                        m_name = str(m.get("name") or "").strip()
+                        if m_uid > 0 and m_name:
+                            self._safe_observe_user(m_uid, m_name)
+                        online_roster_labels.append(
+                            f"{m.get('name')}(UID:{m.get('uid')},{m.get('source_badge', '')})"
+                        )
+
+                s_uid = int(trig.get("sender_id") or 0)
+                s_name = str(trig.get("sender_name") or "").strip()
+                if s_uid > 0 and s_name:
+                    self._safe_observe_user(s_uid, s_name)
+                bot_cid = agent.char_id if agent is not None else local_cid
+                l_name = str(trig.get("local_char_name") or "").strip()
+                if bot_cid > 0 and l_name:
+                    self._safe_observe_user(bot_cid, l_name)
 
                 recent_chat_block = format_recent_chat_history(
                     chats_res.get("messages") or [],
@@ -1207,6 +1508,16 @@ class ChatMonitorService:
                 active_goals_summary = (
                     agent.goals.format_prompt_summary() if agent is not None else "(활성 목표 없음)"
                 )
+                memory_context = (
+                    self.memory.build_prompt_context(
+                        bot_cid,
+                        sender_uid=s_uid,
+                        sender_name=s_name,
+                        trigger_text=str(trig.get("text") or ""),
+                    ).to_prompt_text()
+                    if bot_cid > 0
+                    else "(저장된 기억 없음)"
+                )
                 prompts = build_llm_prompts(
                     cfg,
                     trig,
@@ -1220,6 +1531,7 @@ class ChatMonitorService:
                     korean_time,
                     unavailable_labels=cfg.unavailable_capabilities,
                     active_goals_summary=active_goals_summary,
+                    memory_context=memory_context,
                 )
                 raw_out, timed_out = await self._invoke_llm_guarded(
                     agent,
@@ -1278,6 +1590,9 @@ class ChatMonitorService:
                 async def _on_goal_action(act_type: str, act_obj: dict[str, Any], trig_obj: dict[str, Any]):
                     return await self._handle_goal_action(agent, conn_id, cfg, act_type, act_obj, trig_obj)
 
+                async def _on_memory_action(act_type: str, act_obj: dict[str, Any], trig_obj: dict[str, Any]):
+                    return self._handle_memory_action(agent, trig_obj, act_type, act_obj)
+
                 batch = await self._executor.execute_batch(
                     actions_to_run,
                     cfg,
@@ -1287,6 +1602,7 @@ class ChatMonitorService:
                     on_clear_kinds=_clear_kinds,
                     on_remember_gather=_remember_gather,
                     on_goal_action=_on_goal_action,
+                    on_memory_action=_on_memory_action,
                 )
 
                 reply_text = str(decision.get("reply_text") or "").strip()
@@ -1337,6 +1653,24 @@ class ChatMonitorService:
                 )
                 if sticker_sent_res is not None and sticker_req:
                     batch.executed.append({"action": "send_sticker", "params": sticker_req, "res": sticker_sent_res})
+
+                if bot_cid > 0 and batch.succeeded_actions > 0:
+                    logged_acts = [
+                        str(rec.get("action") or "")
+                        for rec in batch.executed
+                        if rec.get("action") not in ("list_goals", "remember", "forget", "send_sticker")
+                        and not rec.get("blocked_by_admin_lock")
+                        and not rec.get("refused")
+                    ]
+                    if logged_acts:
+                        self._safe_record_event(
+                            bot_cid,
+                            "chat_actions",
+                            f"{s_name or f'UID:{s_uid}'} 요청 실행: {', '.join(logged_acts[:4])}",
+                            outcome="ok",
+                            authority_tier="commander" if is_cmd else "system",
+                            related_uid=s_uid,
+                        )
 
                 record = {
                     "backend": cfg.llm.backend,

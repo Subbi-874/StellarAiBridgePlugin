@@ -43,6 +43,7 @@ jobs:
             mcp_bridge/bot_agent.py \
             mcp_bridge/goal_manager.py \
             mcp_bridge/event_router.py \
+            mcp_bridge/memory_store.py \
             mcp_bridge/chat_monitor.py \
             mcp_bridge/legacy_compat.py \
             mcp_bridge/server.py \

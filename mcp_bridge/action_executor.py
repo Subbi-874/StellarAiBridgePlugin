@@ -11,6 +11,8 @@ INFO_ACTIONS: frozenset[str] = frozenset({"query_player_location"})
 
 GOAL_ACTION_TYPES: frozenset[str] = frozenset({"set_goal", "cancel_goal", "list_goals"})
 
+MEMORY_ACTION_TYPES: frozenset[str] = frozenset({"remember", "forget"})
+
 
 EXTENDED_ACTION_TYPES: frozenset[str] = frozenset({
     "revive",
@@ -310,6 +312,10 @@ class ActionExecutor:
             [str, dict[str, Any], dict[str, Any]],
             Awaitable[tuple[dict[str, Any], str | None, dict[str, Any] | None]],
         ] | None = None,
+        on_memory_action: Callable[
+            [str, dict[str, Any], dict[str, Any]],
+            Awaitable[tuple[dict[str, Any], str | None, dict[str, Any] | None]],
+        ] | None = None,
     ) -> ActionBatchResult:
         batch = ActionBatchResult()
         for act in actions_to_run:
@@ -323,9 +329,10 @@ class ActionExecutor:
                 )
                 continue
 
-            if atype in GOAL_ACTION_TYPES:
-                if on_goal_action is not None:
-                    rec, err, info = await on_goal_action(atype, act, trig)
+            if atype in GOAL_ACTION_TYPES or atype in MEMORY_ACTION_TYPES:
+                cb = on_goal_action if atype in GOAL_ACTION_TYPES else on_memory_action
+                if cb is not None:
+                    rec, err, info = await cb(atype, act, trig)
                     batch.executed.append(rec)
                     if err:
                         batch.action_errors.append(err)

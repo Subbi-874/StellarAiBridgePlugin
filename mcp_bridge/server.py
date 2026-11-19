@@ -23,6 +23,7 @@ import config
 from chat_monitor import ChatMonitorService
 from hub import GameBridgeHub
 import legacy_compat
+from memory_store import SqliteMemoryStore
 
 
 def _setup_logging() -> None:
@@ -235,6 +236,41 @@ async def dispatch_game_rpc(
     if method == "get_rule_promotion_candidates" and chat_monitor is not None:
         return {"ok": True, "candidates": chat_monitor.get_rule_promotion_candidates()}
 
+    if method == "get_bot_memories" and chat_monitor is not None:
+        return chat_monitor.get_bot_memories(
+            conn_id=active_cid,
+            char_id=int(params.get("char_id") or 0),
+            query=str(params.get("query") or ""),
+            category=str(params.get("category") or ""),
+            include_events=bool(params.get("include_events", True)),
+            limit=int(params.get("limit") or 30),
+        )
+
+    if method == "save_bot_memory" and chat_monitor is not None:
+        return chat_monitor.save_bot_memory(
+            category=str(params.get("category") or ""),
+            mem_key=str(params.get("mem_key") or ""),
+            content=str(params.get("content") or ""),
+            conn_id=active_cid,
+            char_id=int(params.get("char_id") or 0),
+            subject_uid=int(params.get("subject_uid") or 0),
+        )
+
+    if method == "delete_bot_memory" and chat_monitor is not None:
+        return chat_monitor.delete_bot_memory(
+            conn_id=active_cid,
+            char_id=int(params.get("char_id") or 0),
+            memory_id=int(params.get("memory_id") or 0),
+            mem_key=str(params.get("mem_key") or ""),
+            category=str(params.get("category") or ""),
+        )
+
+    if method == "get_known_users" and chat_monitor is not None:
+        return chat_monitor.get_known_users(
+            query=str(params.get("query") or ""),
+            limit=int(params.get("limit") or 50),
+        )
+
     if method == "wait_for_chat_trigger" and chat_monitor is not None:
         return await chat_monitor.wait_for_next_trigger(float(params.get("timeout_sec") or 60.0))
 
@@ -302,7 +338,15 @@ async def dispatch_game_rpc(
 # ---------------------------------------------------------------------------
 
 
-chat_monitor = ChatMonitorService(lambda m, p, conn_id=None: dispatch_game_rpc(m, p, conn_id=conn_id))
+memory_store = SqliteMemoryStore(
+    config.MEMORY_DB_PATH,
+    max_memories_per_bot=config.MEMORY_MAX_PER_BOT,
+    max_events_per_bot=config.MEMORY_EVENTS_MAX_PER_BOT,
+)
+chat_monitor = ChatMonitorService(
+    lambda m, p, conn_id=None: dispatch_game_rpc(m, p, conn_id=conn_id),
+    memory_store=memory_store,
+)
 hub.add_event_listener(chat_monitor.on_bridge_event)
 
 
@@ -944,6 +988,77 @@ async def get_rule_promotion_candidates() -> str:
 
 
 @mcp.tool()
+async def get_bot_memories(
+    char_id: int = 0,
+    query: str = "",
+    category: str = "",
+    include_events: bool = True,
+    limit: int = 30,
+) -> str:
+    """Queries persistent SQLite memories and recent events partitioned by `char_id` (or the active client's character)."""
+    res = await invoke_game(
+        "get_bot_memories",
+        {
+            "char_id": char_id,
+            "query": query,
+            "category": category,
+            "include_events": include_events,
+            "limit": limit,
+        },
+    )
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def save_bot_memory(
+    category: str,
+    mem_key: str,
+    content: str,
+    char_id: int = 0,
+    subject_uid: int = 0,
+) -> str:
+    """Saves or updates a persistent memory entry (`preference`, `relationship`, `nickname_alias`, `habit`, `note`) for the selected bot character."""
+    res = await invoke_game(
+        "save_bot_memory",
+        {
+            "category": category,
+            "mem_key": mem_key,
+            "content": content,
+            "char_id": char_id,
+            "subject_uid": subject_uid,
+        },
+    )
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def delete_bot_memory(
+    memory_id: int = 0,
+    mem_key: str = "",
+    category: str = "",
+    char_id: int = 0,
+) -> str:
+    """Deletes stored memories matching `memory_id` or `mem_key` for the selected bot character."""
+    res = await invoke_game(
+        "delete_bot_memory",
+        {
+            "memory_id": memory_id,
+            "mem_key": mem_key,
+            "category": category,
+            "char_id": char_id,
+        },
+    )
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def get_known_users(query: str = "", limit: int = 50) -> str:
+    """Lists shared player UID records and observed nickname change history across all bots."""
+    res = await invoke_game("get_known_users", {"query": query, "limit": limit})
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
 async def wait_for_chat_trigger(timeout_sec: float = 60.0) -> str:
     """Waits for the next triggered chat message when chat monitor is running with use_local_agy=False."""
     res = await invoke_game("wait_for_chat_trigger", {"timeout_sec": timeout_sec})
@@ -1146,6 +1261,7 @@ async def _run_daemon_with_watchdog(app: Any, host: str, port: int, keep_alive: 
     finally:
         wd_task.cancel()
         compat_task.cancel()
+        memory_store.close()
 
 
 def main() -> None:

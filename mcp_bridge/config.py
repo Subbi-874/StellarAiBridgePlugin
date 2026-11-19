@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import shutil
 
 BRIDGE_HOST = os.getenv("BRIDGE_HOST", "0.0.0.0")
@@ -29,3 +30,15 @@ AGY_CLI_TIMEOUT = float(os.getenv("AGY_CLI_TIMEOUT", "75.0"))
 MAX_CONCURRENT_LLM_CALLS = max(1, int(os.getenv("MAX_CONCURRENT_LLM_CALLS", "3")))
 LLM_BUDGET_PER_MINUTE = max(1, int(os.getenv("LLM_BUDGET_PER_MINUTE", "20")))
 LLM_BUDGET_PER_GOAL = max(1, int(os.getenv("LLM_BUDGET_PER_GOAL", "8")))
+
+
+def _default_memory_db_path() -> str:
+    local_app = os.getenv("LOCALAPPDATA", "").strip()
+    if local_app:
+        return str(Path(local_app) / "StellarAgyBridge" / "memory.db")
+    return str(Path.home() / ".local" / "share" / "StellarAgyBridge" / "memory.db")
+
+
+MEMORY_DB_PATH = os.getenv("BRIDGE_MEMORY_DB_PATH", _default_memory_db_path())
+MEMORY_MAX_PER_BOT = max(20, int(os.getenv("MEMORY_MAX_PER_BOT", "300")))
+MEMORY_EVENTS_MAX_PER_BOT = max(20, int(os.getenv("MEMORY_EVENTS_MAX_PER_BOT", "500")))
