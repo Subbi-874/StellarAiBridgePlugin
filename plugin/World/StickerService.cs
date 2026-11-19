@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
-using Stellar.AgyBridge.Lua;
+using Stellar.AgyBridge.Adapters.Social;
 
 namespace Stellar.AgyBridge.World;
 
@@ -17,19 +17,8 @@ namespace Stellar.AgyBridge.World;
 /// </summary>
 public sealed class StickerService
 {
-    private const string QueryActiveGroupsLua = @"
-local gids = {}
-if Z.Global and type(Z.Global.ChatStickersSort) == 'table' then
-  for _, entry in ipairs(Z.Global.ChatStickersSort) do
-    local gid = tonumber(tostring(entry):match('^(%d+)='))
-    if gid and gid > 0 then gids[#gids + 1] = gid end
-  end
-end
-return gids
-";
-
     private readonly IPluginServices _services;
-    private readonly LuaBridge _lua;
+    private readonly ISocialAdapter _social;
     private readonly WorldStateService _world;
     private readonly Random _rng = new();
 
@@ -84,37 +73,20 @@ return gids
         ["화남"]     = new[] { 8, 6 },
     };
 
-    public StickerService(IPluginServices services, LuaBridge lua, WorldStateService world)
+    public StickerService(IPluginServices services, ISocialAdapter social, WorldStateService world)
     {
         _services = services;
-        _lua = lua;
+        _social = social;
         _world = world;
     }
 
     private void RefreshActiveStickerGroups()
     {
-        if (!_lua.IsReady)
+        var groups = _social.QueryActiveStickerGroups();
+        if (groups.Count == 0)
             return;
 
-        var res = _lua.Eval(QueryActiveGroupsLua);
-        if (res["ok"]?.GetValue<bool>() != true || res["result"] is not JsonArray arr || arr.Count == 0)
-            return;
-
-        var set = new HashSet<int>();
-        foreach (var item in arr)
-        {
-            if (item != null)
-            {
-                try
-                {
-                    int gid = item.GetValue<int>();
-                    if (gid > 0) set.Add(gid);
-                }
-                catch { }
-            }
-        }
-        if (set.Count > 0)
-            _activeStickerGroups = set;
+        _activeStickerGroups = new HashSet<int>(groups);
     }
 
     public IReadOnlyList<StickerInfo> GetOwnedPictureStickers(bool forceRefresh = false)

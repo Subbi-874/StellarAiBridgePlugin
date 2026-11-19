@@ -5,8 +5,8 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Adapters.Social;
 using Stellar.AgyBridge.Core;
-using Stellar.AgyBridge.Lua;
 
 namespace Stellar.AgyBridge.World;
 
@@ -47,7 +47,7 @@ public sealed class InteractionInviteService
 
     private readonly IPluginServices _services;
     private readonly BridgeConfig _config;
-    private readonly LuaBridge _lua;
+    private readonly ISocialAdapter _social;
     private readonly WorldStateService _world;
 
     private readonly List<PendingInvite> _pending = new();
@@ -57,11 +57,11 @@ public sealed class InteractionInviteService
     private bool _hookInstalled;
     private int _acceptedTotal;
 
-    public InteractionInviteService(IPluginServices services, BridgeConfig config, LuaBridge lua, WorldStateService world)
+    public InteractionInviteService(IPluginServices services, BridgeConfig config, ISocialAdapter social, WorldStateService world)
     {
         _services = services;
         _config = config;
-        _lua = lua;
+        _social = social;
         _world = world;
     }
 
@@ -69,7 +69,7 @@ public sealed class InteractionInviteService
     {
         _pollTimer -= dt;
         _hookTimer -= dt;
-        if (!_lua.IsReady || _services.ClientState.Phase != GamePhase.World)
+        if (!_social.IsLuaReady || _services.ClientState.Phase != GamePhase.World)
         {
             _hookInstalled = false;
             return;
@@ -94,7 +94,7 @@ public sealed class InteractionInviteService
     /// </summary>
     public JsonObject Arm(JsonObject? p)
     {
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
         long charId = ResolveCharId(p, out string name, out string query);
@@ -204,21 +204,13 @@ public sealed class InteractionInviteService
 
     private void EnsureHook()
     {
-        if (!_lua.IsReady) return;
-        var res = _lua.Eval(HookLua.Replace("__HOOK_VERSION__", HookVersion.ToString(CultureInfo.InvariantCulture)));
-        _hookInstalled = res["ok"]?.GetValue<bool>() == true
-                         && res["result"] is JsonValue v && v.TryGetValue<bool>(out var b) && b;
+        _hookInstalled = _social.EnsureInviteHook(HookVersion);
     }
 
     private void DrainInvites()
     {
-        var res = _lua.Eval(@"
-local q = rawget(_G, '__agyMultInvites')
-if type(q) ~= 'table' or #q == 0 then return {} end
-rawset(_G, '__agyMultInvites', {})
-return q
-");
-        if (res["ok"]?.GetValue<bool>() != true || res["result"] is not JsonArray arr) return;
+        var arr = _social.DrainQueuedInvites();
+        if (arr == null) return;
 
         long now = Environment.TickCount64;
         foreach (var node in arr)
@@ -299,8 +291,7 @@ return q
 
     private bool AcceptInvite(PendingInvite inv)
     {
-        string lua;
-        int tipsType;
+        string? asyncId;
         switch (inv.Kind)
         {
             case KindInteraction:
@@ -309,16 +300,7 @@ return q
                 long actionId = FpLong(inv.Fp, "vActionId", 1);
                 if (origId <= 0) origId = inv.CharId;
                 if (origId <= 0 || actionId <= 0) return false;
-                tipsType = 5;
-                lua = string.Create(CultureInfo.InvariantCulture, $@"
-local origId, actionId = {origId}, {actionId}
-local mvm = Z.VMMgr.GetVM('multaction')
-if not mvm then return {{ ok = false, error = 'multaction_vm unavailable' }} end
-local cs = Z.CancelSource.Rent()
-local ok, err = pcall(function() mvm.asyncCheckandReplyInvite(origId, actionId, true, cs:CreateToken()) end)
-cs:Recycle()
-return {{ ok = ok, error = ok and nil or tostring(err) }}
-");
+                asyncId = _social.StartAcceptMultActionCoroutine(origId, actionId, tipsType: 5);
                 break;
             }
             case KindRideApply:
@@ -326,20 +308,7 @@ return {{ ok = ok, error = ok and nil or tostring(err) }}
             {
                 long who = inv.CharId > 0 ? inv.CharId : FpLong(inv.Fp, "applyId", 0);
                 if (who <= 0) return false;
-                tipsType = inv.Kind == KindRideApply ? 11 : 12;
-                lua = string.Create(CultureInfo.InvariantCulture, $@"
-local who = {who}
-local vvm = Z.VMMgr.GetVM('vehicle')
-if not vvm then return {{ ok = false, error = 'vehicle_vm unavailable' }} end
-local agree = 1
-if E and E.VehicleApplyRideResult and E.VehicleApplyRideResult.ApplyRideResultAgree then
-  agree = E.VehicleApplyRideResult.ApplyRideResultAgree
-end
-local cs = Z.CancelSource.Rent()
-local ok, err = pcall(function() vvm.AsyncApplyToRideResult(who, agree, cs:CreateToken()) end)
-cs:Recycle()
-return {{ ok = ok, error = ok and nil or tostring(err) }}
-");
+                asyncId = _social.StartAcceptRideCoroutine(who, tipsType: inv.Kind == KindRideApply ? 11 : 12);
                 break;
             }
             case KindPartyInvite:
@@ -350,36 +319,16 @@ return {{ ok = ok, error = ok and nil or tostring(err) }}
                     _services.Log.Warning($"[AgyBridge][Invite] party_invite from {inv.CharId} has no teamId in funcParam — cannot accept");
                     return false;
                 }
-                tipsType = 1;
-                lua = string.Create(CultureInfo.InvariantCulture, $@"
-local teamId = {teamId}
-local tvm = Z.VMMgr.GetVM('team')
-if not tvm then return {{ ok = false, error = 'team_vm unavailable' }} end
-local cs = Z.CancelSource.Rent()
-local ok, err = pcall(function() tvm.AsyncReplyBeInvitation(teamId, true, cs:CreateToken()) end)
-cs:Recycle()
-return {{ ok = ok, error = ok and nil or tostring(err) }}
-");
+                asyncId = _social.StartAcceptPartyInviteCoroutine(teamId, tipsType: 1);
                 break;
             }
             case KindLeaderTransfer:
-            {
-                tipsType = 4;
-                lua = @"
-local tvm = Z.VMMgr.GetVM('team')
-if not tvm or not tvm.AsyncAcceptTransferBeLeader then return { ok = false, error = 'AsyncAcceptTransferBeLeader unavailable' } end
-local cs = Z.CancelSource.Rent()
-local ok, err = pcall(function() tvm.AsyncAcceptTransferBeLeader(true, cs:CreateToken()) end)
-cs:Recycle()
-return { ok = ok, error = ok and nil or tostring(err) }
-";
+                asyncId = _social.StartAcceptLeaderTransferCoroutine(tipsType: 4);
                 break;
-            }
             default:
                 return false;
         }
 
-        string? asyncId = _lua.StartCoroutineRpc(InsertTipCleanup(lua, tipsType));
         _acceptedTotal++;
         _services.Log.Info($"[AgyBridge][Invite] Accepting {inv.Kind} from {inv.CharId} async={asyncId}");
         _world.EmitBridgeEvent("interaction_accepted", new JsonObject
@@ -390,58 +339,4 @@ return { ok = ok, error = ok and nil or tostring(err) }
         });
         return asyncId != null;
     }
-
-    /// <summary>Injects a tip-cache cleanup right before the script's final return so the popup doesn't linger.</summary>
-    private static string InsertTipCleanup(string luaBody, int tipsType)
-    {
-        int idx = luaBody.LastIndexOf("return {", StringComparison.Ordinal);
-        if (idx < 0) return luaBody;
-        string cleanup = string.Create(CultureInfo.InvariantCulture,
-            $"pcall(function() Z.DataMgr.Get('team_tip_data'):ClearCacheDataByType({tipsType}) end)\n");
-        return luaBody.Insert(idx, cleanup);
-    }
-
-    private const string HookLua = @"
-local ver = rawget(_G, '__agyInviteHookVer')
-local old = rawget(_G, '__agyInviteHandler')
-local oldOwner = rawget(_G, '__agyInviteOwner')
-if old and oldOwner and ver == __HOOK_VERSION__ then return true end
-if old and oldOwner then pcall(function() Z.EventMgr:Remove(Z.ConstValue.InvitationRefreshTips, old, oldOwner) end) end
-
-if not rawget(_G, '__agyMultInvites') then rawset(_G, '__agyMultInvites', {}) end
-local T = (E and E.InvitationTipsType) or {}
-local kinds = {}
-kinds[T.TeamInvite or 1] = 'party_invite'
-kinds[T.TeamTransfer or 4] = 'leader_transfer'
-kinds[T.MultActionInvite or 5] = 'interaction'
-kinds[T.VehicleApply or 11] = 'ride_apply'
-kinds[T.VehicleInvite or 12] = 'ride_invite'
-
-local owner = {}
-local handler = function(a, b)
-  pcall(function()
-    local info = (type(a) == 'table' and a.tipsType ~= nil) and a or b
-    if type(info) ~= 'table' then return end
-    local kind = kinds[info.tipsType]
-    if not kind then return end
-    local copy = {}
-    if type(info.funcParam) == 'table' then
-      for k, v in pairs(info.funcParam) do
-        local tv = type(v)
-        if tv == 'number' or tv == 'string' or tv == 'boolean' then copy[k] = v end
-      end
-    end
-    local q = rawget(_G, '__agyMultInvites')
-    if type(q) == 'table' then
-      q[#q + 1] = { kind = kind, charId = tonumber(info.charId) or 0, fp = copy }
-      if #q > 30 then table.remove(q, 1) end
-    end
-  end)
-end
-Z.EventMgr:Add(Z.ConstValue.InvitationRefreshTips, handler, owner)
-rawset(_G, '__agyInviteOwner', owner)
-rawset(_G, '__agyInviteHandler', handler)
-rawset(_G, '__agyInviteHookVer', __HOOK_VERSION__)
-return true
-";
 }

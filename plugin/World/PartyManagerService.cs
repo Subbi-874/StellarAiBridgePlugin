@@ -1,10 +1,8 @@
 using System;
-using System.Globalization;
-using System.Text;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
-using Stellar.AgyBridge.Lua;
+using Stellar.AgyBridge.Adapters.Social;
 
 namespace Stellar.AgyBridge.World;
 
@@ -19,13 +17,13 @@ namespace Stellar.AgyBridge.World;
 public sealed class PartyManagerService
 {
     private readonly IPluginServices _services;
-    private readonly LuaBridge _lua;
+    private readonly ISocialAdapter _social;
     private readonly WorldStateService _world;
 
-    public PartyManagerService(IPluginServices services, LuaBridge lua, WorldStateService world)
+    public PartyManagerService(IPluginServices services, ISocialAdapter social, WorldStateService world)
     {
         _services = services;
-        _lua = lua;
+        _social = social;
         _world = world;
     }
 
@@ -65,58 +63,10 @@ public sealed class PartyManagerService
 
     public JsonObject CreateParty(bool autoAccept, bool leaveFirst = false, int targetActivityId = 1000, string desc = "")
     {
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
-        string escapedDesc = EscapeLuaString(desc);
-        string header = string.Create(
-            CultureInfo.InvariantCulture,
-            $"local autoAccept = {(autoAccept ? "true" : "false")}\nlocal leaveFirst = {(leaveFirst ? "true" : "false")}\nlocal targetActId = {(targetActivityId > 0 ? targetActivityId : 1000)}\nlocal descStr = {escapedDesc}\n");
-
-        const string body = @"
-local tvm = Z.VMMgr.GetVM('team')
-local tdata = Z.DataMgr.Get('team_data')
-if not tvm or not tdata then return { ok = false, error = 'team_vm unavailable' } end
-
-local inTeam = tvm.CheckIsInTeam and tvm.CheckIsInTeam() or false
-if inTeam then
-  local isLeader = tvm.GetYouIsLeader and tvm.GetYouIsLeader() or false
-  if not leaveFirst then
-    if isLeader and tvm.AsyncSetTeamOption then
-      local cs = Z.CancelSource.Rent()
-      pcall(function() tvm.AsyncSetTeamOption(1, autoAccept and 1 or 0, cs:CreateToken()) end)
-      cs:Recycle()
-      return { ok = true, already_in_party = true, updated_auto_accept = autoAccept, is_leader = true }
-    end
-    return { ok = false, error = 'Already in a party (pass leave_first=true to leave current party first)' }
-  end
-  pcall(function() tvm.AsyncQuitTeam(tdata.CancelSource) end)
-end
-
-local cs = Z.CancelSource.Rent()
-local opts = { [1] = autoAccept and 1 or 0 }
-local okCreate, createErr = pcall(function()
-  tvm.AsyncCreatTeam(targetActId, cs:CreateToken(), nil, descStr, opts)
-end)
-
-if okCreate and autoAccept and tvm.AsyncSetTeamOption then
-  pcall(function()
-    tvm.AsyncSetTeamOption(1, 1, cs:CreateToken())
-  end)
-end
-cs:Recycle()
-
-local nowInTeam = tvm.CheckIsInTeam and tvm.CheckIsInTeam() or false
-local tid = tdata.TeamInfo and tdata.TeamInfo.baseInfo and tdata.TeamInfo.baseInfo.teamId or 0
-return {
-  ok = okCreate,
-  in_party = nowInTeam,
-  team_id = tid,
-  auto_accept = autoAccept,
-  error = okCreate and nil or tostring(createErr)
-}
-";
-        string? asyncId = _lua.StartCoroutineRpc(header + body);
+        string? asyncId = _social.StartCreatePartyCoroutine(autoAccept, leaveFirst, targetActivityId, desc);
         if (asyncId == null)
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start CreateParty coroutine" };
 
@@ -131,26 +81,10 @@ return {
 
     public JsonObject SetAutoAccept(bool enable)
     {
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
-        string header = $"local enableVal = {(enable ? "1" : "0")}\n";
-        const string body = @"
-local tvm = Z.VMMgr.GetVM('team')
-if not tvm or not tvm.CheckIsInTeam or not tvm.CheckIsInTeam() then
-  return { ok = false, error = 'Not currently in a party' }
-end
-if tvm.GetYouIsLeader and not tvm.GetYouIsLeader() then
-  return { ok = false, error = 'Only the party leader can change auto-accept option' }
-end
-local cs = Z.CancelSource.Rent()
-local okOpt, optErr = pcall(function()
-  tvm.AsyncSetTeamOption(1, enableVal, cs:CreateToken())
-end)
-cs:Recycle()
-return { ok = okOpt, auto_accept = (enableVal == 1), error = okOpt and nil or tostring(optErr) }
-";
-        string? asyncId = _lua.StartCoroutineRpc(header + body);
+        string? asyncId = _social.StartSetAutoAcceptCoroutine(enable);
         if (asyncId == null)
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start SetAutoAccept coroutine" };
 
@@ -165,7 +99,7 @@ return { ok = okOpt, auto_accept = (enableVal == 1), error = okOpt and nil or to
 
     public JsonObject JoinParty(string targetQuery, long explicitTeamId = 0L, bool leaveFirst = true, bool merge = false)
     {
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
         if (merge)
@@ -202,59 +136,7 @@ return { ok = okOpt, auto_accept = (enableVal == 1), error = okOpt and nil or to
                 return new JsonObject { ["ok"] = false, ["error"] = $"Could not resolve player '{targetQuery}' in guild/friends/chat/AOI." };
         }
 
-        string header = string.Create(
-            CultureInfo.InvariantCulture,
-            $"local targetCid = {resolvedCharId}\nlocal explicitTid = {explicitTeamId}\nlocal leaveFirst = {(leaveFirst ? "true" : "false")}\nlocal merge = {(merge ? "true" : "false")}\n");
-
-        const string body = @"
-local tvm = Z.VMMgr.GetVM('team')
-local svm = Z.VMMgr.GetVM('social')
-local tdata = Z.DataMgr.Get('team_data')
-if not tvm or not tdata then return { ok = false, error = 'team_vm unavailable' } end
-
-local cs = Z.CancelSource.Rent()
-local teamId = explicitTid
-
-if teamId <= 0 and targetCid > 0 and svm and svm.AsyncGetSocialData then
-  local okSd, sd = pcall(function() return svm.AsyncGetSocialData(1026, targetCid, cs:CreateToken()) end)
-  if okSd and sd and sd.teamData then
-    teamId = tonumber(sd.teamData.teamId or 0) or 0
-  end
-end
-
-if teamId <= 0 then
-  cs:Recycle()
-  return { ok = false, error = 'Target player is not currently in any party (teamId=0)', target_char_id = targetCid }
-end
-
-local myTid = tdata.TeamInfo and tdata.TeamInfo.baseInfo and tonumber(tdata.TeamInfo.baseInfo.teamId or 0) or 0
-if myTid == teamId and myTid > 0 then
-  cs:Recycle()
-  return { ok = true, already_in_target_party = true, team_id = teamId }
-end
-
-if myTid > 0 and not merge then
-  if not leaveFirst then
-    cs:Recycle()
-    return { ok = false, error = 'Already in another party (' .. tostring(myTid) .. '); set leave_first=true to switch parties' }
-  end
-  pcall(function() tvm.AsyncQuitTeam(tdata.CancelSource) end)
-end
-
-local okApply, applyErr = pcall(function()
-  tvm.AsyncApplyJoinTeam(teamId, cs:CreateToken())
-end)
-cs:Recycle()
-
-return {
-  ok = okApply,
-  merge = merge,
-  applied_team_id = teamId,
-  target_char_id = targetCid,
-  error = okApply and nil or tostring(applyErr)
-}
-";
-        string? asyncId = _lua.StartCoroutineRpc(header + body);
+        string? asyncId = _social.StartJoinPartyCoroutine(resolvedCharId, explicitTeamId, leaveFirst, merge);
         if (asyncId == null)
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start JoinParty coroutine" };
 
@@ -289,16 +171,10 @@ return {
             }
         }
 
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "PartyControl and Lua unavailable" };
 
-        string? asyncId = _lua.StartCoroutineRpc(@"
-local tvm = Z.VMMgr.GetVM('team')
-local tdata = Z.DataMgr.Get('team_data')
-if not tvm or not tdata then return { ok = false, error = 'team_vm unavailable' } end
-local okQ, errQ = pcall(function() tvm.AsyncQuitTeam(tdata.CancelSource) end)
-return { ok = okQ, error = okQ and nil or tostring(errQ) }
-");
+        string? asyncId = _social.StartLeavePartyCoroutine();
         return new JsonObject { ["ok"] = asyncId != null, ["async_id"] = asyncId, ["action"] = "leave", ["method"] = "team_vm.AsyncQuitTeam" };
     }
 
@@ -318,70 +194,28 @@ return { ok = okQ, error = okQ and nil or tostring(errQ) }
             catch { }
         }
 
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
-        string header = string.Create(CultureInfo.InvariantCulture, $"local cid = {cid}\n");
-        string? asyncId = _lua.StartCoroutineRpc(header + @"
-local tvm = Z.VMMgr.GetVM('team')
-if not tvm then return { ok = false, error = 'team_vm unavailable' } end
-local cs = Z.CancelSource.Rent()
-if not tvm.CheckIsInTeam() then
-  pcall(function() tvm.AsyncCreatTeam(1000, cs:CreateToken(), nil, '', { [1] = 1 }) end)
-end
-local okI, errI = pcall(function() tvm.AsyncInviteToTeam(cid, cs:CreateToken()) end)
-cs:Recycle()
-return { ok = okI, invited_char_id = cid, error = okI and nil or tostring(errI) }
-");
+        string? asyncId = _social.StartInviteToTeamCoroutine(cid);
         return new JsonObject { ["ok"] = asyncId != null, ["async_id"] = asyncId, ["action"] = "invite", ["target_char_id"] = cid, ["target_name"] = name };
     }
 
     public JsonObject AcceptIncomingApplications()
     {
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
-        string? asyncId = _lua.StartCoroutineRpc(@"
-local tvm = Z.VMMgr.GetVM('team')
-local tdata = Z.DataMgr.Get('team_data')
-if not tvm or not tdata then return { ok = false, error = 'team_vm unavailable' } end
-local cs = Z.CancelSource.Rent()
-pcall(function() tvm.AsyncGetMyTeamIncomingApplyList(true, cs:CreateToken()) end)
-local accepted = 0
-if type(tdata.applyList) == 'table' then
-  for _, item in pairs(tdata.applyList) do
-    local aid = tonumber(item.charId or (item.charBasicData and item.charBasicData.charID) or 0) or 0
-    if aid > 0 then
-      local okD = pcall(function() tvm.AsyncDealApplyJoin(aid, true, cs:CreateToken()) end)
-      if okD then accepted = accepted + 1 end
-    end
-  end
-end
-cs:Recycle()
-return { ok = true, accepted_count = accepted }
-");
+        string? asyncId = _social.StartAcceptIncomingAppliesCoroutine();
         return new JsonObject { ["ok"] = asyncId != null, ["async_id"] = asyncId, ["action"] = "accept_apply" };
     }
 
     public JsonObject AcceptInvitation(long explicitTeamId = 0L)
     {
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
-        string header = string.Create(CultureInfo.InvariantCulture, $"local tid = {explicitTeamId}\n");
-        string? asyncId = _lua.StartCoroutineRpc(header + @"
-local tvm = Z.VMMgr.GetVM('team')
-local tdata = Z.DataMgr.Get('team_data')
-if not tvm or not tdata then return { ok = false, error = 'team_vm unavailable' } end
-local cs = Z.CancelSource.Rent()
-if tid > 0 then
-  local okR, errR = pcall(function() tvm.AsyncReplyBeInvitation(tid, true, cs:CreateToken()) end)
-  cs:Recycle()
-  return { ok = okR, team_id = tid, error = okR and nil or tostring(errR) }
-end
-cs:Recycle()
-return { ok = false, error = 'Provide team_id to accept invitation' }
-");
+        string? asyncId = _social.StartAcceptTeamInvitationCoroutine(explicitTeamId);
         return new JsonObject { ["ok"] = asyncId != null, ["async_id"] = asyncId, ["action"] = "accept_invite" };
     }
 
@@ -417,18 +251,10 @@ return { ok = false, error = 'Provide team_id to accept invitation' }
             }
         }
 
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "PartyControl and Lua unavailable" };
 
-        string header = string.Create(CultureInfo.InvariantCulture, $"local cid = {cid}\n");
-        string? asyncId = _lua.StartCoroutineRpc(header + @"
-local tvm = Z.VMMgr.GetVM('team')
-if not tvm then return { ok = false, error = 'team_vm unavailable' } end
-local cs = Z.CancelSource.Rent()
-local okK, errK = pcall(function() tvm.AsyncTickOut(cid, cs:CreateToken()) end)
-cs:Recycle()
-return { ok = okK, kicked_char_id = cid, error = okK and nil or tostring(errK) }
-");
+        string? asyncId = _social.StartKickMemberCoroutine(cid);
         return new JsonObject { ["ok"] = asyncId != null, ["async_id"] = asyncId, ["action"] = "kick", ["target_char_id"] = cid, ["target_name"] = name, ["method"] = "team_vm.AsyncTickOut" };
     }
 
@@ -463,18 +289,10 @@ return { ok = okK, kicked_char_id = cid, error = okK and nil or tostring(errK) }
             }
         }
 
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "PartyControl and Lua unavailable" };
 
-        string header = string.Create(CultureInfo.InvariantCulture, $"local memberType = {(type == PartyType.Raid20 ? 1 : 0)}\n");
-        string? asyncId = _lua.StartCoroutineRpc(header + @"
-local tvm = Z.VMMgr.GetVM('team')
-if not tvm or not tvm.AsyncChangeTeamMemberType then return { ok = false, error = 'AsyncChangeTeamMemberType unavailable' } end
-local cs = Z.CancelSource.Rent()
-local okM, errM = pcall(function() tvm.AsyncChangeTeamMemberType(memberType, cs:CreateToken()) end)
-cs:Recycle()
-return { ok = okM, member_type = memberType, error = okM and nil or tostring(errM) }
-");
+        string? asyncId = _social.StartSetMemberTypeCoroutine(type == PartyType.Raid20 ? 1 : 0);
         return new JsonObject { ["ok"] = asyncId != null, ["async_id"] = asyncId, ["action"] = "set_member_type", ["size"] = type == PartyType.Raid20 ? 20 : 5, ["method"] = "team_vm.AsyncChangeTeamMemberType" };
     }
 
@@ -524,18 +342,10 @@ return { ok = okM, member_type = memberType, error = okM and nil or tostring(err
             }
         }
 
-        if (!_lua.IsReady)
+        if (!_social.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "PartyControl and Lua unavailable" };
 
-        string header = string.Create(CultureInfo.InvariantCulture, $"local cid = {cid}\n");
-        string? asyncId = _lua.StartCoroutineRpc(header + @"
-local tvm = Z.VMMgr.GetVM('team')
-if not tvm or not tvm.AsyncTransferLeader then return { ok = false, error = 'AsyncTransferLeader unavailable' } end
-local cs = Z.CancelSource.Rent()
-local okT, errT = pcall(function() tvm.AsyncTransferLeader(cid, cs:CreateToken()) end)
-cs:Recycle()
-return { ok = okT, target_char_id = cid, error = okT and nil or tostring(errT) }
-");
+        string? asyncId = _social.StartTransferLeaderCoroutine(cid);
         return new JsonObject
         {
             ["ok"] = asyncId != null,
@@ -559,25 +369,5 @@ return { ok = okT, target_char_id = cid, error = okT and nil or tostring(errT) }
             return found.CharId;
         }
         return 0L;
-    }
-
-    private static string EscapeLuaString(string value)
-    {
-        var sb = new StringBuilder(value.Length + 8);
-        sb.Append('\'');
-        foreach (char c in value)
-        {
-            switch (c)
-            {
-                case '\\': sb.Append("\\\\"); break;
-                case '\'': sb.Append("\\'"); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\0': break;
-                default: sb.Append(c); break;
-            }
-        }
-        sb.Append('\'');
-        return sb.ToString();
     }
 }

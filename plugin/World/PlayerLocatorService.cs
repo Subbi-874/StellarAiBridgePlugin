@@ -4,7 +4,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
-using Stellar.AgyBridge.Lua;
+using Stellar.AgyBridge.Adapters.Social;
 
 namespace Stellar.AgyBridge.World;
 
@@ -27,15 +27,15 @@ public sealed record FollowCheckResult(
 public sealed class PlayerLocatorService
 {
     private readonly IPluginServices _services;
-    private readonly LuaBridge _lua;
+    private readonly ISocialAdapter _social;
     private readonly WorldStateService _world;
     private readonly CrossMapNavigator _navigator;
     private readonly Dictionary<int, SceneInfoLite> _sceneCache = new();
 
-    public PlayerLocatorService(IPluginServices services, LuaBridge lua, WorldStateService world, CrossMapNavigator navigator)
+    public PlayerLocatorService(IPluginServices services, ISocialAdapter social, WorldStateService world, CrossMapNavigator navigator)
     {
         _services = services;
-        _lua = lua;
+        _social = social;
         _world = world;
         _navigator = navigator;
     }
@@ -58,17 +58,10 @@ public sealed class PlayerLocatorService
 
         string name = _world.GetSceneName(sceneId);
         int subType = 0;
-        if (_lua.IsReady)
+        if (_social.TryReadSceneTableRow(sceneId, out string luaName, out int luaSub))
         {
-            var res = _lua.Eval(string.Create(
-                CultureInfo.InvariantCulture,
-                $"local ok, row = pcall(function() return Z.TableMgr.GetRow('SceneTableMgr', {sceneId}, true) end)\nif ok and row then return {{ name = tostring(row.Name or ''), sub = tonumber(row.SceneSubType) or 0 }} end\nreturn {{}}"));
-            if (res["ok"]?.GetValue<bool>() == true && res["result"] is JsonObject o)
-            {
-                subType = o["sub"]?.GetValue<int>() ?? 0;
-                string luaName = o["name"]?.GetValue<string>() ?? "";
-                if (!string.IsNullOrEmpty(luaName)) name = luaName;
-            }
+            subType = luaSub;
+            if (!string.IsNullOrEmpty(luaName)) name = luaName;
         }
 
         var info = new SceneInfoLite(sceneId, name, subType, KindLabel(subType));
