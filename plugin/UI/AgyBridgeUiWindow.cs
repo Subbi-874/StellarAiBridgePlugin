@@ -39,16 +39,14 @@ public sealed class AgyBridgeUiWindow : IDisposable
 
     private static readonly IReadOnlyList<string> LlmBackendLabels = new[]
     {
-        "커스텀 서버 (/bpsr/chat)",
-        "로컬 CLI (AGY·Claude·GPT·Gemini)",
-        "외부 OpenAI 호환 API (GPT·Ollama)",
-        "Google Gemini API 직접 연결"
+        "로컬 (CLI / 주소 입력 시 서버 API)",
+        "OpenAI 호환 API (GPT·Ollama·Tools)",
+        "Google Gemini API (Tools)"
     };
 
     private static readonly string[] LlmBackendCodes =
     {
-        "remote_bpsr",
-        "local_cli",
+        "local_agent",
         "openai_api",
         "gemini_api"
     };
@@ -1206,10 +1204,12 @@ public sealed class AgyBridgeUiWindow : IDisposable
         {
             string bLabel = _config.LlmBackend switch
             {
-                "local_cli" => $"로컬CLI({_config.LlmCliFlavor})",
-                "openai_api" => "OpenAI호환",
-                "gemini_api" => "GeminiAPI",
-                _ => "커스텀서버"
+                "local_agent" => string.IsNullOrWhiteSpace(_config.LlmEndpointUrl)
+                    ? $"로컬CLI({_config.LlmCliFlavor})"
+                    : "로컬서버",
+                "openai_api" => "OpenAI API(Tools)",
+                "gemini_api" => "Gemini API(Tools)",
+                _ => "로컬"
             };
             string m = string.IsNullOrWhiteSpace(_config.LlmModel) ? "기본모델" : _config.LlmModel;
             string sp = _config.LlmSendSystemPrompt ? "시스템프롬프트켬" : "페르소나만";
@@ -1260,7 +1260,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
         }, 8f, RowJustify.Left);
 
         var llmCliSection = new ConditionalElement(
-            () => _config.LlmBackend == "local_cli",
+            () => _config.LlmBackend == "local_agent",
             new ColumnElement(new HudElement[]
             {
                 new RowElement(new HudElement[]
@@ -1316,11 +1316,11 @@ public sealed class AgyBridgeUiWindow : IDisposable
             false);
 
         var llmEndpointSection = new ConditionalElement(
-            () => _config.LlmBackend is "remote_bpsr" or "openai_api",
+            () => _config.LlmBackend is "local_agent" or "openai_api",
             new RowElement(new HudElement[]
             {
                 new TextElement(
-                    () => _config.LlmBackend == "remote_bpsr" ? "서버 주소:" : "API Base:",
+                    () => _config.LlmBackend == "local_agent" ? "서버 주소:" : "API Base:",
                     () => mutedColor,
                     false,
                     72f,
@@ -1333,8 +1333,8 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     OnChange: v => MarkLlmTextEdited(() => _config.LlmEndpointUrl = v ?? ""))
                 {
                     SingleLine = true,
-                    Placeholder = () => _config.LlmBackend == "remote_bpsr"
-                        ? "http://192.168.2.20:28000/bpsr/chat"
+                    Placeholder = () => _config.LlmBackend == "local_agent"
+                        ? "비우면 로컬 CLI 실행 / 입력 시 HTTP API 호출"
                         : "https://api.openai.com/v1 (또는 Ollama http://127.0.0.1:11434/v1)"
                 }
             }, 8f, RowJustify.Left),
@@ -1342,7 +1342,8 @@ public sealed class AgyBridgeUiWindow : IDisposable
             false);
 
         var llmApiKeySection = new ConditionalElement(
-            () => _config.LlmBackend is "openai_api" or "gemini_api" or "remote_bpsr",
+            () => _config.LlmBackend is "openai_api" or "gemini_api"
+                || (_config.LlmBackend == "local_agent" && (!string.IsNullOrWhiteSpace(_config.LlmEndpointUrl) || !string.IsNullOrEmpty(_config.LlmApiKey))),
             new RowElement(new HudElement[]
             {
                 new TextElement(() => "API Key:", () => mutedColor, false, 72f, TextAlign.Left, false),
@@ -1355,7 +1356,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                         OnChange: v => MarkLlmTextEdited(() => _config.LlmApiKey = v ?? ""))
                     {
                         SingleLine = true,
-                        Placeholder = () => _config.LlmBackend == "remote_bpsr" ? "선택 입력 (토큰 있을 때)" : "API 키 입력"
+                        Placeholder = () => _config.LlmBackend == "local_agent" ? "선택 입력 (서버 토큰 있을 때)" : "API 키 입력"
                     },
                     new TextElement(
                         () => string.IsNullOrEmpty(_config.LlmApiKey)

@@ -124,7 +124,7 @@ public sealed class BridgeConfig
 
     // Per-client LLM backend, local CLI flavor, API endpoint/key & editable character persona
     public const string DefaultLlmPersona = "존댓말을 써서 과하지 않은 젊은 영애 아가씨처럼 친절하고 자연스럽게 대화하세요. 반말과 존댓말을 섞어 쓰지 마세요.";
-    public string LlmBackend { get; set; } // "remote_bpsr" | "local_cli" | "openai_api" | "gemini_api"
+    public string LlmBackend { get; set; } // "local_agent" | "openai_api" | "gemini_api"
     public string LlmCliFlavor { get; set; } // "agy" | "claude" | "codex" | "gemini" | "custom"
     public string LlmEndpointUrl { get; set; }
     public string LlmApiKey { get; set; }
@@ -240,11 +240,32 @@ public sealed class BridgeConfig
         string rawCommanders = _cfg.Get<string>("authorized_commanders", "패랭이#15977376") ?? "";
         CommanderEntries = ParseCommanderList(rawCommanders);
 
-        string rawBackend = (_cfg.Get<string>("llm_backend", "remote_bpsr") ?? "remote_bpsr").Trim().ToLowerInvariant();
-        LlmBackend = rawBackend is "remote_bpsr" or "local_cli" or "openai_api" or "gemini_api" ? rawBackend : "remote_bpsr";
+        string rawBackend = (_cfg.Get<string>("llm_backend", "local_agent") ?? "local_agent").Trim().ToLowerInvariant();
+        string rawEndpoint = (_cfg.Get<string>("llm_endpoint_url", "") ?? "").Trim();
+        if (rawBackend == "remote_bpsr")
+        {
+            LlmBackend = "local_agent";
+            LlmEndpointUrl = string.IsNullOrWhiteSpace(rawEndpoint)
+                ? "http://192.168.2.20:28000/bpsr/chat"
+                : rawEndpoint;
+        }
+        else if (rawBackend is "local_cli" or "local_agy" or "cli")
+        {
+            LlmBackend = "local_agent";
+            LlmEndpointUrl = "";
+        }
+        else if (rawBackend is "local_agent" or "openai_api" or "gemini_api")
+        {
+            LlmBackend = rawBackend;
+            LlmEndpointUrl = rawEndpoint;
+        }
+        else
+        {
+            LlmBackend = "local_agent";
+            LlmEndpointUrl = rawEndpoint;
+        }
         string rawFlavor = (_cfg.Get<string>("llm_cli_flavor", "agy") ?? "agy").Trim().ToLowerInvariant();
         LlmCliFlavor = rawFlavor is "agy" or "claude" or "codex" or "gemini" or "custom" ? rawFlavor : "agy";
-        LlmEndpointUrl = (_cfg.Get<string>("llm_endpoint_url", "http://192.168.2.20:28000/bpsr/chat") ?? "").Trim();
         LlmApiKey = (_cfg.Get<string>("llm_api_key", "") ?? "").Trim();
         LlmModel = (_cfg.Get<string>("llm_model", "") ?? "").Trim();
         LlmCliCommand = (_cfg.Get<string>("llm_cli_command", "") ?? "").Trim();
@@ -671,11 +692,23 @@ public sealed class BridgeConfig
 
         if (obj["llm_settings"] is JsonObject llmObj)
         {
+            bool hasEndpoint = llmObj["endpoint_url"] != null;
             if (llmObj["backend"] != null)
             {
                 string b = (llmObj["backend"]!.GetValue<string>() ?? "").Trim().ToLowerInvariant();
-                if (b is "remote_bpsr" or "local_cli" or "openai_api" or "gemini_api")
+                if (b == "remote_bpsr")
+                {
+                    LlmBackend = "local_agent";
+                }
+                else if (b is "local_cli" or "local_agy" or "cli")
+                {
+                    LlmBackend = "local_agent";
+                    if (!hasEndpoint) LlmEndpointUrl = "";
+                }
+                else if (b is "local_agent" or "openai_api" or "gemini_api")
+                {
                     LlmBackend = b;
+                }
             }
             if (llmObj["cli_flavor"] != null)
             {
@@ -683,7 +716,7 @@ public sealed class BridgeConfig
                 if (fl is "agy" or "claude" or "codex" or "gemini" or "custom")
                     LlmCliFlavor = fl;
             }
-            if (llmObj["endpoint_url"] != null)
+            if (hasEndpoint)
                 LlmEndpointUrl = (llmObj["endpoint_url"]!.GetValue<string>() ?? "").Trim();
             if (llmObj["api_key"] != null)
             {

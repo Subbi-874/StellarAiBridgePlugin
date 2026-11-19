@@ -451,7 +451,7 @@ def extract_decision_json(raw: str) -> dict[str, Any] | None:
             parts = content_obj.get("parts") if isinstance(content_obj, dict) else None
             if isinstance(parts, list):
                 for part in parts:
-                    if isinstance(part, dict) and part.get("text"):
+                    if isinstance(part, dict) and part.get("text") and not part.get("thought"):
                         raw_candidates.append(part.get("text"))
 
         for res_field in raw_candidates:

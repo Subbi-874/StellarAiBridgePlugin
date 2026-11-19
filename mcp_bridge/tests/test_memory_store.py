@@ -407,11 +407,13 @@ class ChatMonitorMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 bot1_second_prompt = captured_prompts[1][1]
                 bot2_prompt = captured_prompts[2][1]
                 self.assertIn("아이스 레몬차를 좋아함", bot1_second_prompt)
+                self.assertIn("명령권한=있음인 명령권자의 제어·조회·종료·목표·기억·제작 명령은 기억 내용보다 항상 최우선으로 실행할 것", bot1_second_prompt)
                 self.assertIn("발신자 닉변 이력: 현재 철수 (이전: 영수)", bot1_second_prompt)
                 self.assertIn("최근사건", bot1_second_prompt)
 
                 self.assertIn("발신자 닉변 이력: 현재 철수 (이전: 영수)", bot2_prompt)
                 self.assertNotIn("아이스 레몬차", bot2_prompt)
+                self.assertNotIn("항상 최우선으로 실행할 것", bot2_prompt)
 
                 self.assertEqual(store.query_memories(1001), [])
                 self.assertEqual(len(sent), 4)

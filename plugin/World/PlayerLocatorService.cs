@@ -73,11 +73,12 @@ public sealed class PlayerLocatorService
     {
         string query = (p?["target"]?.GetValue<string>() ?? "").Trim();
         long charId = p?["char_id"]?.GetValue<long>() ?? 0L;
+        bool forceRefresh = p?["force_refresh"]?.GetValue<bool>() == true;
         if (string.IsNullOrEmpty(query) && charId > 0) query = charId.ToString(CultureInfo.InvariantCulture);
         if (string.IsNullOrEmpty(query))
             return new JsonObject { ["ok"] = false, ["error"] = "Missing 'target' (player name or UID)" };
 
-        var t = _world.FindAnyPlayerTarget(query, lockedCharId: charId, requestSocial: true);
+        var t = _world.FindAnyPlayerTarget(query, lockedCharId: charId, requestSocial: true, fastPoll: true);
         if (t == null)
         {
             return new JsonObject
@@ -91,7 +92,19 @@ public sealed class PlayerLocatorService
 
         int mySceneId = _world.GetLocalSceneId();
         int myLine = _world.GetLocalLineId();
-        bool pending = !t.InAoi && t.IsOnline && t.SceneId <= 0;
+        long nowMs = Environment.TickCount64;
+        bool isFresh = t.InAoi || (t.SocialReceivedAtMs > 0 && (nowMs - t.SocialReceivedAtMs) <= 4000);
+        if (!t.InAoi && forceRefresh)
+        {
+            _world.TriggerImmediateSocialRefresh(t.CharId);
+            isFresh = false;
+        }
+        else if (!t.InAoi && !isFresh && t.SocialReceivedAtMs == 0)
+        {
+            _world.TriggerImmediateSocialRefresh(t.CharId);
+        }
+
+        bool pending = !t.InAoi && (!isFresh || (t.IsOnline && t.SceneId <= 0));
 
         var res = new JsonObject
         {
@@ -101,19 +114,19 @@ public sealed class PlayerLocatorService
             ["name"] = t.Name,
             ["char_id"] = t.CharId,
             ["source"] = t.Source,
-            ["online"] = t.IsOnline,
+            ["online"] = pending ? true : t.IsOnline,
             ["is_self"] = t.IsSelf,
             ["in_aoi"] = t.InAoi
         };
 
+        if (pending)
+        {
+            res["hint"] = $"{t.Name} 님의 최신 위치 정보를 불러오는 중입니다.";
+            return res;
+        }
         if (!t.IsOnline)
         {
             res["hint"] = $"{t.Name} 님은 현재 접속 중이 아닙니다.";
-            return res;
-        }
-        if (pending)
-        {
-            res["hint"] = $"{t.Name} 님의 위치 정보를 불러오는 중입니다.";
             return res;
         }
 
@@ -170,7 +183,7 @@ public sealed class PlayerLocatorService
     /// Decides whether a follow request can possibly succeed, WITHOUT starting any movement.
     /// Unknown scenes / unresolved targets are treated as "reachable" so the follow behavior can still try.
     /// </summary>
-    public FollowCheckResult EvaluateFollow(string query, long lockedCharId = 0L)
+    public FollowCheckResult EvaluateFollow(string query, long lockedCharId = 0L, bool forceRefresh = false)
     {
         string q = (query ?? "").Trim();
         if (q.Equals("leader", StringComparison.OrdinalIgnoreCase) || q == "파티장" || q == "리더")
@@ -188,14 +201,16 @@ public sealed class PlayerLocatorService
 
         if (!t.InAoi)
         {
-            bool isFresh = t.SocialReceivedAtMs > 0 && (Environment.TickCount64 - t.SocialReceivedAtMs) <= 3500;
-            bool wouldReject = !t.IsOnline
-                || t.SceneId <= 0
-                || (t.SceneId != mySceneId && mySceneId > 0 && !_navigator.CheckSceneEnterability(t.SceneId, isParty, out _));
-
-            if (!isFresh && wouldReject)
+            if (forceRefresh)
             {
                 _world.TriggerImmediateSocialRefresh(t.CharId);
+                return new FollowCheckResult(true, "pending_location", "", t, null);
+            }
+            bool isFresh = t.SocialReceivedAtMs > 0 && (Environment.TickCount64 - t.SocialReceivedAtMs) <= 4000;
+            if (!isFresh)
+            {
+                if (t.SocialReceivedAtMs == 0)
+                    _world.TriggerImmediateSocialRefresh(t.CharId);
                 return new FollowCheckResult(true, "pending_location", "", t, null);
             }
         }
@@ -231,7 +246,8 @@ public sealed class PlayerLocatorService
     {
         string target = p?["target"]?.GetValue<string>() ?? "leader";
         long charId = p?["char_id"]?.GetValue<long>() ?? 0L;
-        var r = EvaluateFollow(target, charId);
+        bool forceRefresh = p?["force_refresh"]?.GetValue<bool>() == true;
+        var r = EvaluateFollow(target, charId, forceRefresh);
         return ToJson(r);
     }
 

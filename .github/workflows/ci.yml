@@ -36,6 +36,7 @@ jobs:
             mcp_bridge/config.py \
             mcp_bridge/hub.py \
             mcp_bridge/llm_backends.py \
+            mcp_bridge/api_tool_loop.py \
             mcp_bridge/policy.py \
             mcp_bridge/prompt_builder.py \
             mcp_bridge/chat_output.py \

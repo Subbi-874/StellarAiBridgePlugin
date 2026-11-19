@@ -9,7 +9,8 @@ _LOCAL_CONNECT_HOST = "127.0.0.1" if BRIDGE_HOST in ("0.0.0.0", "::", "") else B
 BRIDGE_HTTP_BASE = os.getenv("BRIDGE_HTTP_BASE", f"http://{_LOCAL_CONNECT_HOST}:{BRIDGE_PORT}")
 DEFAULT_RPC_TIMEOUT = float(os.getenv("BRIDGE_RPC_TIMEOUT", "12.0"))
 
-# LLM backend selection: 'remote_bpsr' (Linux /bpsr/chat server) or 'local_agy' (Windows agy.exe CLI)
+# LLM backend selection: 'local_agent' (blank URL -> local CLI, non-empty URL -> remote HTTP /bpsr/chat),
+# 'openai_api', or 'gemini_api' (legacy aliases 'remote_bpsr' / 'local_cli' auto-migrate to 'local_agent').
 LLM_BACKEND = os.getenv("BPSR_LLM_BACKEND", "remote_bpsr").strip().lower()
 
 REMOTE_BPSR_BASE_URL = os.getenv("REMOTE_BPSR_BASE_URL", "http://192.168.2.20:28000").rstrip("/")
@@ -30,6 +31,8 @@ AGY_CLI_TIMEOUT = float(os.getenv("AGY_CLI_TIMEOUT", "75.0"))
 MAX_CONCURRENT_LLM_CALLS = max(1, int(os.getenv("MAX_CONCURRENT_LLM_CALLS", "3")))
 LLM_BUDGET_PER_MINUTE = max(1, int(os.getenv("LLM_BUDGET_PER_MINUTE", "20")))
 LLM_BUDGET_PER_GOAL = max(1, int(os.getenv("LLM_BUDGET_PER_GOAL", "8")))
+API_TOOL_LOOP_MAX_ROUNDS = max(1, int(os.getenv("API_TOOL_LOOP_MAX_ROUNDS", "5")))
+API_TOOL_LOOP_MAX_CALLS = max(1, int(os.getenv("API_TOOL_LOOP_MAX_CALLS", "10")))
 
 
 def _default_memory_db_path() -> str:

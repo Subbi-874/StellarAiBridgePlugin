@@ -166,12 +166,64 @@ class ChatMonitorRegressionTests(unittest.IsolatedAsyncioTestCase):
             })
             await _wait_bg_tasks(svc)
 
-        loc_calls = [m for m, _, _ in calls if m == "query_player_location"]
+        loc_calls = [p for m, p, _ in calls if m == "query_player_location"]
         self.assertEqual(len(loc_calls), 2)
+        self.assertIs(loc_calls[0].get("force_refresh"), True)
+        self.assertIs(loc_calls[1].get("force_refresh"), False)
         self.assertEqual(len(llm_extras), 2)
         self.assertIn('"kind": "info"', llm_extras[1])
         sent = [p["text"] for m, p, _ in calls if m == "send_chat"]
         self.assertEqual(sent, ["확인해보니 아스텔리즈 3채널에 계신답니다!"])
+
+    async def test_follow_precheck_forces_refresh_and_polls_pending_location(self) -> None:
+        rpc, calls = _make_fake_rpc({
+            "check_follow_reachable": [
+                {"ok": True, "reachable": True, "reason_code": "pending_location", "message": ""},
+                {"ok": True, "reachable": True, "reason_code": "ok", "message": "", "target_char_id": 8205},
+            ],
+        })
+        svc = ChatMonitorService(rpc)
+        svc.apply_ui_settings("c1", {
+            "enabled": True,
+            "channels": ["party"],
+            "authorized_commanders": ["얼탱#8205"],
+            "llm_settings": {"backend": "gemini_api"},
+        })
+
+        fake_outputs = [
+            json.dumps({
+                "reply_text": "네, 바로 따라갈게요!",
+                "sticker": "",
+                "actions": [{"type": "follow_player", "target": "8205", "continuous": True}],
+            }, ensure_ascii=False),
+        ]
+
+        async def fake_invoke(*args, **kwargs):
+            return fake_outputs.pop(0), False
+
+        async def fake_sleep(_delay: float = 0.0) -> None:
+            return None
+
+        with patch("asyncio.sleep", new=fake_sleep), \
+             patch.object(svc, "_invoke_llm", side_effect=fake_invoke):
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "chat_message",
+                "data": {
+                    "msg_id": 103,
+                    "channel": "party",
+                    "sender_id": 8205,
+                    "sender_name": "얼탱",
+                    "text": "아기봇 따라와",
+                    "local_char_id": 999999,
+                    "local_char_name": "아기봇",
+                },
+            })
+            await _wait_bg_tasks(svc)
+
+        pre_calls = [p for m, p, _ in calls if m == "check_follow_reachable"]
+        self.assertEqual([p.get("force_refresh") for p in pre_calls], [True, False])
+        self.assertIn("follow_player", [m for m, _, _ in calls])
 
     async def test_admin_lock_blocks_action_and_notifies_in_persona(self) -> None:
         rpc, calls = _make_fake_rpc({

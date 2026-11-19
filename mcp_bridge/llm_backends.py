@@ -24,21 +24,53 @@ DEFAULT_PERSONA = (
     "반말과 존댓말을 섞어 쓰지 마세요."
 )
 
-VALID_BACKENDS = ("remote_bpsr", "local_cli", "openai_api", "gemini_api")
+VALID_BACKENDS = ("local_agent", "openai_api", "gemini_api")
 VALID_CLI_FLAVORS = ("agy", "claude", "codex", "gemini", "custom")
+
+
+def _default_backend_and_endpoint() -> tuple[str, str]:
+    raw_env = (config.LLM_BACKEND or "").strip().lower()
+    if raw_env == "remote_bpsr":
+        return "local_agent", config.REMOTE_BPSR_CHAT_URL
+    if raw_env in ("local_cli", "local_agy", "cli"):
+        return "local_agent", ""
+    if raw_env == "local_agent":
+        return "local_agent", os.getenv("REMOTE_BPSR_CHAT_URL", "").strip()
+    if raw_env in ("openai_api", "gemini_api"):
+        return raw_env, ""
+    return "local_agent", config.REMOTE_BPSR_CHAT_URL
+
+
+_DEFAULT_BACKEND, _DEFAULT_ENDPOINT = _default_backend_and_endpoint()
 
 
 @dataclass
 class LlmClientConfig:
-    backend: str = config.LLM_BACKEND if config.LLM_BACKEND in VALID_BACKENDS else "remote_bpsr"
+    backend: str = _DEFAULT_BACKEND
     cli_flavor: str = "agy"
-    endpoint_url: str = config.REMOTE_BPSR_CHAT_URL
+    endpoint_url: str = _DEFAULT_ENDPOINT
     api_key: str = ""
     model: str = ""
     cli_command: str = ""
     cli_effort: str = config.AGY_CLI_EFFORT
     persona: str = DEFAULT_PERSONA
-    send_system_prompt: bool = field(default_factory=lambda: config.LLM_BACKEND != "remote_bpsr")
+    send_system_prompt: bool = field(
+        default_factory=lambda: not (_DEFAULT_BACKEND == "local_agent" and bool(_DEFAULT_ENDPOINT.strip()))
+    )
+
+    @property
+    def is_remote_agent(self) -> bool:
+        return self.backend == "local_agent" and bool(self.endpoint_url.strip())
+
+    @property
+    def is_local_cli(self) -> bool:
+        return self.backend == "local_agent" and not bool(self.endpoint_url.strip())
+
+    @property
+    def effective_mode(self) -> str:
+        if self.backend == "local_agent":
+            return "remote_agent" if self.endpoint_url.strip() else "local_cli"
+        return self.backend
 
     @classmethod
     def from_ui_dict(cls, data: dict[str, Any] | None) -> "LlmClientConfig":
@@ -46,19 +78,28 @@ class LlmClientConfig:
         if not isinstance(data, dict):
             return cfg
 
-        backend = str(data.get("backend") or "").strip().lower()
-        if backend in ("local_agy", "cli"):
-            backend = "local_cli"
-        if backend in VALID_BACKENDS:
-            cfg.backend = backend
+        raw_backend = str(data.get("backend") or "").strip().lower()
+        has_endpoint = "endpoint_url" in data
+        raw_ep = str(data.get("endpoint_url") or "").strip()
+
+        if raw_backend == "remote_bpsr":
+            cfg.backend = "local_agent"
+            cfg.endpoint_url = raw_ep or config.REMOTE_BPSR_CHAT_URL
+        elif raw_backend in ("local_cli", "local_agy", "cli"):
+            cfg.backend = "local_agent"
+            cfg.endpoint_url = ""
+        elif raw_backend == "local_agent":
+            cfg.backend = "local_agent"
+            cfg.endpoint_url = raw_ep if has_endpoint else ""
+        elif raw_backend in ("openai_api", "gemini_api"):
+            cfg.backend = raw_backend
+            cfg.endpoint_url = raw_ep if has_endpoint else ""
+        elif has_endpoint:
+            cfg.endpoint_url = raw_ep
 
         flavor = str(data.get("cli_flavor") or "").strip().lower()
         if flavor in VALID_CLI_FLAVORS:
             cfg.cli_flavor = flavor
-
-        ep = str(data.get("endpoint_url") or "").strip()
-        if ep:
-            cfg.endpoint_url = ep
 
         key = str(data.get("api_key") or "").strip()
         if key and key != "***":
@@ -78,12 +119,13 @@ class LlmClientConfig:
         if "send_system_prompt" in data:
             cfg.send_system_prompt = bool(data["send_system_prompt"])
         else:
-            cfg.send_system_prompt = cfg.backend != "remote_bpsr"
+            cfg.send_system_prompt = not cfg.is_remote_agent
         return cfg
 
     def masked_dict(self) -> dict[str, Any]:
         return {
             "backend": self.backend,
+            "effective_mode": self.effective_mode,
             "cli_flavor": self.cli_flavor,
             "endpoint_url": self.endpoint_url,
             "api_key": "***" if self.api_key else "",
@@ -105,11 +147,27 @@ def normalize_remote_bpsr_url(raw_url: str) -> str:
 
 
 def normalize_openai_chat_url(raw_url: str) -> str:
-    base = (raw_url or "").strip() or "https://api.openai.com/v1"
-    base = base.rstrip("/")
+    base = (raw_url or "").strip().rstrip("/")
+    if not base or base.endswith("/bpsr/chat"):
+        base = "https://api.openai.com/v1"
     if base.endswith("/chat/completions"):
         return base
     return f"{base}/chat/completions"
+
+
+def normalize_gemini_generate_url(llm: LlmClientConfig) -> str:
+    model = llm.model.strip() or "gemini-2.5-flash"
+    model_path = model if model.startswith("models/") else f"models/{model}"
+    base = (llm.endpoint_url or "").strip().rstrip("/")
+    if (
+        not base
+        or "192.168." in base
+        or base.endswith("/bpsr/chat")
+        or base.endswith("/v1")
+        or base.endswith("/chat/completions")
+    ):
+        base = "https://generativelanguage.googleapis.com/v1beta"
+    return f"{base}/{model_path}:generateContent"
 
 
 def resolve_cli_executable(flavor: str, custom_cmd: str) -> list[str]:
@@ -336,16 +394,7 @@ async def call_gemini_api(
     if not api_key:
         raise RuntimeError("Google Gemini API Key가 설정되지 않았습니다.")
 
-    model = llm.model.strip() or "gemini-2.5-flash"
-    if not model.startswith("models/"):
-        model_path = f"models/{model}"
-    else:
-        model_path = model
-
-    base = (llm.endpoint_url or "").strip().rstrip("/")
-    if not base or "192.168." in base or base.endswith("/bpsr/chat"):
-        base = "https://generativelanguage.googleapis.com/v1beta"
-    url = f"{base}/{model_path}:generateContent"
+    url = normalize_gemini_generate_url(llm)
 
     gen_cfg: dict[str, Any] = {"temperature": 0.6}
     if llm.send_system_prompt:

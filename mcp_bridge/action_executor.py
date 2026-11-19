@@ -167,13 +167,17 @@ class ActionExecutor:
         (older plugin build), so follow behaves exactly as before.
         """
         res: dict[str, Any] = {}
-        for _ in range(4):
-            res = await self._dispatch("check_follow_reachable", {"target": target}, conn_id=conn_id)
+        for attempt in range(6):
+            res = await self._dispatch(
+                "check_follow_reachable",
+                {"target": target, "force_refresh": attempt == 0},
+                conn_id=conn_id,
+            )
             if not isinstance(res, dict) or not res.get("ok"):
                 return None
             if res.get("reason_code") != "pending_location":
                 return res
-            await (self._sleep or asyncio.sleep)(1.0)
+            await (self._sleep or asyncio.sleep)(0.6)
         return res
 
     async def execute_extended_action(
@@ -306,12 +310,12 @@ class ActionExecutor:
                 on_clear_kinds(("follow",))
 
         if atype == "query_player_location":
-            r = await self._dispatch(method, params, conn_id=conn_id)
-            for _ in range(3):
+            r = await self._dispatch(method, {**params, "force_refresh": True}, conn_id=conn_id)
+            for _ in range(5):
                 if not (isinstance(r, dict) and r.get("ok") and r.get("pending")):
                     break
-                await (self._sleep or asyncio.sleep)(1.0)
-                r = await self._dispatch(method, params, conn_id=conn_id)
+                await (self._sleep or asyncio.sleep)(0.6)
+                r = await self._dispatch(method, {**params, "force_refresh": False}, conn_id=conn_id)
         elif wait:
             r = await self.run_with_result(method, params, conn_id)
         else:

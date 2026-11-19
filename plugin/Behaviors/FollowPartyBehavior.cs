@@ -76,6 +76,7 @@ public sealed class FollowPartyBehavior : IBehavior
     private float _postChannelSwitchSyncTimer;
     private float _combatClearWaitTimer;
     private float _dungeonExitConfirmTimer;
+    private float _unenterableVerifyTimer;
     private long _minRequiredSocialTickMs;
     private float _awaitFreshSocialTimer;
     private int _lastAttemptTargetSceneId;
@@ -136,11 +137,30 @@ public sealed class FollowPartyBehavior : IBehavior
         _lastIntraWarpTpId = 0;
         _sameIntraWarpBlockTimer = 0f;
         _dungeonExitConfirmTimer = 0f;
+        _unenterableVerifyTimer = 0f;
         _recentIntraWarps.Clear();
         _lastAttemptTargetSceneId = 0;
         _moveDriver.Install(this);
-        _world.ResetSocialRefreshThrottle();
-        var resolved = _world.FindAnyPlayerTarget(_initialTargetQuery, requestSocial: true, fastPoll: true);
+
+        long nowMs = Environment.TickCount64;
+        var preResolved = _world.FindAnyPlayerTarget(_initialTargetQuery, requestSocial: false, fastPoll: true);
+        bool preFresh = preResolved != null && (
+            preResolved.InAoi
+            || (preResolved.SocialReceivedAtMs > 0
+                && (nowMs - preResolved.SocialReceivedAtMs) <= 2500
+                && preResolved.SceneId > 0));
+
+        ResolvedPartyTarget? resolved;
+        if (preFresh)
+        {
+            resolved = preResolved;
+        }
+        else
+        {
+            _world.ResetSocialRefreshThrottle(preResolved?.CharId ?? 0L);
+            resolved = _world.FindAnyPlayerTarget(_initialTargetQuery, requestSocial: true, fastPoll: true);
+        }
+
         if (resolved != null)
         {
             _lockedCharId = resolved.CharId;
@@ -151,9 +171,17 @@ public sealed class FollowPartyBehavior : IBehavior
             _wasTargetInAoi = resolved.InAoi;
             if (!resolved.InAoi)
             {
-                _minRequiredSocialTickMs = Environment.TickCount64;
-                _awaitFreshSocialTimer = 1.4f;
-                _world.TriggerImmediateSocialRefresh(resolved.CharId);
+                if (preFresh)
+                {
+                    _minRequiredSocialTickMs = resolved.SocialReceivedAtMs;
+                    _awaitFreshSocialTimer = 0f;
+                }
+                else
+                {
+                    _minRequiredSocialTickMs = nowMs;
+                    _awaitFreshSocialTimer = 3.5f;
+                    _world.TriggerImmediateSocialRefresh(resolved.CharId);
+                }
             }
             _phase = "evaluating_route";
             _detail = $"Locked target {_lockedName} ({_lockedCharId}, source={_lockedSource})";
@@ -227,9 +255,20 @@ public sealed class FollowPartyBehavior : IBehavior
         _targetSceneId = target.SceneId;
         _targetLineId = target.LineId;
 
+        bool freshTargetConfirmed = target.InAoi
+            || (target.SocialReceivedAtMs >= _minRequiredSocialTickMs && target.SocialReceivedAtMs > 0);
         if (!target.IsOnline)
         {
-            CancelTracking("cancelled_target_offline", $"{target.Name} is offline.");
+            if (freshTargetConfirmed || _awaitFreshSocialTimer <= 0f)
+            {
+                CancelTracking("cancelled_target_offline", $"{target.Name} is offline.");
+                return;
+            }
+            _awaitFreshSocialTimer -= dt;
+            _boost.Reset();
+            _moveDriver.Stop(this);
+            _phase = "syncing_target_location";
+            _detail = $"Verifying {target.Name}'s online status ({_awaitFreshSocialTimer:F1}s)...";
             return;
         }
 
@@ -276,7 +315,7 @@ public sealed class FollowPartyBehavior : IBehavior
             _hasLastTargetPos = false;
             _boost.PathNavigator.Reset();
             _minRequiredSocialTickMs = Environment.TickCount64;
-            _awaitFreshSocialTimer = 1.5f;
+            _awaitFreshSocialTimer = 3.0f;
             _world.TriggerImmediateSocialRefresh(target.CharId);
             _postChannelSwitchSyncTimer = 1.2f;
         }
@@ -284,6 +323,7 @@ public sealed class FollowPartyBehavior : IBehavior
         {
             _wasTargetInAoi = true;
             _awaitFreshSocialTimer = 0f;
+            _unenterableVerifyTimer = 0f;
             _postChannelSwitchSyncTimer = 0f;
             _combatClearWaitTimer = 0f;
         }
@@ -396,6 +436,20 @@ public sealed class FollowPartyBehavior : IBehavior
             bool isPartyMember = string.Equals(target.Source, "party", StringComparison.OrdinalIgnoreCase);
             if (!_navigator.CheckSceneEnterability(target.SceneId, isPartyMember, out string blockReason))
             {
+                bool freshConfirmed = target.SocialReceivedAtMs >= _minRequiredSocialTickMs
+                    && target.SocialReceivedAtMs > 0
+                    && (Environment.TickCount64 - target.SocialReceivedAtMs) <= 4500;
+
+                if (!freshConfirmed && _unenterableVerifyTimer < 4.0f)
+                {
+                    if (_unenterableVerifyTimer <= 0.001f)
+                        _world.TriggerImmediateSocialRefresh(target.CharId);
+                    _unenterableVerifyTimer += dt;
+                    _phase = "verifying_target_scene";
+                    _detail = $"Verifying {target.Name}'s current scene ({_unenterableVerifyTimer:F1}s/4.0s)...";
+                    return;
+                }
+
                 // When entering a dungeon/raid TOGETHER with a party member, the leader's client often finishes loading
                 // several seconds before ours. Allow a 20s co-entry grace window before cancelling!
                 if (isPartyMember && blockReason.Contains("instanced", StringComparison.OrdinalIgnoreCase))
@@ -414,6 +468,7 @@ public sealed class FollowPartyBehavior : IBehavior
                     $"Cannot follow {target.Name} into unenterable space '{target.SceneName}' (scene={target.SceneId}): {blockReason}");
                 return;
             }
+            _unenterableVerifyTimer = 0f;
             _partyInstanceSyncTimer = 0f;
 
             if (_lastAttemptFromSceneId != 0 && _lastAttemptFromSceneId != mySceneId)

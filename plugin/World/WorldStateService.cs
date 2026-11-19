@@ -57,7 +57,7 @@ public sealed class WorldStateService : IDisposable
 {
     private const long SocialRefreshFloorMs = 2400;
     private const long FastSocialRefreshFloorMs = 1100;
-    private const long SocialCacheTtlMs = 15000;
+    private const long SocialCacheTtlMs = 6000;
 
     private sealed record CachedLuaSocial(
         string Name,
@@ -258,7 +258,8 @@ public sealed class WorldStateService : IDisposable
                     ref sceneId,
                     ref lineId,
                     ref pos,
-                    out socialRxMs);
+                    out socialRxMs,
+                    allowReturnFieldGuard: sceneId >= 1000);
             }
 
             // Whenever a party member is NOT in our AOI, continuously refresh their live channel & position!
@@ -554,11 +555,10 @@ public sealed class WorldStateService : IDisposable
             return now;
         }
 
-        // First observation without a prior baseline: treat within TTL for casual reads
-        // while remaining older than any active post-exit _minRequiredSocialTickMs gate.
-        long baselineTick = Math.Max(1L, now - 3000L);
-        _entityLocTickMap[charId] = (rawReceivedAtMs, baselineTick);
-        return baselineTick;
+        // First observation without a prior packet change: timestamp 0 = unverified age so callers
+        // wait for a fresh AsyncGetSocialData or live EntityLoc packet before rejecting on cached scene/offline.
+        _entityLocTickMap[charId] = (rawReceivedAtMs, 0L);
+        return 0L;
     }
 
     private CachedLuaSocial? GetFreshLuaSocial(long charId, bool forceHarvest = false)
@@ -606,7 +606,8 @@ public sealed class WorldStateService : IDisposable
         ref int sceneId,
         ref int lineId,
         ref Position3D pos,
-        out long freshestTick)
+        out long freshestTick,
+        bool allowReturnFieldGuard = false)
     {
         static bool HasNonZeroPos(Position3D p) => MathF.Abs(p.X) > 0.01f || MathF.Abs(p.Y) > 0.01f || MathF.Abs(p.Z) > 0.01f;
 
@@ -626,7 +627,7 @@ public sealed class WorldStateService : IDisposable
             Position3D locPos = loc.LevelMapId > 0
                 ? loc.LevelPos
                 : (HasNonZeroPos(loc.LevelPos) && sid >= 1000 && sid != loc.MapId ? loc.LevelPos : loc.Pos);
-            bool ignoreReturnFieldMap = loc.LevelMapId == 0 && sid >= 1000 && loc.MapId > 0 && loc.MapId < 1000;
+            bool ignoreReturnFieldMap = allowReturnFieldGuard && loc.LevelMapId == 0 && sid >= 1000 && loc.MapId > 0 && loc.MapId < 1000;
 
             if (!ignoreReturnFieldMap && locScene > 0)
             {
@@ -760,14 +761,12 @@ public sealed class WorldStateService : IDisposable
             }
             else
             {
-                // Search Friend & Guild tables via Lua (preferring online exact match -> online partial -> offline)
+                // Search Friend & Guild tables via Lua for identity/UID only; never trust stale roster sceneId/online status.
                 var mObj = _social.LookupFriendOrGuildMember(trimmed, selfCharId);
                 if (mObj != null)
                 {
                     resolvedCid = mObj["cid"]?.GetValue<long>() ?? 0;
                     resolvedName = mObj["name"]?.GetValue<string>() ?? "";
-                    isOnline = mObj["online"]?.GetValue<bool>() ?? true;
-                    sceneId = mObj["sceneId"]?.GetValue<int>() ?? 0;
                     source = mObj["source"]?.GetValue<string>() ?? "guild";
                 }
 
@@ -794,16 +793,13 @@ public sealed class WorldStateService : IDisposable
 
         if (resolvedCid <= 0) return null;
 
-        // Hydrate name/online/initial scene immediately from unified social roster when following by explicit UID
+        // Hydrate name and source relationship only from unified social roster; live scene/online come from AOI or fresh server RPC.
         var roster = GetUnifiedSocialRoster(forceRefresh: false);
         foreach (var entry in roster)
         {
             if (entry.Uid != resolvedCid) continue;
             if ((string.IsNullOrEmpty(resolvedName) || resolvedName.StartsWith('#')) && !string.IsNullOrEmpty(entry.Name))
                 resolvedName = entry.Name;
-            isOnline = entry.IsOnline;
-            if (sceneId <= 0 && entry.SceneId > 0)
-                sceneId = entry.SceneId;
             if (source is "char_id" or "social")
                 source = entry.InParty ? "party" : (entry.IsFriend ? "friend" : (entry.InGuild ? "guild" : source));
             break;
@@ -844,7 +840,8 @@ public sealed class WorldStateService : IDisposable
                 ref sceneId,
                 ref lineId,
                 ref pos,
-                out socialRxMs);
+                out socialRxMs,
+                allowReturnFieldGuard: false);
 
             if (requestSocial)
             {

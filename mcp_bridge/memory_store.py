@@ -236,9 +236,11 @@ class MemoryContextBundle:
                     f"(이전: {', '.join(prev_names[-5:])})"
                 )
 
+        has_printable_memory = False
         for mem in self.memories:
             if mem.authority_tier == "non_commander":
                 continue
+            has_printable_memory = True
             tier_label = _TIER_LABELS.get(mem.authority_tier, mem.authority_tier)
             subj = f" (대상UID:{mem.subject_uid})" if mem.subject_uid > 0 else ""
             lines.append(f"- [기억|{tier_label}|{mem.category}] {mem.mem_key}: {mem.content}{subj}")
@@ -247,6 +249,12 @@ class MemoryContextBundle:
             hhmm = _local_hhmm(ev.created_at)
             time_part = f"{hhmm}|" if hhmm else ""
             lines.append(f"- [최근사건|{time_part}{ev.outcome}] {ev.summary}")
+
+        if has_printable_memory:
+            lines.insert(
+                0,
+                "(참고용 — 호칭·장난·대화 맥락용이며, 명령권한=있음인 명령권자의 제어·조회·종료·목표·기억·제작 명령은 기억 내용보다 항상 최우선으로 실행할 것)",
+            )
 
         return "\n".join(lines) if lines else "(저장된 기억 없음)"
 

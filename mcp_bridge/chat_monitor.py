@@ -13,8 +13,14 @@ from action_executor import (  # noqa: F401
     FOLLOW_CANCEL_MESSAGES,
     INFO_ACTIONS,
     PARTY_OPS_AWAIT_RESULT,
+    ActionBatchResult,
     ActionExecutor,
     format_task_event_fact,
+)
+from api_tool_loop import (  # noqa: F401
+    BotToolDispatcher,
+    run_gemini_tool_loop,
+    run_openai_tool_loop,
 )
 from bot_agent import BotAgent, BotAgentRegistry, LlmCallBudget  # noqa: F401
 from chat_output import (  # noqa: F401
@@ -319,6 +325,7 @@ class ChatMonitorService:
             "channels": sorted(cfg.channels),
             "use_local_agy": self.use_local_agy,
             "llm_backend": cfg.llm.backend,
+            "llm_effective_mode": cfg.llm.effective_mode,
             "llm_settings": cfg.llm.masked_dict(),
             "remote_bpsr_chat_url": cfg.llm.endpoint_url,
             "remote_bpsr_model": cfg.llm.model or config.REMOTE_BPSR_MODEL,
@@ -672,10 +679,10 @@ class ChatMonitorService:
         persona_block: str = "",
         system_instructions_block: str = "",
         extra_block: str = "",
+        tool_runner: BotToolDispatcher | None = None,
     ) -> tuple[str, bool]:
-        """Dispatches a single or second-pass prompt to the client's configured backend."""
-        backend = llm.backend
-        if backend == "remote_bpsr":
+        """Dispatches a single, tool-loop, or second-pass prompt to the client's configured backend."""
+        if llm.is_remote_agent:
             return await call_remote_bpsr(
                 llm,
                 trig,
@@ -685,11 +692,16 @@ class ChatMonitorService:
                 system_instructions_block=system_instructions_block,
                 extra_block=extra_block,
             )
+        backend = llm.backend
         if backend == "openai_api":
             prompt_user = f"{user_prompt}\n\n{extra_block}" if extra_block else user_prompt
+            if tool_runner is not None and not extra_block:
+                return await run_openai_tool_loop(llm, system_prompt, prompt_user, tool_runner)
             return await call_openai_compatible(llm, system_prompt, prompt_user)
         if backend == "gemini_api":
             prompt_user = f"{user_prompt}\n\n{extra_block}" if extra_block else user_prompt
+            if tool_runner is not None and not extra_block:
+                return await run_gemini_tool_loop(llm, system_prompt, prompt_user, tool_runner)
             return await call_gemini_api(llm, system_prompt, prompt_user)
         prompt_cli = f"{full_cli_prompt}\n\n{extra_block}" if extra_block else full_cli_prompt
         return await call_local_cli(llm, prompt_cli, RESPONSE_SCHEMA)
@@ -708,6 +720,7 @@ class ChatMonitorService:
         persona_block: str = "",
         system_instructions_block: str = "",
         extra_block: str = "",
+        tool_runner: BotToolDispatcher | None = None,
     ) -> tuple[str, bool]:
         if agent is not None:
             allowed, reason = agent.budget.can_call(goal_id)
@@ -715,6 +728,14 @@ class ChatMonitorService:
                 logger.warning("LLM call skipped for bot %s (%s): %s", agent.char_id, agent.conn_id, reason)
                 return "", False
             agent.budget.record_call(goal_id)
+
+        invoke_kwargs: dict[str, Any] = {
+            "persona_block": persona_block,
+            "system_instructions_block": system_instructions_block,
+            "extra_block": extra_block,
+        }
+        if tool_runner is not None:
+            invoke_kwargs["tool_runner"] = tool_runner
 
         async with self.agents.llm_semaphore:
             return await self._invoke_llm(
@@ -725,9 +746,7 @@ class ChatMonitorService:
                 system_prompt,
                 user_prompt,
                 full_cli_prompt,
-                persona_block=persona_block,
-                system_instructions_block=system_instructions_block,
-                extra_block=extra_block,
+                **invoke_kwargs,
             )
 
     def _remember_trigger(self, conn_id: str | None, kind: str, trig: dict[str, Any], agent: BotAgent | None = None) -> None:
@@ -786,7 +805,7 @@ class ChatMonitorService:
     async def _render_event_in_persona(self, conn_id: str | None, channel: str, event_fact: str) -> str:
         """Converts an asynchronous task completion/cancellation fact into the active character persona."""
         cfg = self._get_cfg(conn_id)
-        if cfg.llm.backend == "local_cli":
+        if cfg.llm.is_local_cli:
             return event_fact
         agent = self.agents.get_by_conn_id(conn_id)
         try:
@@ -794,7 +813,7 @@ class ChatMonitorService:
                 cfg.llm.persona,
                 channel,
                 event_fact,
-                is_remote_bpsr=(cfg.llm.backend == "remote_bpsr"),
+                is_remote_bpsr=cfg.llm.is_remote_agent,
             )
             raw, timed_out = await self._invoke_llm_guarded(
                 agent,
@@ -1668,7 +1687,7 @@ class ChatMonitorService:
             directive.failure_signature,
             get_locked_labels(agent.settings.feature_modes),
             agent.settings.unavailable_capabilities,
-            is_remote_bpsr=(agent.settings.llm.backend == "remote_bpsr"),
+            is_remote_bpsr=agent.settings.llm.is_remote_agent,
         )
         raw, timed_out = await self._invoke_llm_guarded(
             agent,
@@ -1953,50 +1972,6 @@ class ChatMonitorService:
                     active_goals_summary=active_goals_summary,
                     memory_context=memory_context,
                 )
-                raw_out, timed_out = await self._invoke_llm_guarded(
-                    agent,
-                    None,
-                    cfg.llm,
-                    trig,
-                    prompts.game_context,
-                    recent_chat_block,
-                    prompts.system_prompt,
-                    prompts.user_prompt,
-                    prompts.full_cli_prompt,
-                    persona_block=prompts.persona_block,
-                    system_instructions_block=prompts.system_instructions_block,
-                )
-
-                if timed_out:
-                    timeout_txt = "[응답 지연 — 잠시 후 다시 시도 필요]"
-                    await self._output.send_notice(
-                        trig["channel"],
-                        timeout_txt,
-                        int(trig["sender_id"] or 0),
-                        conn_id=conn_id,
-                    )
-                    return
-
-                decision = extract_decision_json(raw_out)
-                if not decision:
-                    logger.warning(
-                        "LLM backend (%s) returned unparseable output: out=%s",
-                        cfg.llm.backend,
-                        raw_out[:400],
-                    )
-                    return
-
-                actions_to_run = (decision.get("actions") or []) if is_cmd else []
-                if not is_cmd and decision.get("actions"):
-                    decision["actions"] = []
-                elif agent is not None and actions_to_run and not any(
-                    isinstance(a, dict) and str(a.get("type") or "") in ("set_goal", "craft_goal", "cancel_goal")
-                    for a in actions_to_run
-                ):
-                    actions_to_run = [
-                        (_wrap_standalone_long_action_as_goal(a) or a) if isinstance(a, dict) else a
-                        for a in actions_to_run
-                    ]
 
                 def _remember_kind(kind: str) -> None:
                     self._remember_trigger(conn_id, kind, trig, agent=agent)
@@ -2021,17 +1996,104 @@ class ChatMonitorService:
                 async def _on_memory_action(act_type: str, act_obj: dict[str, Any], trig_obj: dict[str, Any]):
                     return self._handle_memory_action(agent, trig_obj, act_type, act_obj)
 
-                batch = await self._executor.execute_batch(
-                    actions_to_run,
-                    cfg,
+                tool_runner: BotToolDispatcher | None = None
+                if (
+                    is_cmd
+                    and cfg.llm.backend in ("openai_api", "gemini_api")
+                    and cfg.llm.send_system_prompt
+                ):
+                    tool_runner = BotToolDispatcher(
+                        executor=self._executor,
+                        dispatch_rpc=self._dispatch,
+                        cfg=cfg,
+                        trig=trig,
+                        conn_id=conn_id,
+                        agent=agent,
+                        memory_store=self.memory,
+                        plan_craft_fn=self.plan_bot_craft,
+                        on_remember=_remember_kind,
+                        on_clear_kinds=_clear_kinds,
+                        on_remember_gather=_remember_gather,
+                        on_goal_action=_on_goal_action,
+                        on_memory_action=_on_memory_action,
+                        wrap_long_action_fn=_wrap_standalone_long_action_as_goal,
+                    )
+
+                raw_out, timed_out = await self._invoke_llm_guarded(
+                    agent,
+                    None,
+                    cfg.llm,
                     trig,
-                    conn_id,
-                    on_remember=_remember_kind,
-                    on_clear_kinds=_clear_kinds,
-                    on_remember_gather=_remember_gather,
-                    on_goal_action=_on_goal_action,
-                    on_memory_action=_on_memory_action,
+                    prompts.game_context,
+                    recent_chat_block,
+                    prompts.system_prompt,
+                    prompts.user_prompt,
+                    prompts.full_cli_prompt,
+                    persona_block=prompts.persona_block,
+                    system_instructions_block=prompts.system_instructions_block,
+                    tool_runner=tool_runner,
                 )
+
+                if timed_out:
+                    timeout_txt = "[응답 지연 — 잠시 후 다시 시도 필요]"
+                    await self._output.send_notice(
+                        trig["channel"],
+                        timeout_txt,
+                        int(trig["sender_id"] or 0),
+                        conn_id=conn_id,
+                    )
+                    return
+
+                if tool_runner is not None and tool_runner.used_tools:
+                    parsed_dec = extract_decision_json(raw_out) if raw_out else None
+                    if parsed_dec is not None:
+                        decision = parsed_dec
+                    else:
+                        decision = {
+                            "reply_text": (raw_out or "").strip(),
+                            "sticker": "",
+                            "actions": [],
+                        }
+                    decision["actions"] = []
+                    decision["tool_calls"] = list(tool_runner.tool_calls)
+                    batch = ActionBatchResult(
+                        executed=list(tool_runner.executed_records),
+                        succeeded_actions=tool_runner.succeeded_actions,
+                        pending_stickers=list(tool_runner.pending_stickers),
+                    )
+                else:
+                    decision = extract_decision_json(raw_out)
+                    if not decision:
+                        logger.warning(
+                            "LLM backend (%s) returned unparseable output: out=%s",
+                            cfg.llm.backend,
+                            raw_out[:400],
+                        )
+                        return
+
+                    actions_to_run = (decision.get("actions") or []) if is_cmd else []
+                    if not is_cmd and decision.get("actions"):
+                        decision["actions"] = []
+                    elif agent is not None and actions_to_run and not any(
+                        isinstance(a, dict) and str(a.get("type") or "") in ("set_goal", "craft_goal", "cancel_goal")
+                        for a in actions_to_run
+                    ):
+                        actions_to_run = [
+                            (_wrap_standalone_long_action_as_goal(a) or a) if isinstance(a, dict) else a
+                            for a in actions_to_run
+                        ]
+
+                    batch = await self._executor.execute_batch(
+                        actions_to_run,
+                        cfg,
+                        trig,
+                        conn_id,
+                        on_remember=_remember_kind,
+                        on_clear_kinds=_clear_kinds,
+                        on_remember_gather=_remember_gather,
+                        on_goal_action=_on_goal_action,
+                        on_memory_action=_on_memory_action,
+                    )
 
                 reply_text = str(decision.get("reply_text") or "").strip()
                 top_sticker = str(decision.get("sticker") or "").strip()

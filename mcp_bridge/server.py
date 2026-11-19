@@ -136,8 +136,8 @@ def _try_stage_latest_dll() -> None:
                     aside = slot_dir / f"Stellar.AgyBridge.old_{int(time.time() * 1000)}"
                     dest.rename(aside)
                     shutil.copy2(built, dest)
-                (slot_dir / ".plugin-version").write_text("0.9.23", encoding="utf-8")
-                logger.info("Auto-deployed latest Stellar.AgyBridge.dll (v0.9.23) to %s", dest)
+                (slot_dir / ".plugin-version").write_text("0.9.25", encoding="utf-8")
+                logger.info("Auto-deployed latest Stellar.AgyBridge.dll (v0.9.25) to %s", dest)
         except OSError as exc:
             logger.debug("Auto-deploy DLL skipped for %s: %s", slot_dir, exc)
 
