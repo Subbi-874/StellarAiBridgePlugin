@@ -133,6 +133,8 @@ public sealed class BridgeConfig
     public string LlmCliEffort { get; set; } // "low" | "medium" | "high"
     public string LlmPersona { get; set; }
     public bool LlmSendSystemPrompt { get; set; }
+    public float UiFrameOpacity { get; set; }
+    public bool UiV2LayoutMigrated { get; set; }
 
     public event Action? ChatSettingsChanged;
     public event Action<string, FeatureGateMode>? FeatureModeChanged;
@@ -274,6 +276,9 @@ public sealed class BridgeConfig
         string rawPersona = _cfg.Get<string>("llm_persona", DefaultLlmPersona) ?? DefaultLlmPersona;
         LlmPersona = string.IsNullOrWhiteSpace(rawPersona) ? DefaultLlmPersona : rawPersona.Trim();
         LlmSendSystemPrompt = _cfg.Get<bool>("llm_send_system_prompt", true);
+        float rawOpacity = _cfg.Get<float>("ui_frame_opacity", 0.96f);
+        UiFrameOpacity = float.IsNaN(rawOpacity) ? 0.96f : Math.Clamp(rawOpacity, 0.55f, 1.0f);
+        UiV2LayoutMigrated = _cfg.Get<bool>("ui_v2_layout_migrated", false);
 
         Save();
     }
@@ -821,6 +826,8 @@ public sealed class BridgeConfig
         _cfg.Set("llm_cli_effort", LlmCliEffort);
         _cfg.Set("llm_persona", LlmPersona);
         _cfg.Set("llm_send_system_prompt", LlmSendSystemPrompt);
+        _cfg.Set("ui_frame_opacity", UiFrameOpacity);
+        _cfg.Set("ui_v2_layout_migrated", UiV2LayoutMigrated);
 
         foreach (var desc in FeaturePolicyCatalog.All)
         {

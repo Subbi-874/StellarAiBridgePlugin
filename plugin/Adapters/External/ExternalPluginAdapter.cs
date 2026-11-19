@@ -741,8 +741,20 @@ if not pkgs or not itm then
   return {{ ok = false, error = '인벤토리 데이터를 읽을 수 없어요.' }}
 end
 
+local function getRodDur(uid)
+  if not (fd and fd.GetFishingRodDurability and uid and uid > 0) then
+    return 1
+  end
+  local ok, res = pcall(function() return fd:GetFishingRodDurability(uid) end)
+  if ok and res ~= nil then
+    local n = tonumber(res)
+    if n ~= nil then return n end
+  end
+  return 1
+end
+
 local curRodUuid = fd and tonumber(fd.FishingRod or 0) or 0
-local curRodDur = (fd and fd.GetFishingRodDurability and tonumber(fd:GetFishingRodDurability() or 0)) or 1
+local curRodDur = 0
 local curBaitCfg = fd and tonumber(fd.FishBait or 0) or 0
 
 local bestRodUuid, bestRodQuality = 0, -1
@@ -762,8 +774,12 @@ for _, pkg in pairs(pkgs) do
         local q = cfg and tonumber(cfg.Quality or 0) or 0
         local uidNum = tonumber(item.uuid or 0) or 0
         if itype == 1103 then
-          if curRodUuid > 0 and uidNum == curRodUuid then curRodOwned = true end
-          if q > bestRodQuality then
+          local dur = getRodDur(uidNum)
+          if curRodUuid > 0 and uidNum == curRodUuid then
+            curRodOwned = true
+            curRodDur = dur
+          end
+          if dur > 0 and q > bestRodQuality then
             bestRodQuality = q
             bestRodUuid = uidNum
           end
@@ -783,8 +799,8 @@ for _, pkg in pairs(pkgs) do
   end
 end
 
-if bestRodUuid <= 0 and not curRodOwned then
-  return {{ ok = false, reason = 'no_rod', error = '가방에 낚싯대가 없어서 낚시를 할 수 없어요.' }}
+if bestRodUuid <= 0 and not (curRodOwned and curRodDur > 0) then
+  return {{ ok = false, reason = 'no_rod', error = '가방에 사용 가능한 낚싯대(내구도 남음)가 없어서 낚시를 할 수 없어요.' }}
 end
 
 local needEquipRodUuid = 0

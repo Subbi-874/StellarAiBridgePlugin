@@ -18,11 +18,22 @@ namespace Stellar.AgyBridge.UI;
 
 /// <summary>
 /// Registers the "AGY Bridge" tile in the in-game Stellar Launcher (ESC -> Stellar)
-/// and provides an interactive GlassMenu window with UID-based Follow Target &amp; Commander pickers
-/// across Party, Friends, and Guild rosters.
+/// and provides a wide, high-contrast master-detail GlassMenu control panel plus a tabbed Admin Lock security window.
 /// </summary>
 public sealed class AgyBridgeUiWindow : IDisposable
 {
+    private const float MainDefaultWidth = 820f;
+    private const float MainDefaultHeight = 640f;
+    private const float MainMinWidth = 760f;
+    private const float MainMinHeight = 520f;
+
+    private const float AdminDefaultWidth = 620f;
+    private const float AdminDefaultHeight = 680f;
+    private const float AdminMinWidth = 560f;
+    private const float AdminMinHeight = 500f;
+
+    private static readonly float[] OpacitySteps = { 0.96f, 1.00f, 0.88f, 0.75f };
+
     private static readonly IReadOnlyList<string> PermissionLabels = new[]
     {
         "파티원 + 지정 명령권자(UID)",
@@ -71,6 +82,24 @@ public sealed class AgyBridgeUiWindow : IDisposable
 
     private static readonly IReadOnlyList<string> CliEffortLabels = new[] { "low", "medium", "high" };
 
+    private static readonly (string Id, string Label)[] SidebarTabs =
+    {
+        ("control", "추적 · 빠른 제어"),
+        ("automation", "전투 · 이동 · 생활"),
+        ("chat", "채팅 · 감시/발신"),
+        ("ai", "AI · 페르소나"),
+        ("permissions", "명령권자 · 보안")
+    };
+
+    private static readonly (string Id, string Label, float Width)[] AdminTabs =
+    {
+        ("all", "전체", 64f),
+        ("send", "채팅 발신", 92f),
+        ("recv", "채팅 수신", 92f),
+        ("behavior", "행동·자동화", 104f),
+        ("words", "금칙어 필터", 104f)
+    };
+
     private static readonly SocialRosterEntry EmptyRosterEntry = new(0L, "", false, false, false, false, 0, "");
     private static readonly CommanderRecord EmptyCommanderRecord = new(0L, "");
 
@@ -92,10 +121,13 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private IWindowControl? _adminWindow;
     private IDisposable? _mainLauncherSub;
     private IDisposable? _adminLauncherSub;
+
+    private string _activeTab = "control";
+    private string _adminTab = "all";
     private string _emoteInput = "";
     private string _blockedWordInput = "";
 
-    // Shared cached social roster for UI pickers (polled every 2s while window is rendered)
+    // Shared cached social roster for UI pickers
     private IReadOnlyList<SocialRosterEntry> _uiRoster = Array.Empty<SocialRosterEntry>();
     private long _lastUiRosterPollMs;
     private long _lastConfigSyncMs;
@@ -105,7 +137,6 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private int _countGuild;
 
     // Follow Target UID Picker state
-    private bool _showFollowPicker = true;
     private string _followCategory = "all"; // "all" | "party" | "friend" | "guild"
     private bool _followOnlineOnly = true;
     private string _followSearch = "";
@@ -114,7 +145,6 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private bool _resetFollowScroll;
 
     // Authorized Commander UID Picker state
-    private bool _showCommanderPicker = true;
     private string _cmdCategory = "all"; // "all" | "party" | "friend" | "guild"
     private bool _cmdOnlineOnly;
     private string _commanderSearch = "";
@@ -124,10 +154,17 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private int _regCmdWindowFirst;
 
     // LLM / CLI / Persona Configuration state
-    private bool _showLlmSettings;
     private bool _showApiKey;
     private bool _llmTextDirty;
     private long _lastLlmTextEditMs;
+    private bool _adminExpandedOnce;
+
+    private ColorRgba AccentColor => _services.Theme.Colors.MenuAccent;
+    private ColorRgba PrimaryTextColor => _services.Theme.Colors.MenuText;
+    private ColorRgba MutedColor => _services.Theme.Colors.MenuMuted;
+    private ColorRgba SuccessColor => _services.Theme.Colors.Success;
+    private ColorRgba CautionColor => _services.Theme.Colors.Caution;
+    private ColorRgba DangerColor => _services.Theme.Colors.Danger;
 
     public AgyBridgeUiWindow(
         IPluginServices services,
@@ -167,16 +204,17 @@ public sealed class AgyBridgeUiWindow : IDisposable
         var spec = new WindowSpec(
             "agybridge.main",
             "AGY Bridge 제어판",
-            new WindowRect(360f, 90f, 440f, 650f),
+            new WindowRect(220f, 80f, MainDefaultWidth, MainDefaultHeight),
             WindowCategory.Tools,
             WindowPanelStyle.GlassMenu)
         {
             ShouldRender = () => _services.ClientState.Phase == GamePhase.World,
+            FrameOpacity = () => _config.UiFrameOpacity,
             Closable = true,
             Draggable = true,
             Resizable = true,
-            MinWidth = 390f,
-            MinHeight = 420f,
+            MinWidth = MainMinWidth,
+            MinHeight = MainMinHeight,
             StartVisible = false
         };
 
@@ -207,17 +245,18 @@ public sealed class AgyBridgeUiWindow : IDisposable
         var adminSpec = new WindowSpec(
             "agybridge.adminlock",
             "AGY 어드민락 보안 설정",
-            new WindowRect(420f, 95f, 455f, 640f),
+            new WindowRect(300f, 80f, AdminDefaultWidth, AdminDefaultHeight),
             WindowCategory.Tools,
             WindowPanelStyle.GlassMenu)
         {
             ShouldRender = () => _services.ClientState.Phase == GamePhase.World || _services.Windows.IsLayoutEditing,
+            FrameOpacity = () => _config.UiFrameOpacity,
             OverrideSortingOrder = 32759,
             Closable = true,
             Draggable = true,
             Resizable = true,
-            MinWidth = 405f,
-            MinHeight = 420f,
+            MinWidth = AdminMinWidth,
+            MinHeight = AdminMinHeight,
             StartVisible = false
         };
 
@@ -252,13 +291,35 @@ public sealed class AgyBridgeUiWindow : IDisposable
         _window.SetVisiblePersist(next);
         if (next)
         {
+            TryMigrateWindowSizeOnce();
             RefreshUiRoster(forceLua: true);
             _window.BringToFront();
         }
     }
 
+    public void ToggleAdminWindow()
+    {
+        if (_adminWindow == null) return;
+        bool next = !_adminWindow.IsShown;
+        _adminWindow.SetVisiblePersist(next);
+        if (next)
+        {
+            TryExpandAdminWindowOnce();
+            _adminWindow.BringToFront();
+        }
+    }
+
     public void TickPendingEdits()
     {
+        if (!_config.UiV2LayoutMigrated && _window is { IsShown: true })
+        {
+            TryMigrateWindowSizeOnce();
+        }
+        if (!_adminExpandedOnce && _adminWindow is { IsShown: true })
+        {
+            TryExpandAdminWindowOnce();
+        }
+
         if (!_llmTextDirty) return;
         if (Environment.TickCount64 - _lastLlmTextEditMs < 2500) return;
         _llmTextDirty = false;
@@ -266,6 +327,61 @@ public sealed class AgyBridgeUiWindow : IDisposable
         {
             _config.SaveAndNotifyChatSettings();
         }
+    }
+
+    private void TryMigrateWindowSizeOnce()
+    {
+        if (_config.UiV2LayoutMigrated || _window == null) return;
+        var rect = _window.Rect;
+        if (rect.Width <= 1f || rect.Height <= 1f) return;
+
+        if (rect.Width < MainMinWidth || rect.Height < MainMinHeight)
+        {
+            _window.SetRect(new WindowRect(
+                rect.X,
+                rect.Y,
+                MathF.Max(MainDefaultWidth, rect.Width),
+                MathF.Max(MainDefaultHeight, rect.Height)));
+        }
+
+        _config.UiV2LayoutMigrated = true;
+        _config.Save();
+    }
+
+    private void TryExpandAdminWindowOnce()
+    {
+        if (_adminExpandedOnce || _adminWindow == null) return;
+        var rect = _adminWindow.Rect;
+        if (rect.Width <= 1f || rect.Height <= 1f) return;
+
+        if (rect.Width < AdminMinWidth || rect.Height < AdminMinHeight)
+        {
+            _adminWindow.SetRect(new WindowRect(
+                rect.X,
+                rect.Y,
+                MathF.Max(AdminDefaultWidth, rect.Width),
+                MathF.Max(AdminDefaultHeight, rect.Height)));
+        }
+        _adminExpandedOnce = true;
+    }
+
+    private void CycleFrameOpacity()
+    {
+        float cur = _config.UiFrameOpacity;
+        int bestIdx = 0;
+        float bestDist = float.MaxValue;
+        for (int i = 0; i < OpacitySteps.Length; i++)
+        {
+            float d = MathF.Abs(OpacitySteps[i] - cur);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+        _config.UiFrameOpacity = OpacitySteps[(bestIdx + 1) % OpacitySteps.Length];
+        _config.Save();
+        MarkDirty();
     }
 
     private void MarkLlmTextEdited(Action updateInMemory)
@@ -291,14 +407,6 @@ public sealed class AgyBridgeUiWindow : IDisposable
             _services.Notifications.Notify("AI 백엔드 및 페르소나 설정을 브릿지에 반영했습니다.", NotificationKind.Info, 2.2f);
         }
         _window?.MarkDirty();
-    }
-
-    public void ToggleAdminWindow()
-    {
-        if (_adminWindow == null) return;
-        bool next = !_adminWindow.IsShown;
-        _adminWindow.SetVisiblePersist(next);
-        if (next) _adminWindow.BringToFront();
     }
 
     public void MarkDirty()
@@ -507,32 +615,83 @@ public sealed class AgyBridgeUiWindow : IDisposable
         return $"지정 대상: {_config.LastFollowTarget} (아래 목록에서 UID 선택 권장)";
     }
 
-    /// <summary>
-    /// Official Stellar UI pattern (matches Auto-Gather): wraps ToggleElement + TextElement inside RowElement
-    /// so the switch stays a compact pill on the left with a readable Korean label beside it.
-    /// </summary>
-    private static HudElement MakeToggleRow(string label, Func<bool> getter, Action<bool> setter)
+    private string FormatLlmModeShort()
+    {
+        return _config.LlmBackend switch
+        {
+            "local_agent" => string.IsNullOrWhiteSpace(_config.LlmEndpointUrl)
+                ? $"로컬CLI({_config.LlmCliFlavor})"
+                : "로컬서버(HTTP)",
+            "openai_api" => "OpenAI(Tools)",
+            "gemini_api" => "Gemini(Tools)",
+            _ => "로컬"
+        };
+    }
+
+    private string FormatLlmSummary()
+    {
+        string bLabel = FormatLlmModeShort();
+        string m = string.IsNullOrWhiteSpace(_config.LlmModel) ? "기본모델" : _config.LlmModel;
+        string sp = _config.LlmSendSystemPrompt ? "시스템프롬프트켬" : "페르소나만";
+        return $"{bLabel} · {m} · {sp}";
+    }
+
+    private int CountAdminLockedPolicies()
+    {
+        int n = 0;
+        foreach (var desc in FeaturePolicyCatalog.All)
+        {
+            if (_config.IsAdminLocked(desc.Key)) n++;
+        }
+        return n;
+    }
+
+    private HudElement MakeSectionCard(string title, string? subtitle, IReadOnlyList<HudElement> body)
+    {
+        var list = new List<HudElement>(body.Count + 2)
+        {
+            new TextElement(() => title, () => AccentColor, true, 0f, TextAlign.Left, false, 13)
+            {
+                Bold = true
+            }
+        };
+        if (!string.IsNullOrWhiteSpace(subtitle))
+        {
+            list.Add(new TextElement(() => subtitle, () => MutedColor, false, 0f, TextAlign.Left, true));
+        }
+        list.AddRange(body);
+        return new PanelElement(new ColumnElement(list, 6f), 10f);
+    }
+
+    private HudElement MakeLabeledFieldRow(Func<string> labelFn, HudElement control, float labelWidth = 88f, HudElement? trailing = null)
+    {
+        var children = trailing == null
+            ? new HudElement[]
+            {
+                new TextElement(labelFn, () => MutedColor, false, labelWidth, TextAlign.Left, false),
+                control
+            }
+            : new HudElement[]
+            {
+                new TextElement(labelFn, () => MutedColor, false, labelWidth, TextAlign.Left, false),
+                control,
+                trailing
+            };
+        return new RowElement(children, 8f, RowJustify.Left);
+    }
+
+    private HudElement MakeToggleRow(string label, Func<bool> getter, Action<bool> setter)
     {
         return new RowElement(new HudElement[]
         {
             new ToggleElement(() => "", getter, setter, null),
-            new TextElement(() => label, () => null, false, 0f, TextAlign.Left, false)
+            new TextElement(() => label, () => PrimaryTextColor, false, 0f, TextAlign.Left, false)
         }, 8f, RowJustify.Left);
     }
 
-    /// <summary>
-    /// Renders a 3-stage control row: [0 끔] [1 켬] [2 🔒].
-    /// In normal gameplay on the main panel, AdminLock(2) cannot be set or cleared directly (clicking [2 🔒] opens
-    /// the Admin Lock security panel); in the Stellar Settings Admin Lock panel OR when Stellar Layout Edit mode
-    /// (Shift+`, IsLayoutEditing) is active, all 3 stages are directly editable by mouse.
-    /// </summary>
     private HudElement MakeFeatureGateRow(string policyKey, string? customLabel = null, bool adminPanelMode = false)
     {
-        var greenColor = new ColorRgba(0.22f, 0.85f, 0.55f, 1.0f);
-        var lockColor = new ColorRgba(0.98f, 0.45f, 0.36f, 1.0f);
-        var mutedColor = new ColorRgba(0.72f, 0.78f, 0.85f, 1.0f);
         string baseLabel = customLabel ?? FeaturePolicyCatalog.Find(policyKey)?.Label ?? policyKey;
-
         bool IsAdminEditable() => adminPanelMode || _services.Windows.IsLayoutEditing;
 
         void ApplyStage(FeatureGateMode target)
@@ -549,6 +708,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 if (_adminWindow != null)
                 {
                     _adminWindow.SetVisiblePersist(true);
+                    TryExpandAdminWindowOnce();
                     _adminWindow.BringToFront();
                 }
                 _services.Notifications.Notify(
@@ -571,9 +731,9 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 () => _config.IsAdminLocked(policyKey) ? $"🔒 {baseLabel}" : baseLabel,
                 () => _config.GetFeatureMode(policyKey) switch
                 {
-                    FeatureGateMode.AdminLock => lockColor,
-                    FeatureGateMode.Enabled => greenColor,
-                    _ => mutedColor
+                    FeatureGateMode.AdminLock => DangerColor,
+                    FeatureGateMode.Enabled => SuccessColor,
+                    _ => MutedColor
                 },
                 false,
                 0f,
@@ -586,7 +746,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 () => IsAdminEditable() || !_config.IsAdminLocked(policyKey),
                 MenuButtonStyle.Glass,
                 () => _config.GetFeatureMode(policyKey) == FeatureGateMode.Disabled,
-                44f,
+                46f,
                 null),
             new ButtonElement(
                 () => "1켬",
@@ -594,7 +754,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 () => IsAdminEditable() || !_config.IsAdminLocked(policyKey),
                 MenuButtonStyle.Glass,
                 () => _config.GetFeatureMode(policyKey) == FeatureGateMode.Enabled,
-                44f,
+                46f,
                 null),
             new ButtonElement(
                 () => "2🔒",
@@ -602,138 +762,12 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 null,
                 MenuButtonStyle.Outline,
                 () => _config.GetFeatureMode(policyKey) == FeatureGateMode.AdminLock,
-                50f,
+                52f,
                 null)
         }, 4f, RowJustify.Left);
     }
 
-    private HudElement BuildAdminLockRootElement()
-    {
-        var accentColor = new ColorRgba(0.35f, 0.82f, 0.96f, 1.0f);
-        var amberColor = new ColorRgba(0.95f, 0.65f, 0.20f, 1.0f);
-        var mutedColor = new ColorRgba(0.72f, 0.78f, 0.85f, 1.0f);
-
-        var items = new List<HudElement>
-        {
-            new TextElement(
-                () => "0 비활성  |  1 활성  |  2 어드민락(🔒 원격·대화 해제 불가)",
-                () => amberColor,
-                true,
-                0f,
-                TextAlign.Left,
-                true),
-            new TextElement(
-                () => "어드민락(2🔒)으로 잠근 기능과 채팅 채널은 인게임 대화 명령·LLM·MCP 웹소켓 등 어떤 외부 경로로도 절대 풀리거나 실행되지 않습니다.",
-                () => mutedColor,
-                false,
-                0f,
-                TextAlign.Left,
-                true),
-            new SeparatorElement(false),
-            new TextElement(() => "1. 채팅 발신 채널 보안 (전체채팅 사고 방지)", () => accentColor, true, 0f, TextAlign.Left, false)
-        };
-
-        foreach (var desc in FeaturePolicyCatalog.All)
-        {
-            if (desc.Category == FeatureCategory.ChatSend)
-                items.Add(MakeFeatureGateRow(desc.Key, desc.Label, adminPanelMode: true));
-        }
-
-        items.Add(new SeparatorElement(false));
-        items.Add(new TextElement(() => "2. 채팅 수신(모니터링) 채널 제어", () => accentColor, true, 0f, TextAlign.Left, false));
-        foreach (var desc in FeaturePolicyCatalog.All)
-        {
-            if (desc.Category == FeatureCategory.ChatReceive)
-                items.Add(MakeFeatureGateRow(desc.Key, desc.Label, adminPanelMode: true));
-        }
-
-        items.Add(new SeparatorElement(false));
-        items.Add(new TextElement(() => "3. 캐릭터 행동 · 자동화 기능 제어", () => accentColor, true, 0f, TextAlign.Left, false));
-        foreach (var desc in FeaturePolicyCatalog.All)
-        {
-            if (desc.Category == FeatureCategory.Behavior)
-                items.Add(MakeFeatureGateRow(desc.Key, desc.Label, adminPanelMode: true));
-        }
-
-        items.Add(new SeparatorElement(false));
-        items.Add(new TextElement(() => "4. 발신 채팅 금칙어 필터 (포함 시 전송 물리 차단)", () => accentColor, true, 0f, TextAlign.Left, false));
-        items.Add(new TextElement(
-            () => _config.BlockedChatWords.Count > 0
-                ? "등록 금칙어: " + string.Join(", ", _config.BlockedChatWords)
-                : "등록 금칙어: (없음)",
-            () => mutedColor,
-            false,
-            0f,
-            TextAlign.Left,
-            true));
-
-        var bwInput = new InputElement(
-            Get: () => _blockedWordInput,
-            Submit: submitted =>
-            {
-                string w = (submitted ?? "").Trim();
-                if (!string.IsNullOrEmpty(w) && !_config.BlockedChatWords.Contains(w))
-                {
-                    _config.BlockedChatWords.Add(w);
-                    _config.Save();
-                    _blockedWordInput = "";
-                    MarkDirty();
-                }
-            },
-            Width: 210f,
-            OnChange: v => _blockedWordInput = v ?? "")
-        {
-            SingleLine = true,
-            Placeholder = () => "금칙어 추가/삭제 단어 입력"
-        };
-
-        items.Add(new RowElement(new HudElement[]
-        {
-            bwInput,
-            new ButtonElement(
-                () => "추가",
-                () =>
-                {
-                    string w = _blockedWordInput.Trim();
-                    if (!string.IsNullOrEmpty(w) && !_config.BlockedChatWords.Contains(w))
-                    {
-                        _config.BlockedChatWords.Add(w);
-                        _config.Save();
-                        _blockedWordInput = "";
-                        MarkDirty();
-                    }
-                },
-                null,
-                MenuButtonStyle.Outline,
-                null,
-                58f,
-                null),
-            new ButtonElement(
-                () => "삭제",
-                () =>
-                {
-                    string w = _blockedWordInput.Trim();
-                    if (!string.IsNullOrEmpty(w))
-                    {
-                        _config.BlockedChatWords.RemoveAll(x => string.Equals(x, w, StringComparison.OrdinalIgnoreCase));
-                        _config.Save();
-                        _blockedWordInput = "";
-                        MarkDirty();
-                    }
-                },
-                null,
-                MenuButtonStyle.Glass,
-                null,
-                58f,
-                null)
-        }, 6f, RowJustify.Left));
-
-        return new ScrollElement(new ColumnElement(items, 7f), 0f);
-    }
-
-    private HudElement BuildCategoryTabRow(
-        Func<string> getCat,
-        Action<string> setCat)
+    private HudElement BuildCategoryTabRow(Func<string> getCat, Action<string> setCat, bool includeRefresh = false)
     {
         HudElement TabBtn(string code, Func<string> labelFn, float width) => new ButtonElement(
             labelFn,
@@ -749,142 +783,17 @@ public sealed class AgyBridgeUiWindow : IDisposable
             width,
             null);
 
-        return new RowElement(new HudElement[]
+        var btns = new List<HudElement>
         {
-            TabBtn("all", () => { EnsureUiRosterFresh(); return $"전체({_countAll})"; }, 80f),
-            TabBtn("party", () => { EnsureUiRosterFresh(); return $"파티({_countParty})"; }, 74f),
-            TabBtn("friend", () => { EnsureUiRosterFresh(); return $"친구({_countFriend})"; }, 80f),
-            TabBtn("guild", () => { EnsureUiRosterFresh(); return $"길드({_countGuild})"; }, 80f)
-        }, 4f, RowJustify.Left);
-    }
-
-    private HudElement BuildRootElement()
-    {
-        var greenColor = new ColorRgba(0.22f, 0.85f, 0.55f, 1.0f);
-        var amberColor = new ColorRgba(0.95f, 0.65f, 0.20f, 1.0f);
-        var accentColor = new ColorRgba(0.35f, 0.82f, 0.96f, 1.0f);
-        var onlineColor = new ColorRgba(0.92f, 0.96f, 1.00f, 1.0f);
-        var mutedColor = new ColorRgba(0.72f, 0.78f, 0.85f, 1.0f);
-        var offlineColor = new ColorRgba(0.50f, 0.55f, 0.62f, 0.92f);
-
-        // 1. Header Status Row
-        var statusRow = new RowElement(new HudElement[]
+            TabBtn("all", () => { EnsureUiRosterFresh(); return $"전체({_countAll})"; }, 86f),
+            TabBtn("party", () => { EnsureUiRosterFresh(); return $"파티({_countParty})"; }, 78f),
+            TabBtn("friend", () => { EnsureUiRosterFresh(); return $"친구({_countFriend})"; }, 84f),
+            TabBtn("guild", () => { EnsureUiRosterFresh(); return $"길드({_countGuild})"; }, 84f)
+        };
+        if (includeRefresh)
         {
-            new PillElement(
-                () => _wsClient.IsConnected ? "브리지 연결됨" : "브리지 자동 기동 중",
-                () => _wsClient.IsConnected ? greenColor : amberColor),
-            new SpacerElement(0f, 0f),
-            new ButtonElement(
-                () => "🔒 어드민락",
-                ToggleAdminWindow,
-                null,
-                MenuButtonStyle.Glass,
-                () => _adminWindow is { IsShown: true },
-                98f,
-                null),
-            new ButtonElement(
-                () => "전체 정지",
-                () =>
-                {
-                    _behaviors.StopCurrent("ui_stop");
-                    _autoGather.StopAutoGather();
-                    MarkDirty();
-                },
-                null,
-                MenuButtonStyle.Outline,
-                null,
-                86f,
-                null)
-        }, 6f, RowJustify.Left);
-
-        var activeDetailText = new TextElement(
-            GetActiveBehaviorSummary,
-            () => accentColor,
-            false,
-            0f,
-            TextAlign.Left,
-            true);
-
-        var errorRedColor = new ColorRgba(0.98f, 0.45f, 0.36f, 1.0f);
-        var capabilityStatusText = new TextElement(
-            () => _capabilities.GetUiSummary(out _),
-            () =>
-            {
-                _capabilities.GetUiSummary(out var st);
-                return st switch
-                {
-                    CapabilityState.Available => greenColor,
-                    CapabilityState.Missing => errorRedColor,
-                    _ => amberColor
-                };
-            },
-            false,
-            0f,
-            TextAlign.Left,
-            true);
-
-        // 2. Tracking / Locomotion / Auto-Combat Section (UID-first)
-        var followHeader = new TextElement(() => "추적 · 이동 · 자동전투 (UID 지정)", () => null, true, 0f, TextAlign.Left, false);
-
-        var currentFollowLabel = new TextElement(
-            FormatCurrentFollowDesignation,
-            () => accentColor,
-            false,
-            0f,
-            TextAlign.Left,
-            true);
-
-        var followToggleRow = MakeToggleRow(
-            "대상 지속 추적",
-            () => _behaviors.Current is FollowPartyBehavior,
-            enable =>
-            {
-                if (enable)
-                {
-                    string tgt = _config.LastFollowTargetUid > 0
-                        ? _config.LastFollowTargetUid.ToString(CultureInfo.InvariantCulture)
-                        : (string.IsNullOrWhiteSpace(_config.LastFollowTarget) ? "leader" : _config.LastFollowTarget.Trim());
-                    StartFollowFromUi(tgt);
-                }
-                else if (_behaviors.Current is FollowPartyBehavior)
-                {
-                    _behaviors.StopCurrent("ui_toggle_off");
-                }
-                _window?.MarkDirty();
-            });
-
-        var followActionBtnsRow = new RowElement(new HudElement[]
-        {
-            new ButtonElement(
-                () => "파티장 추적",
-                () =>
-                {
-                    _config.LastFollowTargetUid = 0L;
-                    _config.LastFollowTarget = "leader";
-                    _config.Save();
-                    StartFollowFromUi("leader");
-                    _window?.MarkDirty();
-                },
-                null,
-                MenuButtonStyle.Glass,
-                () => _config.LastFollowTargetUid == 0L
-                      && string.Equals(_config.LastFollowTarget, "leader", StringComparison.OrdinalIgnoreCase),
-                98f,
-                null),
-            new ButtonElement(
-                () => _showFollowPicker ? "대상 목록 접기 ▲" : "대상 목록 열기 ▼",
-                () =>
-                {
-                    _showFollowPicker = !_showFollowPicker;
-                    if (_showFollowPicker) RefreshUiRoster(forceLua: false);
-                    _window?.MarkDirty();
-                },
-                null,
-                MenuButtonStyle.Outline,
-                () => _showFollowPicker,
-                132f,
-                null),
-            new ButtonElement(
+            btns.Add(new SpacerElement(0f, 0f));
+            btns.Add(new ButtonElement(
                 () => "새로고침",
                 () =>
                 {
@@ -894,9 +803,277 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 null,
                 MenuButtonStyle.Glass,
                 null,
-                78f,
+                84f,
+                null));
+        }
+        return new RowElement(btns, 5f, RowJustify.Left);
+    }
+
+    private HudElement BuildHeaderBar()
+    {
+        var topRow = new RowElement(new HudElement[]
+        {
+            new PillElement(
+                () => _wsClient.IsConnected ? "● 브리지 연결됨" : "● 브리지 기동 중",
+                () => _wsClient.IsConnected ? SuccessColor : CautionColor),
+            new CellElement(
+                new TextElement(GetActiveBehaviorSummary, () => AccentColor, true, 0f, TextAlign.Left, false)
+                {
+                    Bold = true,
+                    Ellipsize = true
+                },
+                0f,
+                1f),
+            new ButtonElement(
+                () => $"배경 {MathF.Round(_config.UiFrameOpacity * 100f):0}%",
+                CycleFrameOpacity,
+                null,
+                MenuButtonStyle.Glass,
+                null,
+                86f,
+                null),
+            new ButtonElement(
+                () => "🔒 어드민락",
+                ToggleAdminWindow,
+                null,
+                MenuButtonStyle.Glass,
+                () => _adminWindow is { IsShown: true },
+                96f,
+                null),
+            new ButtonElement(
+                () => "■ 전체 정지",
+                () =>
+                {
+                    _behaviors.StopCurrent("ui_stop");
+                    _autoGather.StopAutoGather();
+                    MarkDirty();
+                },
+                null,
+                MenuButtonStyle.Outline,
+                null,
+                92f,
                 null)
         }, 6f, RowJustify.Left);
+
+        var subRow = new RowElement(new HudElement[]
+        {
+            new CellElement(
+                new TextElement(
+                    () => _capabilities.GetUiSummary(out _),
+                    () =>
+                    {
+                        _capabilities.GetUiSummary(out var st);
+                        return st switch
+                        {
+                            CapabilityState.Available => SuccessColor,
+                            CapabilityState.Missing => DangerColor,
+                            _ => CautionColor
+                        };
+                    },
+                    false,
+                    0f,
+                    TextAlign.Left,
+                    false)
+                {
+                    Ellipsize = true
+                },
+                0f,
+                1f),
+            new TextElement(
+                () => $"AI: {FormatLlmSummary()}",
+                () => MutedColor,
+                false,
+                0f,
+                TextAlign.Right,
+                false)
+            {
+                Ellipsize = true
+            }
+        }, 8f, RowJustify.Left);
+
+        return new PanelElement(new ColumnElement(new HudElement[] { topRow, subRow }, 5f), 8f);
+    }
+
+    private HudElement MakeSidebarButton(string tabId, string label)
+    {
+        return new ButtonElement(
+            () => _activeTab == tabId ? $"▶ {label}" : label,
+            () =>
+            {
+                if (_activeTab == "ai" && tabId != "ai" && _llmTextDirty)
+                    NormalizeAndSaveLlmSettings(showToast: false);
+                _activeTab = tabId;
+                if (tabId is "control" or "permissions")
+                    RefreshUiRoster(forceLua: false);
+                _window?.MarkDirty();
+            },
+            null,
+            MenuButtonStyle.Glass,
+            () => _activeTab == tabId,
+            156f,
+            null);
+    }
+
+    private HudElement BuildSidebar()
+    {
+        var items = new List<HudElement>
+        {
+            new TextElement(() => "카테고리", () => MutedColor, true, 0f, TextAlign.Left, false)
+            {
+                Bold = true
+            }
+        };
+
+        foreach (var (id, label) in SidebarTabs)
+        {
+            items.Add(MakeSidebarButton(id, label));
+        }
+
+        items.Add(new SeparatorElement(false));
+        items.Add(new TextElement(() => "실시간 요약", () => MutedColor, true, 0f, TextAlign.Left, false)
+        {
+            Bold = true
+        });
+        items.Add(new TextElement(
+            () => _config.ChatMonitorEnabled ? "대화 감시: ON" : "대화 감시: OFF",
+            () => _config.ChatMonitorEnabled ? SuccessColor : MutedColor,
+            false,
+            0f,
+            TextAlign.Left,
+            false));
+        items.Add(new TextElement(
+            () => $"AI: {FormatLlmModeShort()}",
+            () => AccentColor,
+            false,
+            0f,
+            TextAlign.Left,
+            false));
+        items.Add(new TextElement(
+            () => $"명령권자: {_config.CommanderEntries.Count}명",
+            () => PrimaryTextColor,
+            false,
+            0f,
+            TextAlign.Left,
+            false));
+        items.Add(new TextElement(
+            () =>
+            {
+                int locked = CountAdminLockedPolicies();
+                return locked > 0 ? $"어드민락: {locked}개 잠금" : "어드민락: 잠금 없음";
+            },
+            () => CountAdminLockedPolicies() > 0 ? DangerColor : MutedColor,
+            false,
+            0f,
+            TextAlign.Left,
+            false));
+
+        return new PanelElement(new ColumnElement(items, 6f), 8f);
+    }
+
+    private HudElement BuildControlTab()
+    {
+        var quickCard = MakeSectionCard(
+            "추적 · 파티 · 던전 빠른 제어",
+            null,
+            new HudElement[]
+            {
+                new TextElement(FormatCurrentFollowDesignation, () => AccentColor, true, 0f, TextAlign.Left, true)
+                {
+                    Bold = true
+                },
+                MakeToggleRow(
+                    "대상 지속 추적",
+                    () => _behaviors.Current is FollowPartyBehavior,
+                    enable =>
+                    {
+                        if (enable)
+                        {
+                            string tgt = _config.LastFollowTargetUid > 0
+                                ? _config.LastFollowTargetUid.ToString(CultureInfo.InvariantCulture)
+                                : (string.IsNullOrWhiteSpace(_config.LastFollowTarget) ? "leader" : _config.LastFollowTarget.Trim());
+                            StartFollowFromUi(tgt);
+                        }
+                        else if (_behaviors.Current is FollowPartyBehavior)
+                        {
+                            _behaviors.StopCurrent("ui_toggle_off");
+                        }
+                        _window?.MarkDirty();
+                    }),
+                new RowElement(new HudElement[]
+                {
+                    new ButtonElement(
+                        () => "파티장 추적",
+                        () =>
+                        {
+                            _config.LastFollowTargetUid = 0L;
+                            _config.LastFollowTarget = "leader";
+                            _config.Save();
+                            StartFollowFromUi("leader");
+                            _window?.MarkDirty();
+                        },
+                        null,
+                        MenuButtonStyle.Glass,
+                        () => _config.LastFollowTargetUid == 0L
+                              && string.Equals(_config.LastFollowTarget, "leader", StringComparison.OrdinalIgnoreCase),
+                        106f,
+                        null),
+                    new ButtonElement(
+                        () => "자동수락 파티 생성",
+                        () =>
+                        {
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string err))
+                            {
+                                _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
+                                return;
+                            }
+                            _party.CreateParty(autoAccept: true, leaveFirst: false);
+                        },
+                        () => !_config.IsAdminLocked(FeaturePolicyKeys.PartyManage),
+                        MenuButtonStyle.Outline,
+                        null,
+                        152f,
+                        null),
+                    new ButtonElement(
+                        () => "파티 탈퇴",
+                        () =>
+                        {
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string err))
+                            {
+                                _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
+                                return;
+                            }
+                            _party.LeaveParty();
+                        },
+                        () => !_config.IsAdminLocked(FeaturePolicyKeys.PartyManage),
+                        MenuButtonStyle.Glass,
+                        null,
+                        96f,
+                        null),
+                    new ButtonElement(
+                        () => "던전 나가기",
+                        () =>
+                        {
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.DungeonEnter, out string err))
+                            {
+                                _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
+                                return;
+                            }
+                            _behaviors.StopCurrent("ui_leave_dungeon");
+                            var res = _navigator.RequestLeaveSpecialScene(_world.GetLocalSceneId());
+                            bool leftOk = res["ok"]?.GetValue<bool>() == true;
+                            _services.Notifications.Notify(
+                                leftOk ? "던전/특수 씬 퇴장을 요청했습니다." : (res["error"]?.GetValue<string>() ?? "현재 던전/특수 씬이 아닙니다."),
+                                leftOk ? NotificationKind.Info : NotificationKind.Warning,
+                                2.5f);
+                            MarkDirty();
+                        },
+                        () => !_config.IsAdminLocked(FeaturePolicyKeys.DungeonEnter),
+                        MenuButtonStyle.Glass,
+                        null,
+                        102f,
+                        null)
+                }, 6f, RowJustify.Left)
+            });
 
         var followTabsRow = BuildCategoryTabRow(
             () => _followCategory,
@@ -905,7 +1082,8 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 _followCategory = cat;
                 _resetFollowScroll = true;
                 RebuildFilteredLists();
-            });
+            },
+            includeRefresh: true);
 
         var followFilterRow = new RowElement(new HudElement[]
         {
@@ -922,7 +1100,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
             new InputElement(
                 Get: () => _followSearch,
                 Submit: SubmitManualFollowInput,
-                Width: 215f,
+                Width: 300f,
                 OnChange: val =>
                 {
                     _followSearch = val ?? "";
@@ -931,8 +1109,16 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 })
             {
                 SingleLine = true,
-                Placeholder = () => "이름/UID 검색 (UID 엔터 시 추적)"
-            }
+                Placeholder = () => "이름/UID 검색 (UID 입력 후 엔터 또는 버튼)"
+            },
+            new ButtonElement(
+                () => "추적",
+                () => SubmitManualFollowInput(_followSearch),
+                () => !_config.IsAdminLocked(FeaturePolicyKeys.FollowMove),
+                MenuButtonStyle.Outline,
+                null,
+                68f,
+                null)
         }, 8f, RowJustify.Left);
 
         const int rosterPoolSize = 8;
@@ -948,9 +1134,9 @@ public sealed class AgyBridgeUiWindow : IDisposable
                         : "",
                     () =>
                     {
-                        if (!TryGetFollowRow(slot, out var it)) return offlineColor;
-                        if (_config.LastFollowTargetUid == it.Uid) return accentColor;
-                        return it.IsOnline ? onlineColor : offlineColor;
+                        if (!TryGetFollowRow(slot, out var it)) return MutedColor;
+                        if (_config.LastFollowTargetUid == it.Uid) return AccentColor;
+                        return it.IsOnline ? PrimaryTextColor : MutedColor;
                     },
                     false,
                     0f,
@@ -959,7 +1145,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 new SpacerElement(0f, 0f),
                 new TextElement(
                     () => TryGetFollowRow(slot, out var it) ? $"UID: {it.Uid}" : "",
-                    () => TryGetFollowRow(slot, out var it) && _config.LastFollowTargetUid == it.Uid ? accentColor : mutedColor,
+                    () => TryGetFollowRow(slot, out var it) && _config.LastFollowTargetUid == it.Uid ? AccentColor : MutedColor,
                     false,
                     0f,
                     TextAlign.Right,
@@ -982,10 +1168,10 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 EnsureUiRosterFresh();
                 return _followFiltered.Count;
             },
-            26f,
+            28f,
             followPool,
             first => _followWindowFirst = first,
-            140f)
+            210f)
         {
             FixedHeight = true,
             ResetScroll = () =>
@@ -997,16 +1183,17 @@ public sealed class AgyBridgeUiWindow : IDisposable
         };
 
         var followEmptyHint = new TextElement(
-            () => "조건에 맞는 파티/친구/길드원이 없습니다. (직접 UID 입력 후 엔터 가능)",
-            () => mutedColor,
+            () => "조건에 맞는 파티/친구/길드원이 없습니다. (직접 UID 입력 후 [추적] 가능)",
+            () => MutedColor,
             false,
             0f,
             TextAlign.Left,
             true);
 
-        var followPickerSection = new ConditionalElement(
-            () => _showFollowPicker,
-            new ColumnElement(new HudElement[]
+        var pickerCard = MakeSectionCard(
+            "추적 대상 선택 (파티 · 친구 · 길드 UID)",
+            "목록에서 유저를 클릭하면 즉시 UID 기반 지속 추적을 시작합니다.",
+            new HudElement[]
             {
                 followTabsRow,
                 followFilterRow,
@@ -1019,37 +1206,9 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     followVirtualList,
                     followEmptyHint,
                     false)
-            }, 6f),
-            null,
-            false);
-
-        var autoCombatToggleRow = MakeFeatureGateRow(FeaturePolicyKeys.AutoCombat, "자동전투 지속 유지");
-        var autoEvadeToggleRow = MakeToggleRow(
-            "전투 저스트 회피 (장판 폭발·보스 섬광)",
-            () => _config.EnableAutoEvade,
-            v =>
-            {
-                _config.EnableAutoEvade = v;
-                _config.Save();
-                _window?.MarkDirty();
             });
-        var autoCameraGuardToggleRow = MakeToggleRow(
-            "전투·워프 후 시점 자동 복구 (최대 줌아웃·부감)",
-            () => _config.EnableAutoCameraGuard,
-            v =>
-            {
-                _config.EnableAutoCameraGuard = v;
-                _config.Save();
-                _window?.MarkDirty();
-            });
-        var autoReviveToggleRow = MakeFeatureGateRow(FeaturePolicyKeys.AutoRevive, "사망 시 자동 부활 (무료)");
-        var boostToggleRow = MakeFeatureGateRow(FeaturePolicyKeys.BoostMove, "3단 가속 이동 (E+버니합)");
-        var closestTpToggleRow = MakeFeatureGateRow(FeaturePolicyKeys.ClosestPortal, "최단거리 포탈 자동이동");
-        var tpChannelGateRow = MakeFeatureGateRow(FeaturePolicyKeys.TeleportChannel, "맵 포탈 · 채널 이동 허용");
-        var autoFishGateRow = MakeFeatureGateRow(FeaturePolicyKeys.AutoFish, "자동 낚시 제어");
-        var emoteMimicToggleRow = MakeFeatureGateRow(FeaturePolicyKeys.Emote, "감정표현 (단독·따라하기)");
 
-        var emoteStandaloneInput = new InputElement(
+        var emoteInput = new InputElement(
             Get: () => _emoteInput,
             Submit: submitted =>
             {
@@ -1065,123 +1224,176 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     MarkDirty();
                 }
             },
-            Width: 185f,
+            Width: 320f,
             OnChange: v => _emoteInput = v ?? "")
         {
             SingleLine = true,
-            Placeholder = () => "감정표현 (예: 박수, 댄스, 앉기)"
+            Placeholder = () => "감정표현 이름 입력 (예: 박수, 댄스, 앉기)"
         };
 
-        var playEmoteBtn = new ButtonElement(
-            () => "실행",
-            () =>
+        var emoteCard = MakeSectionCard(
+            "감정표현 즉시 실행",
+            null,
+            new HudElement[]
             {
-                if (!_config.CheckFeatureExecution(FeaturePolicyKeys.Emote, out string err))
+                new RowElement(new HudElement[]
                 {
-                    _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
-                    return;
-                }
-                if (!string.IsNullOrWhiteSpace(_emoteInput))
-                    _world.PlayStandaloneEmote(_emoteInput);
-                MarkDirty();
-            },
-            () => !_config.IsAdminLocked(FeaturePolicyKeys.Emote),
-            MenuButtonStyle.Outline,
-            null,
-            58f,
-            null);
+                    emoteInput,
+                    new ButtonElement(
+                        () => "실행",
+                        () =>
+                        {
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.Emote, out string err))
+                            {
+                                _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
+                                return;
+                            }
+                            if (!string.IsNullOrWhiteSpace(_emoteInput))
+                                _world.PlayStandaloneEmote(_emoteInput);
+                            MarkDirty();
+                        },
+                        () => !_config.IsAdminLocked(FeaturePolicyKeys.Emote),
+                        MenuButtonStyle.Outline,
+                        null,
+                        72f,
+                        null),
+                    new ButtonElement(
+                        () => "중지",
+                        () =>
+                        {
+                            _world.PlayStandaloneEmote(null, 0, stop: true);
+                            MarkDirty();
+                        },
+                        null,
+                        MenuButtonStyle.Glass,
+                        null,
+                        72f,
+                        null)
+                }, 6f, RowJustify.Left)
+            });
 
-        var stopEmoteBtn = new ButtonElement(
-            () => "중지",
-            () =>
+        return new ColumnElement(new HudElement[] { quickCard, pickerCard, emoteCard }, 10f);
+    }
+
+    private HudElement BuildAutomationTab()
+    {
+        var combatCard = MakeSectionCard(
+            "전투 · 생존 · 시점",
+            "0 끔  |  1 켬  |  2 🔒 어드민락(대화·원격 해제 불가)",
+            new HudElement[]
             {
-                _world.PlayStandaloneEmote(null, 0, stop: true);
-                MarkDirty();
-            },
+                MakeFeatureGateRow(FeaturePolicyKeys.AutoCombat, "자동전투 지속 유지"),
+                MakeToggleRow(
+                    "전투 저스트 회피 (장판 폭발·보스 섬광)",
+                    () => _config.EnableAutoEvade,
+                    v =>
+                    {
+                        _config.EnableAutoEvade = v;
+                        _config.Save();
+                        _window?.MarkDirty();
+                    }),
+                MakeToggleRow(
+                    "전투·워프 후 시점 자동 복구 (최대 줌아웃·부감)",
+                    () => _config.EnableAutoCameraGuard,
+                    v =>
+                    {
+                        _config.EnableAutoCameraGuard = v;
+                        _config.Save();
+                        _window?.MarkDirty();
+                    }),
+                MakeFeatureGateRow(FeaturePolicyKeys.AutoRevive, "사망 시 자동 부활 (무료)"),
+                MakeFeatureGateRow(FeaturePolicyKeys.Emote, "감정표현 (단독·따라하기)")
+            });
+
+        var movementCard = MakeSectionCard(
+            "이동 · 추적 · 포탈 · 위치",
             null,
-            MenuButtonStyle.Glass,
+            new HudElement[]
+            {
+                MakeFeatureGateRow(FeaturePolicyKeys.FollowMove, "대상 추적 · 이동 허용"),
+                MakeFeatureGateRow(FeaturePolicyKeys.TeleportChannel, "맵 포탈 · 채널 이동 허용"),
+                MakeFeatureGateRow(FeaturePolicyKeys.BoostMove, "3단 가속 이동 (E+버니합)"),
+                MakeFeatureGateRow(FeaturePolicyKeys.ClosestPortal, "최단거리 포탈 자동이동"),
+                MakeFeatureGateRow(FeaturePolicyKeys.PlayerLocate, "유저 위치 조회 허용"),
+                MakeFeatureGateRow(FeaturePolicyKeys.Ride, "탈것 탑승 · 하차 · 동승")
+            });
+
+        var socialCraftCard = MakeSectionCard(
+            "파티 · 던전 · 생활 · 제작",
             null,
-            58f,
-            null);
+            new HudElement[]
+            {
+                MakeFeatureGateRow(FeaturePolicyKeys.PartyManage, "파티 생성·가입·탈퇴 제어"),
+                MakeFeatureGateRow(FeaturePolicyKeys.AutoReady, "던전·레이드·월드보스 자동 준비"),
+                MakeFeatureGateRow(FeaturePolicyKeys.DungeonEnter, "던전·레이드 입장 시작 허용"),
+                MakeFeatureGateRow(FeaturePolicyKeys.AutoGather, "자동 채집"),
+                MakeFeatureGateRow(FeaturePolicyKeys.AutoFish, "자동 낚시 제어"),
+                MakeFeatureGateRow(FeaturePolicyKeys.AutoCraft, "아이템·요리·가구·장비 제작"),
+                MakeFeatureGateRow(FeaturePolicyKeys.LoadoutSwitch, "직업·스킬 프리셋 변경"),
+                MakeFeatureGateRow(FeaturePolicyKeys.OutfitSwitch, "의상 프리셋 변경")
+            });
 
-        var emoteStandaloneRow = new RowElement(new HudElement[] { emoteStandaloneInput, playEmoteBtn, stopEmoteBtn }, 6f, RowJustify.Left);
+        return new ColumnElement(new HudElement[] { combatCard, movementCard, socialCraftCard }, 10f);
+    }
 
-        // 3. Party & Dungeon Quick Controls
-        var partyHeader = new TextElement(() => "파티 · 던전 제어", () => null, true, 0f, TextAlign.Left, false);
-        var partyGateRow = MakeFeatureGateRow(FeaturePolicyKeys.PartyManage, "파티 생성·가입·탈퇴 제어");
-        var autoReadyGateRow = MakeFeatureGateRow(FeaturePolicyKeys.AutoReady, "던전·레이드·월드보스 자동 준비");
-        var dungeonEnterGateRow = MakeFeatureGateRow(FeaturePolicyKeys.DungeonEnter, "던전·레이드 입장 시작 허용");
-        var partyBtnsRow = new RowElement(new HudElement[]
-        {
-            new ButtonElement(
-                () => "자동수락 파티 생성",
-                () =>
+    private HudElement BuildChatTab()
+    {
+        var masterCard = MakeSectionCard(
+            "대화 모니터링 전체 제어",
+            "전체 스위치 또는 개별 채널을 0(끔)/1(켬)/2(🔒 어드민락)으로 제어합니다.",
+            new HudElement[]
+            {
+                MakeFeatureGateRow(FeaturePolicyKeys.ChatMonitor, "대화 모니터링 전체")
+            });
+
+        var recvCard = MakeSectionCard(
+            "수신 (채팅 감지) 채널",
+            null,
+            new HudElement[]
+            {
+                MakeFeatureGateRow(FeaturePolicyKeys.RecvGuild, "길드 채팅 감지"),
+                MakeFeatureGateRow(FeaturePolicyKeys.RecvParty, "파티 채팅 감지"),
+                MakeFeatureGateRow(FeaturePolicyKeys.RecvWhisper, "귓속말 감지"),
+                MakeFeatureGateRow(FeaturePolicyKeys.RecvSay, "일반 채팅 감지")
+            });
+
+        var sendCard = MakeSectionCard(
+            "발신 채널 보안 & 금칙어 필터",
+            "월드/일반 채팅은 어드민락(🔒)으로 잠가 실수로 공개 채팅이 나가지 않도록 보호하는 것을 권장합니다.",
+            new HudElement[]
+            {
+                MakeFeatureGateRow(FeaturePolicyKeys.SendWorld, "월드(전체) 채팅 발신"),
+                MakeFeatureGateRow(FeaturePolicyKeys.SendSay, "일반(주변) 채팅 발신"),
+                MakeFeatureGateRow(FeaturePolicyKeys.SendGuild, "길드 채팅 발신"),
+                MakeFeatureGateRow(FeaturePolicyKeys.SendParty, "파티 채팅 발신"),
+                MakeFeatureGateRow(FeaturePolicyKeys.SendWhisper, "귓속말 발신"),
+                new SeparatorElement(false),
+                new RowElement(new HudElement[]
                 {
-                    if (!_config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string err))
-                    {
-                        _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
-                        return;
-                    }
-                    _party.CreateParty(autoAccept: true, leaveFirst: false);
-                },
-                () => !_config.IsAdminLocked(FeaturePolicyKeys.PartyManage),
-                MenuButtonStyle.Outline,
-                null,
-                155f,
-                null),
-            new ButtonElement(
-                () => "파티 탈퇴",
-                () =>
-                {
-                    if (!_config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string err))
-                    {
-                        _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
-                        return;
-                    }
-                    _party.LeaveParty();
-                },
-                () => !_config.IsAdminLocked(FeaturePolicyKeys.PartyManage),
-                MenuButtonStyle.Glass,
-                null,
-                105f,
-                null),
-            new ButtonElement(
-                () => "던전 나가기",
-                () =>
-                {
-                    if (!_config.CheckFeatureExecution(FeaturePolicyKeys.DungeonEnter, out string err))
-                    {
-                        _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
-                        return;
-                    }
-                    _behaviors.StopCurrent("ui_leave_dungeon");
-                    var res = _navigator.RequestLeaveSpecialScene(_world.GetLocalSceneId());
-                    bool leftOk = res["ok"]?.GetValue<bool>() == true;
-                    _services.Notifications.Notify(
-                        leftOk ? "던전/특수 씬 퇴장을 요청했습니다." : (res["error"]?.GetValue<string>() ?? "현재 던전/특수 씬이 아닙니다."),
-                        leftOk ? NotificationKind.Info : NotificationKind.Warning,
-                        2.5f);
-                    MarkDirty();
-                },
-                () => !_config.IsAdminLocked(FeaturePolicyKeys.DungeonEnter),
-                MenuButtonStyle.Glass,
-                null,
-                105f,
-                null)
-        }, 8f, RowJustify.Left);
+                    new TextElement(
+                        () => $"등록된 발신 금칙어: {_config.BlockedChatWords.Count}개",
+                        () => MutedColor,
+                        false,
+                        0f,
+                        TextAlign.Left,
+                        false),
+                    new SpacerElement(0f, 0f),
+                    new ButtonElement(
+                        () => "🔒 금칙어 · 어드민락 창 열기",
+                        ToggleAdminWindow,
+                        null,
+                        MenuButtonStyle.Outline,
+                        null,
+                        205f,
+                        null)
+                }, 8f, RowJustify.Left)
+            });
 
-        // 4. Chat Monitoring & Outgoing Guard Section (3-stage)
-        var chatHeader = new TextElement(() => "대화 모니터링 & 발신 보안 (0끔 / 1켬 / 2🔒)", () => null, true, 0f, TextAlign.Left, false);
+        return new ColumnElement(new HudElement[] { masterCard, recvCard, sendCard }, 10f);
+    }
 
-        var chatMasterToggleRow = MakeFeatureGateRow(FeaturePolicyKeys.ChatMonitor, "대화 모니터링 전체");
-        var chatRecvGuildRow = MakeFeatureGateRow(FeaturePolicyKeys.RecvGuild, "길드 채팅 감지");
-        var chatRecvPartyRow = MakeFeatureGateRow(FeaturePolicyKeys.RecvParty, "파티 채팅 감지");
-        var chatRecvWhisperRow = MakeFeatureGateRow(FeaturePolicyKeys.RecvWhisper, "귓속말 감지");
-        var chatRecvSayRow = MakeFeatureGateRow(FeaturePolicyKeys.RecvSay, "일반 채팅 감지");
-        var chatSendWorldRow = MakeFeatureGateRow(FeaturePolicyKeys.SendWorld, "월드(전체) 채팅 발신");
-        var chatSendSayRow = MakeFeatureGateRow(FeaturePolicyKeys.SendSay, "일반(주변) 채팅 발신");
-
-        // 4.5 LLM Backend / Local CLI / External API / Persona Configuration Section
+    private HudElement BuildAiTab()
+    {
         int GetLlmBackendIdx()
         {
             int idx = Array.IndexOf(LlmBackendCodes, _config.LlmBackend);
@@ -1199,73 +1411,28 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     return i;
             return 0;
         }
+        void ApplyLlmSettingsNow(bool showToast = true) => NormalizeAndSaveLlmSettings(showToast);
 
-        string FormatLlmSummary()
-        {
-            string bLabel = _config.LlmBackend switch
+        var backendDropdown = new DropdownElement(
+            GetLlmBackendIdx,
+            () => LlmBackendLabels,
+            idx =>
             {
-                "local_agent" => string.IsNullOrWhiteSpace(_config.LlmEndpointUrl)
-                    ? $"로컬CLI({_config.LlmCliFlavor})"
-                    : "로컬서버",
-                "openai_api" => "OpenAI API(Tools)",
-                "gemini_api" => "Gemini API(Tools)",
-                _ => "로컬"
-            };
-            string m = string.IsNullOrWhiteSpace(_config.LlmModel) ? "기본모델" : _config.LlmModel;
-            string sp = _config.LlmSendSystemPrompt ? "시스템프롬프트켬" : "페르소나만";
-            return $"AI 설정: {bLabel} · {m} · {sp}";
-        }
-
-        void ApplyLlmSettingsNow(bool showToast = true)
-        {
-            NormalizeAndSaveLlmSettings(showToast);
-        }
-
-        var llmToggleRow = new RowElement(new HudElement[]
-        {
-            new TextElement(FormatLlmSummary, () => accentColor, true, 0f, TextAlign.Left, false),
-            new SpacerElement(0f, 0f),
-            new ButtonElement(
-                () => _showLlmSettings ? "AI 설정 접기 ▲" : "AI 설정 열기 ▼",
-                () =>
+                if (idx >= 0 && idx < LlmBackendCodes.Length)
                 {
-                    _showLlmSettings = !_showLlmSettings;
-                    if (!_showLlmSettings && _llmTextDirty)
-                        ApplyLlmSettingsNow(showToast: false);
+                    _config.LlmBackend = LlmBackendCodes[idx];
+                    _config.SaveAndNotifyChatSettings();
                     _window?.MarkDirty();
-                },
-                null,
-                MenuButtonStyle.Glass,
-                () => _showLlmSettings,
-                115f,
-                null)
-        }, 6f, RowJustify.Left);
-
-        var llmBackendRow = new RowElement(new HudElement[]
-        {
-            new TextElement(() => "AI 백엔드:", () => mutedColor, false, 72f, TextAlign.Left, false),
-            new DropdownElement(
-                GetLlmBackendIdx,
-                () => LlmBackendLabels,
-                idx =>
-                {
-                    if (idx >= 0 && idx < LlmBackendCodes.Length)
-                    {
-                        _config.LlmBackend = LlmBackendCodes[idx];
-                        _config.SaveAndNotifyChatSettings();
-                        _window?.MarkDirty();
-                    }
-                },
-                260f)
-        }, 8f, RowJustify.Left);
+                }
+            },
+            390f);
 
         var llmCliSection = new ConditionalElement(
             () => _config.LlmBackend == "local_agent",
             new ColumnElement(new HudElement[]
             {
-                new RowElement(new HudElement[]
-                {
-                    new TextElement(() => "CLI 종류:", () => mutedColor, false, 72f, TextAlign.Left, false),
+                MakeLabeledFieldRow(
+                    () => "CLI 종류:",
                     new DropdownElement(
                         GetCliFlavorIdx,
                         () => CliFlavorLabels,
@@ -1278,24 +1445,20 @@ public sealed class AgyBridgeUiWindow : IDisposable
                                 _window?.MarkDirty();
                             }
                         },
-                        260f)
-                }, 8f, RowJustify.Left),
-                new RowElement(new HudElement[]
-                {
-                    new TextElement(() => "CLI 경로:", () => mutedColor, false, 72f, TextAlign.Left, false),
+                        390f)),
+                MakeLabeledFieldRow(
+                    () => "CLI 경로:",
                     new InputElement(
                         Get: () => _config.LlmCliCommand,
                         Submit: submitted => { _config.LlmCliCommand = submitted ?? ""; ApplyLlmSettingsNow(showToast: true); },
-                        Width: 260f,
+                        Width: 390f,
                         OnChange: v => MarkLlmTextEdited(() => _config.LlmCliCommand = v ?? ""))
                     {
                         SingleLine = true,
                         Placeholder = () => "비우면 PATH/기본 경로 자동 탐색"
-                    }
-                }, 8f, RowJustify.Left),
-                new RowElement(new HudElement[]
-                {
-                    new TextElement(() => "추론 강도:", () => mutedColor, false, 72f, TextAlign.Left, false),
+                    }),
+                MakeLabeledFieldRow(
+                    () => "추론 강도:",
                     new DropdownElement(
                         GetCliEffortIdx,
                         () => CliEffortLabels,
@@ -1308,36 +1471,43 @@ public sealed class AgyBridgeUiWindow : IDisposable
                                 _window?.MarkDirty();
                             }
                         },
-                        115f),
-                    new TextElement(() => "(AGY/Codex)", () => mutedColor, false, 0f, TextAlign.Left, false)
-                }, 8f, RowJustify.Left)
+                        140f),
+                    trailing: new TextElement(() => "(AGY/Codex)", () => MutedColor, false, 0f, TextAlign.Left, false))
             }, 6f),
             null,
             false);
 
         var llmEndpointSection = new ConditionalElement(
             () => _config.LlmBackend is "local_agent" or "openai_api",
-            new RowElement(new HudElement[]
+            new ColumnElement(new HudElement[]
             {
-                new TextElement(
+                MakeLabeledFieldRow(
                     () => _config.LlmBackend == "local_agent" ? "서버 주소:" : "API Base:",
-                    () => mutedColor,
-                    false,
-                    72f,
-                    TextAlign.Left,
-                    false),
-                new InputElement(
-                    Get: () => _config.LlmEndpointUrl,
-                    Submit: submitted => { _config.LlmEndpointUrl = submitted ?? ""; ApplyLlmSettingsNow(showToast: true); },
-                    Width: 260f,
-                    OnChange: v => MarkLlmTextEdited(() => _config.LlmEndpointUrl = v ?? ""))
-                {
-                    SingleLine = true,
-                    Placeholder = () => _config.LlmBackend == "local_agent"
-                        ? "비우면 로컬 CLI 실행 / 입력 시 HTTP API 호출"
-                        : "https://api.openai.com/v1 (또는 Ollama http://127.0.0.1:11434/v1)"
-                }
-            }, 8f, RowJustify.Left),
+                    new InputElement(
+                        Get: () => _config.LlmEndpointUrl,
+                        Submit: submitted => { _config.LlmEndpointUrl = submitted ?? ""; ApplyLlmSettingsNow(showToast: true); },
+                        Width: 390f,
+                        OnChange: v => MarkLlmTextEdited(() => _config.LlmEndpointUrl = v ?? ""))
+                    {
+                        SingleLine = true,
+                        Placeholder = () => _config.LlmBackend == "local_agent"
+                            ? "비우면 로컬 CLI 실행 / 입력 시 HTTP API 호출"
+                            : "https://api.openai.com/v1 (또는 Ollama http://127.0.0.1:11434/v1)"
+                    }),
+                new ConditionalElement(
+                    () => _config.LlmBackend == "local_agent",
+                    new TextElement(
+                        () => string.IsNullOrWhiteSpace(_config.LlmEndpointUrl)
+                            ? "현재 동작: 주소 미입력 → 위 CLI 설정으로 로컬 CLI 프로세스를 직접 호출합니다."
+                            : $"현재 동작: 서버 주소 입력됨 → '{_config.LlmEndpointUrl}' 로 HTTP API 호출합니다.",
+                        () => string.IsNullOrWhiteSpace(_config.LlmEndpointUrl) ? SuccessColor : AccentColor,
+                        false,
+                        0f,
+                        TextAlign.Left,
+                        true),
+                    null,
+                    false)
+            }, 4f),
             null,
             false);
 
@@ -1346,13 +1516,13 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 || (_config.LlmBackend == "local_agent" && (!string.IsNullOrWhiteSpace(_config.LlmEndpointUrl) || !string.IsNullOrEmpty(_config.LlmApiKey))),
             new RowElement(new HudElement[]
             {
-                new TextElement(() => "API Key:", () => mutedColor, false, 72f, TextAlign.Left, false),
+                new TextElement(() => "API Key:", () => MutedColor, false, 88f, TextAlign.Left, false),
                 new ConditionalElement(
                     () => _showApiKey,
                     new InputElement(
                         Get: () => _config.LlmApiKey,
                         Submit: submitted => { _config.LlmApiKey = submitted ?? ""; ApplyLlmSettingsNow(showToast: true); },
-                        Width: 196f,
+                        Width: 316f,
                         OnChange: v => MarkLlmTextEdited(() => _config.LlmApiKey = v ?? ""))
                     {
                         SingleLine = true,
@@ -1360,11 +1530,11 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     },
                     new TextElement(
                         () => string.IsNullOrEmpty(_config.LlmApiKey)
-                            ? "(미입력 — 로컬 서버면 불필요)"
+                            ? "(미입력 — 로컬 서버/무인증이면 불필요)"
                             : $"설정됨 (****{_config.LlmApiKey[Math.Max(0, _config.LlmApiKey.Length - 4)..]})",
-                        () => string.IsNullOrEmpty(_config.LlmApiKey) ? mutedColor : greenColor,
+                        () => string.IsNullOrEmpty(_config.LlmApiKey) ? MutedColor : SuccessColor,
                         false,
-                        196f,
+                        316f,
                         TextAlign.Left,
                         false),
                     false),
@@ -1378,28 +1548,26 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     null,
                     MenuButtonStyle.Glass,
                     () => _showApiKey,
-                    56f,
+                    66f,
                     null)
             }, 6f, RowJustify.Left),
             null,
             false);
 
-        var llmModelRow = new RowElement(new HudElement[]
-        {
-            new TextElement(() => "모델 이름:", () => mutedColor, false, 72f, TextAlign.Left, false),
+        var llmModelRow = MakeLabeledFieldRow(
+            () => "모델 이름:",
             new InputElement(
                 Get: () => _config.LlmModel,
                 Submit: submitted => { _config.LlmModel = submitted ?? ""; ApplyLlmSettingsNow(showToast: true); },
-                Width: 260f,
+                Width: 390f,
                 OnChange: v => MarkLlmTextEdited(() => _config.LlmModel = v ?? ""))
             {
                 SingleLine = true,
                 Placeholder = () => "비우면 백엔드 기본값 (예: gpt-4.1-mini, gemini-2.5-flash)"
-            }
-        }, 8f, RowJustify.Left);
+            });
 
-        var llmSendSysPromptToggle = MakeToggleRow(
-            "시스템 프롬프트 전송 (스킬·제어규칙 포함 / 끄면 페르소나만)",
+        var sysPromptToggle = MakeToggleRow(
+            "시스템 프롬프트 전송 (스킬·제어규칙·Function Calling 포함 / 끄면 페르소나만)",
             () => _config.LlmSendSystemPrompt,
             v =>
             {
@@ -1408,96 +1576,113 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 _window?.MarkDirty();
             });
 
-        var llmPersonaSection = new ColumnElement(new HudElement[]
-        {
-            new TextElement(() => "캐릭터 페르소나 (말투·성격 1~3줄 — 항상 함께 전송됨):", () => mutedColor, false, 0f, TextAlign.Left, true),
-            new InputElement(
-                Get: () => _config.LlmPersona,
-                Submit: submitted => { _config.LlmPersona = submitted ?? ""; ApplyLlmSettingsNow(showToast: true); },
-                Width: 340f,
-                OnChange: v => MarkLlmTextEdited(() => _config.LlmPersona = v ?? ""))
+        var backendCard = MakeSectionCard(
+            "AI 백엔드 연결 설정",
+            null,
+            new HudElement[]
             {
-                SingleLine = true,
-                Placeholder = () => "예: 존댓말을 쓰는 상냥한 메이드처럼 말하기"
-            },
-            new RowElement(new HudElement[]
-            {
-                new ButtonElement(
-                    () => "AI · 페르소나 설정 적용",
-                    () => ApplyLlmSettingsNow(showToast: true),
-                    null,
-                    MenuButtonStyle.Outline,
-                    null,
-                    185f,
-                    null),
-                new ButtonElement(
-                    () => "기본 페르소나 복원",
-                    () =>
-                    {
-                        _config.LlmPersona = BridgeConfig.DefaultLlmPersona;
-                        ApplyLlmSettingsNow(showToast: true);
-                    },
-                    null,
-                    MenuButtonStyle.Glass,
-                    null,
-                    145f,
-                    null)
-            }, 8f, RowJustify.Left)
-        }, 6f);
-
-        var llmSettingsSection = new ConditionalElement(
-            () => _showLlmSettings,
-            new ColumnElement(new HudElement[]
-            {
-                llmBackendRow,
+                MakeLabeledFieldRow(() => "AI 백엔드:", backendDropdown),
                 llmCliSection,
                 llmEndpointSection,
                 llmApiKeySection,
                 llmModelRow,
-                llmSendSysPromptToggle,
-                llmPersonaSection
-            }, 6f),
-            null,
-            false);
-
-        // 5. Command Permission / Authorized Commanders Section (UID-first)
-        var permHeader = new TextElement(() => "명령권자(권한) 설정 (UID 기준 검증)", () => null, true, 0f, TextAlign.Left, false);
-
-        var permDropdownRow = new RowElement(new HudElement[]
-        {
-            new TextElement(() => "허용 범위:", () => mutedColor, false, 72f, TextAlign.Left, false),
-            new DropdownElement(
-                GetPermissionIndex,
-                () => PermissionLabels,
-                idx =>
-                {
-                    if (idx >= 0 && idx < PermissionCodes.Length)
-                    {
-                        _config.CommandPermissionMode = PermissionCodes[idx];
-                        _config.SaveAndNotifyChatSettings();
-                        _window?.MarkDirty();
-                    }
-                },
-                245f)
-        }, 8f, RowJustify.Left);
-
-        var nonCommanderReplyToggleRow = MakeToggleRow(
-            "비권한자 일반 대화 응답 허용 (제어만 차단)",
-            () => _config.AllowNonCommanderChatReply,
-            v =>
-            {
-                _config.AllowNonCommanderChatReply = v;
-                _config.SaveAndNotifyChatSettings();
-                _window?.MarkDirty();
+                sysPromptToggle
             });
 
-        var regCmdHeader = new TextElement(
-            () => $"등록된 명령권자 ({_config.CommanderEntries.Count}명) — 항목 클릭 시 권한 해제:",
-            () => accentColor,
-            false,
-            0f,
-            TextAlign.Left,
-            false);
+        var personaBox = new TextAreaElement(
+            Get: () => _config.LlmPersona,
+            OnChange: v => MarkLlmTextEdited(() => _config.LlmPersona = v ?? ""),
+            Width: 520f)
+        {
+            Lines = 4
+        };
+
+        var personaCard = MakeSectionCard(
+            "캐릭터 페르소나 (말투 · 성격)",
+            "일반 대화 응답과 작업 완료 보고에 항상 적용됩니다. 수정 후 [설정 적용]을 누르면 즉시 반영됩니다.",
+            new HudElement[]
+            {
+                personaBox,
+                new RowElement(new HudElement[]
+                {
+                    new ButtonElement(
+                        () => "AI · 페르소나 설정 적용",
+                        () => ApplyLlmSettingsNow(showToast: true),
+                        null,
+                        MenuButtonStyle.Filled,
+                        null,
+                        195f,
+                        null),
+                    new ButtonElement(
+                        () => "기본 페르소나 복원",
+                        () =>
+                        {
+                            _config.LlmPersona = BridgeConfig.DefaultLlmPersona;
+                            ApplyLlmSettingsNow(showToast: true);
+                        },
+                        null,
+                        MenuButtonStyle.Glass,
+                        null,
+                        155f,
+                        null)
+                }, 8f, RowJustify.Left)
+            });
+
+        return new ColumnElement(new HudElement[] { backendCard, personaCard }, 10f);
+    }
+
+    private HudElement BuildPermissionsTab()
+    {
+        var policyCard = MakeSectionCard(
+            "명령 권한 정책 · 어드민락 보안",
+            null,
+            new HudElement[]
+            {
+                MakeLabeledFieldRow(
+                    () => "허용 범위:",
+                    new DropdownElement(
+                        GetPermissionIndex,
+                        () => PermissionLabels,
+                        idx =>
+                        {
+                            if (idx >= 0 && idx < PermissionCodes.Length)
+                            {
+                                _config.CommandPermissionMode = PermissionCodes[idx];
+                                _config.SaveAndNotifyChatSettings();
+                                _window?.MarkDirty();
+                            }
+                        },
+                        310f)),
+                MakeToggleRow(
+                    "비권한자 일반 대화 응답 허용 (인게임 조작 명령만 차단)",
+                    () => _config.AllowNonCommanderChatReply,
+                    v =>
+                    {
+                        _config.AllowNonCommanderChatReply = v;
+                        _config.SaveAndNotifyChatSettings();
+                        _window?.MarkDirty();
+                    }),
+                new SeparatorElement(false),
+                new RowElement(new HudElement[]
+                {
+                    new TextElement(
+                        () => $"어드민락 잠금: {CountAdminLockedPolicies()}개  ·  금칙어: {_config.BlockedChatWords.Count}개",
+                        () => CountAdminLockedPolicies() > 0 ? AccentColor : MutedColor,
+                        false,
+                        0f,
+                        TextAlign.Left,
+                        false),
+                    new SpacerElement(0f, 0f),
+                    new ButtonElement(
+                        () => "🔒 어드민락 보안 창 열기",
+                        ToggleAdminWindow,
+                        null,
+                        MenuButtonStyle.Outline,
+                        () => _adminWindow is { IsShown: true },
+                        190f,
+                        null)
+                }, 8f, RowJustify.Left)
+            });
 
         const int regPoolSize = 5;
         var regCmdPool = new HudElement[regPoolSize];
@@ -1515,7 +1700,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                             : FindRosterNameForUid(rec.Uid, "외부 등록 유저");
                         return $"✓ {dispName}";
                     },
-                    () => greenColor,
+                    () => SuccessColor,
                     false,
                     0f,
                     TextAlign.Left,
@@ -1525,9 +1710,9 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     () =>
                     {
                         if (!TryGetRegCmdRow(slot, out var rec)) return "";
-                        return rec.Uid > 0 ? $"UID: {rec.Uid}  [해제]" : "UID 미지정  [해제]";
+                        return rec.Uid > 0 ? $"UID: {rec.Uid}  [클릭하여 해제]" : "UID 미지정  [클릭하여 해제]";
                     },
-                    () => mutedColor,
+                    () => MutedColor,
                     false,
                     0f,
                     TextAlign.Right,
@@ -1550,72 +1735,75 @@ public sealed class AgyBridgeUiWindow : IDisposable
 
         var regCmdVirtualList = new VirtualListElement(
             () => _config.CommanderEntries.Count,
-            24f,
+            26f,
             regCmdPool,
             first => _regCmdWindowFirst = first,
-            76f)
+            104f)
         {
             FixedHeight = true
         };
 
         var regCmdEmptyText = new TextElement(
             () => "등록된 명령권자가 없습니다 (미지정 시 모든 유저 명령 허용 — 어드민락🔒 항목은 항상 차단).",
-            () => mutedColor,
+            () => MutedColor,
             false,
             0f,
             TextAlign.Left,
             true);
 
-        var regCmdSection = new ConditionalElement(
-            () => _config.CommanderEntries.Count > 0,
-            regCmdVirtualList,
-            regCmdEmptyText,
-            false);
-
-        var cmdToolbarRow = new RowElement(new HudElement[]
-        {
-            new ButtonElement(
-                () => _showCommanderPicker ? "명령권자 목록 접기 ▲" : "명령권자 목록 열기 ▼",
-                () =>
+        var registeredCard = MakeSectionCard(
+            "등록된 명령권자 (UID 검증)",
+            "항목을 클릭하면 권한이 해제됩니다. 파티원 전원 일괄 등록도 가능합니다.",
+            new HudElement[]
+            {
+                new RowElement(new HudElement[]
                 {
-                    _showCommanderPicker = !_showCommanderPicker;
-                    if (_showCommanderPicker) RefreshUiRoster(forceLua: false);
-                    _window?.MarkDirty();
-                },
-                null,
-                MenuButtonStyle.Outline,
-                () => _showCommanderPicker,
-                148f,
-                null),
-            new ButtonElement(
-                () => "파티원 전원 UID 등록",
-                () =>
-                {
-                    foreach (var m in _world.GetPartyTargets(requestSocialIfMissingLine: false))
+                    new TextElement(
+                        () => $"현재 {_config.CommanderEntries.Count}명 등록됨",
+                        () => AccentColor,
+                        true,
+                        0f,
+                        TextAlign.Left,
+                        false)
                     {
-                        if (!m.IsSelf && m.CharId > 0)
-                            _config.AddOrUpdateCommander(m.CharId, m.Name);
-                    }
-                    _window?.MarkDirty();
-                },
-                null,
-                MenuButtonStyle.Glass,
-                null,
-                145f,
-                null),
-            new ButtonElement(
-                () => "새로고침",
-                () =>
-                {
-                    RefreshUiRoster(forceLua: true);
-                    _window?.MarkDirty();
-                },
-                null,
-                MenuButtonStyle.Glass,
-                null,
-                74f,
-                null)
-        }, 6f, RowJustify.Left);
+                        Bold = true
+                    },
+                    new SpacerElement(0f, 0f),
+                    new ButtonElement(
+                        () => "파티원 전원 UID 등록",
+                        () =>
+                        {
+                            foreach (var m in _world.GetPartyTargets(requestSocialIfMissingLine: false))
+                            {
+                                if (!m.IsSelf && m.CharId > 0)
+                                    _config.AddOrUpdateCommander(m.CharId, m.Name);
+                            }
+                            _window?.MarkDirty();
+                        },
+                        null,
+                        MenuButtonStyle.Outline,
+                        null,
+                        162f,
+                        null),
+                    new ButtonElement(
+                        () => "새로고침",
+                        () =>
+                        {
+                            RefreshUiRoster(forceLua: true);
+                            _window?.MarkDirty();
+                        },
+                        null,
+                        MenuButtonStyle.Glass,
+                        null,
+                        84f,
+                        null)
+                }, 6f, RowJustify.Left),
+                new ConditionalElement(
+                    () => _config.CommanderEntries.Count > 0,
+                    regCmdVirtualList,
+                    regCmdEmptyText,
+                    false)
+            });
 
         var cmdTabsRow = BuildCategoryTabRow(
             () => _cmdCategory,
@@ -1641,7 +1829,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
             new InputElement(
                 Get: () => _commanderSearch,
                 Submit: SubmitManualCommanderInput,
-                Width: 156f,
+                Width: 250f,
                 OnChange: v =>
                 {
                     _commanderSearch = v ?? "";
@@ -1650,7 +1838,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 })
             {
                 SingleLine = true,
-                Placeholder = () => "이름 검색 / 외부 UID"
+                Placeholder = () => "이름 검색 또는 외부 UID 직접 입력"
             },
             new ButtonElement(
                 () => "UID 추가",
@@ -1658,10 +1846,11 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 null,
                 MenuButtonStyle.Outline,
                 null,
-                68f,
+                82f,
                 null)
         }, 6f, RowJustify.Left);
 
+        const int rosterPoolSize = 8;
         var cmdPool = new HudElement[rosterPoolSize];
         for (int i = 0; i < rosterPoolSize; i++)
         {
@@ -1677,9 +1866,9 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     },
                     () =>
                     {
-                        if (!TryGetCmdRow(slot, out var it)) return offlineColor;
-                        if (_config.IsCommanderUid(it.Uid)) return greenColor;
-                        return it.IsOnline ? onlineColor : offlineColor;
+                        if (!TryGetCmdRow(slot, out var it)) return MutedColor;
+                        if (_config.IsCommanderUid(it.Uid)) return SuccessColor;
+                        return it.IsOnline ? PrimaryTextColor : MutedColor;
                     },
                     false,
                     0f,
@@ -1688,7 +1877,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 new SpacerElement(0f, 0f),
                 new TextElement(
                     () => TryGetCmdRow(slot, out var it) ? $"UID: {it.Uid}" : "",
-                    () => TryGetCmdRow(slot, out var it) && _config.IsCommanderUid(it.Uid) ? greenColor : mutedColor,
+                    () => TryGetCmdRow(slot, out var it) && _config.IsCommanderUid(it.Uid) ? SuccessColor : MutedColor,
                     false,
                     0f,
                     TextAlign.Right,
@@ -1712,10 +1901,10 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 EnsureUiRosterFresh();
                 return _cmdFiltered.Count;
             },
-            26f,
+            28f,
             cmdPool,
             first => _cmdWindowFirst = first,
-            140f)
+            188f)
         {
             FixedHeight = true,
             ResetScroll = () =>
@@ -1728,15 +1917,16 @@ public sealed class AgyBridgeUiWindow : IDisposable
 
         var cmdEmptyHint = new TextElement(
             () => "조건에 맞는 파티/친구/길드원이 없습니다. 외부 인원은 UID 숫자를 입력 후 [UID 추가]를 누르세요.",
-            () => mutedColor,
+            () => MutedColor,
             false,
             0f,
             TextAlign.Left,
             true);
 
-        var cmdPickerSection = new ConditionalElement(
-            () => _showCommanderPicker,
-            new ColumnElement(new HudElement[]
+        var pickerCard = MakeSectionCard(
+            "명령권자 추가 · 토글 (로스터)",
+            "로스터 행을 클릭해 명령 권한을 즉시 부여하거나 회수합니다.",
+            new HudElement[]
             {
                 cmdTabsRow,
                 cmdFilterAndAddRow,
@@ -1749,63 +1939,200 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     cmdVirtualList,
                     cmdEmptyHint,
                     false)
-            }, 6f),
-            null,
-            false);
+            });
 
-        var followGateRow = MakeFeatureGateRow(FeaturePolicyKeys.FollowMove, "대상 추적 · 이동 허용");
+        return new ColumnElement(new HudElement[] { policyCard, registeredCard, pickerCard }, 10f);
+    }
 
-        var column = new ColumnElement(new HudElement[]
+    private HudElement BuildRootElement()
+    {
+        var headerBar = BuildHeaderBar();
+        var sidebarCell = new CellElement(BuildSidebar(), 176f, 0f);
+
+        var rightContent = new ColumnElement(new HudElement[]
         {
-            statusRow,
-            activeDetailText,
-            capabilityStatusText,
-            new SeparatorElement(false),
-            followHeader,
-            currentFollowLabel,
-            followGateRow,
-            followToggleRow,
-            followActionBtnsRow,
-            followPickerSection,
-            tpChannelGateRow,
-            autoCombatToggleRow,
-            autoEvadeToggleRow,
-            autoCameraGuardToggleRow,
-            autoReviveToggleRow,
-            boostToggleRow,
-            closestTpToggleRow,
-            autoFishGateRow,
-            emoteMimicToggleRow,
-            emoteStandaloneRow,
-            new SeparatorElement(false),
-            partyHeader,
-            partyGateRow,
-            autoReadyGateRow,
-            dungeonEnterGateRow,
-            partyBtnsRow,
-            new SeparatorElement(false),
-            chatHeader,
-            chatMasterToggleRow,
-            chatRecvGuildRow,
-            chatRecvPartyRow,
-            chatRecvWhisperRow,
-            chatRecvSayRow,
-            chatSendWorldRow,
-            chatSendSayRow,
-            new SeparatorElement(false),
-            llmToggleRow,
-            llmSettingsSection,
-            new SeparatorElement(false),
-            permHeader,
-            permDropdownRow,
-            nonCommanderReplyToggleRow,
-            regCmdHeader,
-            regCmdSection,
-            cmdToolbarRow,
-            cmdPickerSection
-        }, 8f);
+            new ConditionalElement(() => _activeTab == "control", BuildControlTab(), null, false),
+            new ConditionalElement(() => _activeTab == "automation", BuildAutomationTab(), null, false),
+            new ConditionalElement(() => _activeTab == "chat", BuildChatTab(), null, false),
+            new ConditionalElement(() => _activeTab == "ai", BuildAiTab(), null, false),
+            new ConditionalElement(() => _activeTab == "permissions", BuildPermissionsTab(), null, false)
+        }, 0f);
 
-        return new ScrollElement(column, 0f);
+        var rightPaneCell = new CellElement(new ScrollElement(rightContent, 470f), 0f, 1f);
+
+        var splitBody = new RowElement(new HudElement[]
+        {
+            sidebarCell,
+            new SeparatorElement(true),
+            rightPaneCell
+        }, 10f, RowJustify.Left);
+
+        return new ColumnElement(new HudElement[]
+        {
+            headerBar,
+            splitBody
+        }, 8f);
+    }
+
+    private HudElement BuildAdminLockRootElement()
+    {
+        var legendCard = new PanelElement(
+            new ColumnElement(new HudElement[]
+            {
+                new TextElement(
+                    () => "0 비활성  |  1 활성  |  2 어드민락(🔒 원격·대화·LLM 해제 불가)",
+                    () => CautionColor,
+                    true,
+                    0f,
+                    TextAlign.Left,
+                    true,
+                    13)
+                {
+                    Bold = true
+                },
+                new TextElement(
+                    () => "어드민락(2🔒)으로 잠근 기능과 채팅 채널은 인게임 대화 명령·LLM·MCP 웹소켓 등 어떤 외부 경로로도 절대 풀리거나 실행되지 않습니다.",
+                    () => MutedColor,
+                    false,
+                    0f,
+                    TextAlign.Left,
+                    true)
+            }, 4f),
+            8f);
+
+        var tabButtons = new List<HudElement>(AdminTabs.Length);
+        foreach (var (id, label, width) in AdminTabs)
+        {
+            string capId = id;
+            tabButtons.Add(new ButtonElement(
+                () => label,
+                () =>
+                {
+                    _adminTab = capId;
+                    _adminWindow?.MarkDirty();
+                },
+                null,
+                MenuButtonStyle.Glass,
+                () => _adminTab == capId,
+                width,
+                null));
+        }
+        var tabsRow = new RowElement(tabButtons, 6f, RowJustify.Left);
+
+        HudElement BuildPolicyCategoryCard(string title, string? subtitle, FeatureCategory cat)
+        {
+            var rows = new List<HudElement>();
+            foreach (var desc in FeaturePolicyCatalog.All)
+            {
+                if (desc.Category == cat)
+                    rows.Add(MakeFeatureGateRow(desc.Key, desc.Label, adminPanelMode: true));
+            }
+            return MakeSectionCard(title, subtitle, rows);
+        }
+
+        var sendCard = BuildPolicyCategoryCard(
+            "1. 채팅 발신 채널 보안 (전체채팅 사고 방지)",
+            null,
+            FeatureCategory.ChatSend);
+        var recvCard = BuildPolicyCategoryCard(
+            "2. 채팅 수신 (모니터링) 채널 제어",
+            null,
+            FeatureCategory.ChatReceive);
+        var behaviorCard = BuildPolicyCategoryCard(
+            "3. 캐릭터 행동 · 자동화 기능 제어",
+            null,
+            FeatureCategory.Behavior);
+
+        var bwInput = new InputElement(
+            Get: () => _blockedWordInput,
+            Submit: submitted =>
+            {
+                string w = (submitted ?? "").Trim();
+                if (!string.IsNullOrEmpty(w) && !_config.BlockedChatWords.Contains(w))
+                {
+                    _config.BlockedChatWords.Add(w);
+                    _config.Save();
+                    _blockedWordInput = "";
+                    MarkDirty();
+                }
+            },
+            Width: 320f,
+            OnChange: v => _blockedWordInput = v ?? "")
+        {
+            SingleLine = true,
+            Placeholder = () => "금칙어 추가 또는 삭제할 단어 입력"
+        };
+
+        var wordsCard = MakeSectionCard(
+            "4. 발신 채팅 금칙어 필터 (포함 시 전송 물리 차단)",
+            "어느 채널이든 금칙어가 포함된 발신 메시지는 플러그인 전송 직전에 즉시 차단됩니다.",
+            new HudElement[]
+            {
+                new TextElement(
+                    () => _config.BlockedChatWords.Count > 0
+                        ? "등록 금칙어: " + string.Join(", ", _config.BlockedChatWords)
+                        : "등록 금칙어: (없음)",
+                    () => PrimaryTextColor,
+                    false,
+                    0f,
+                    TextAlign.Left,
+                    true),
+                new RowElement(new HudElement[]
+                {
+                    bwInput,
+                    new ButtonElement(
+                        () => "추가",
+                        () =>
+                        {
+                            string w = _blockedWordInput.Trim();
+                            if (!string.IsNullOrEmpty(w) && !_config.BlockedChatWords.Contains(w))
+                            {
+                                _config.BlockedChatWords.Add(w);
+                                _config.Save();
+                                _blockedWordInput = "";
+                                MarkDirty();
+                            }
+                        },
+                        null,
+                        MenuButtonStyle.Outline,
+                        null,
+                        72f,
+                        null),
+                    new ButtonElement(
+                        () => "삭제",
+                        () =>
+                        {
+                            string w = _blockedWordInput.Trim();
+                            if (!string.IsNullOrEmpty(w))
+                            {
+                                _config.BlockedChatWords.RemoveAll(x => string.Equals(x, w, StringComparison.OrdinalIgnoreCase));
+                                _config.Save();
+                                _blockedWordInput = "";
+                                MarkDirty();
+                            }
+                        },
+                        null,
+                        MenuButtonStyle.Glass,
+                        null,
+                        72f,
+                        null)
+                }, 6f, RowJustify.Left)
+            });
+
+        var scrollContent = new ColumnElement(new HudElement[]
+        {
+            new ConditionalElement(() => _adminTab is "all" or "send", sendCard, null, false),
+            new ConditionalElement(() => _adminTab is "all" or "recv", recvCard, null, false),
+            new ConditionalElement(() => _adminTab is "all" or "behavior", behaviorCard, null, false),
+            new ConditionalElement(() => _adminTab is "all" or "words", wordsCard, null, false)
+        }, 10f);
+
+        return new ColumnElement(new HudElement[]
+        {
+            legendCard,
+            tabsRow,
+            new ScrollElement(scrollContent, 500f)
+        }, 8f);
     }
 
     private void StartFollowFromUi(string target)
