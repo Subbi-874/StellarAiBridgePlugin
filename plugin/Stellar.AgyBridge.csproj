@@ -7,12 +7,14 @@
     <RootNamespace>Stellar.AgyBridge</RootNamespace>
     <AssemblyName>Stellar.AgyBridge</AssemblyName>
     <Version>0.1.0</Version>
+    <!-- Must match the Stellar.Framework version installed in the game (see BepInEx/plugins/Stellar.Framework/.stellar-version) -->
+    <StellarVersion>2.33.0</StellarVersion>
     <Deterministic>true</Deterministic>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Stellar.Abstractions" Version="2.32.0" />
-    <PackageReference Include="Stellar.Plugin.InteropRefs" Version="2.32.0" />
+    <PackageReference Include="Stellar.Abstractions" Version="$(StellarVersion)" />
+    <PackageReference Include="Stellar.Plugin.InteropRefs" Version="$(StellarVersion)" />
   </ItemGroup>
 </Project>

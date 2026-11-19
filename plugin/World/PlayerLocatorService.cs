@@ -126,13 +126,16 @@ public sealed class PlayerLocatorService
 
         var scene = DescribeScene(t.SceneId);
         bool sameScene = t.SceneId > 0 && t.SceneId == mySceneId;
-        bool sameLine = sameScene && t.LineId > 0 && t.LineId == myLine;
+        // A channel number of 0 means "not resolved yet", not "channel 0" - never claim same/different in that case.
+        bool lineKnown = t.LineId > 0 && myLine > 0;
+        bool sameLine = sameScene && lineKnown && t.LineId == myLine;
         res["scene_id"] = t.SceneId;
         res["scene_name"] = scene.Name;
         res["scene_kind"] = scene.Kind;
         res["line_id"] = t.LineId;
+        res["line_known"] = lineKnown;
         res["same_scene"] = sameScene;
-        res["same_line"] = sameLine;
+        res["same_line"] = (sameScene && lineKnown) ? JsonValue.Create(sameLine) : null;
         res["my_scene_name"] = _world.GetSceneName(mySceneId);
 
         bool hasPos = t.InAoi || t.Position.X != 0f || t.Position.Z != 0f;
@@ -155,17 +158,18 @@ public sealed class PlayerLocatorService
             if (!enterable) res["block_reason"] = reason;
         }
 
-        res["hint"] = BuildHint(t, scene, sameScene, sameLine, res);
+        res["hint"] = BuildHint(t, scene, sameScene, lineKnown, sameLine, res);
         return res;
     }
 
-    private static string BuildHint(ResolvedPartyTarget t, SceneInfoLite scene, bool sameScene, bool sameLine, JsonObject res)
+    private static string BuildHint(ResolvedPartyTarget t, SceneInfoLite scene, bool sameScene, bool lineKnown, bool sameLine, JsonObject res)
     {
         string where = $"'{scene.Name}'({scene.Kind})";
         string line = t.LineId > 0 ? $" {t.LineId}채널" : "";
         string dist = res["distance_m"] != null ? $", 약 {res["distance_m"]}m 거리" : "";
-        if (sameScene && sameLine) return $"{t.Name} 님은 같은 {where}{line}에 있고{dist}입니다.";
-        if (sameScene) return $"{t.Name} 님은 같은 {where}의{line}에 있지만 채널이 달라요.";
+        if (sameScene && lineKnown && sameLine) return $"{t.Name} 님은 같은 {where}{line}에 있고{dist}입니다.";
+        if (sameScene && lineKnown) return $"{t.Name} 님은 같은 {where}에 있지만{line}이라 채널이 달라요.";
+        if (sameScene) return $"{t.Name} 님은 같은 {where}에 있고{dist}입니다. (채널은 확인되지 않았어요)";
         return $"{t.Name} 님은 {where}{line}에 있습니다.";
     }
 
