@@ -23,6 +23,15 @@ from chat_output import (  # noqa: F401
     EchoGuard,
     split_chat_chunks,
 )
+from event_router import (  # noqa: F401
+    CONSULT_ALLOWED_ACTIONS,
+    GOAL_FEEDBACK_EVENTS,
+    ConsultDecision,
+    GoalEventRouter,
+    RouteDirective,
+    RulePromotionTracker,
+    parse_consult_decision,
+)
 from llm_backends import (
     DEFAULT_PERSONA,
     LlmClientConfig,
@@ -57,6 +66,7 @@ from policy import (  # noqa: F401
 from prompt_builder import (  # noqa: F401
     PROMPTS_DIR,
     RESPONSE_SCHEMA,
+    build_consult_prompts,
     build_event_persona_prompts,
     build_llm_prompts,
     build_second_pass_extra,
@@ -100,6 +110,9 @@ class ChatMonitorService:
         self._trigger_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
         self._history: deque[dict[str, Any]] = deque(maxlen=50)
         self._behavior_finished_listeners: list[Any] = []
+        self.event_router = GoalEventRouter()
+        self.promotion_tracker = RulePromotionTracker(threshold=3)
+        self._retry_tasks: set[asyncio.Task[None]] = set()
         self._last_gather_trigger_ch: dict[str, tuple[str, int]] = {}
         # Legacy fallback when conn_id has not bound to a BotAgent(char_id) yet.
         self._last_action_trigger: dict[tuple[str, str], tuple[str, int, float]] = {}
@@ -217,6 +230,7 @@ class ChatMonitorService:
             "per_client": per_client_summary,
             "agents": self.agents.list_agents(),
             "max_concurrent_llm_calls": self.agents.max_concurrent_llm,
+            "rule_promotion_candidates": self.get_rule_promotion_candidates(),
             "agy_cli_path": config.AGY_CLI_PATH,
             "agy_cli_exists": Path(config.AGY_CLI_PATH).exists(),
             "agy_cli_model": config.AGY_CLI_MODEL,
@@ -311,15 +325,23 @@ class ChatMonitorService:
                 int(data.get("local_char_id") or 0),
                 str(data.get("local_char_name") or ""),
             )
+            consumed_stop_handoff = False
+            directive = RouteDirective(kind="noop", handled_goal_event=False)
             if agent is not None:
                 agent.last_behavior_finished = dict(data)
-                if agent.goals.waiting_for_behavior_stop:
-                    target_conn = agent.conn_id or conn_id
-                    async with agent.lock:
+                target_conn = agent.conn_id or conn_id
+                async with agent.lock:
+                    if agent.goals.waiting_for_behavior_stop:
+                        consumed_stop_handoff = True
+                        self.event_router.capture_preempted_progress(agent, data)
                         ready_goal = agent.goals.on_behavior_stopped_ack()
                         if ready_goal is not None and target_conn:
                             await self._dispatch_active_goal_step(agent, target_conn)
+                    else:
+                        directive = self.event_router.route_event(agent, "behavior_finished", data)
             await self._notify_behavior_finished_listeners(conn_id, agent, data)
+            if not consumed_stop_handoff and directive.handled_goal_event and agent is not None:
+                await self._execute_route_directive(agent, conn_id, "behavior_finished", data, directive)
             return
 
         if ev_name == "ui_chat_settings_changed":
@@ -336,6 +358,20 @@ class ChatMonitorService:
                 if isinstance(raw_missing, list):
                     cfg.unavailable_capabilities = [str(x).strip() for x in raw_missing if str(x).strip()]
             return
+
+        if ev_name in GOAL_FEEDBACK_EVENTS:
+            data = event_msg.get("data") or {}
+            agent = self._resolve_agent(
+                conn_id,
+                int(data.get("local_char_id") or 0),
+                str(data.get("local_char_name") or ""),
+            )
+            if agent is not None:
+                async with agent.lock:
+                    directive = self.event_router.route_event(agent, str(ev_name), data)
+                if directive.handled_goal_event:
+                    await self._execute_route_directive(agent, conn_id, str(ev_name), data, directive)
+                    return
 
         if ev_name in (
             "follow_cancelled",
@@ -902,6 +938,206 @@ class ChatMonitorService:
             return rec, None, None
 
         return {"action": atype, "res": {"ok": False}}, None, None
+
+    def get_rule_promotion_candidates(self) -> list[dict[str, Any]]:
+        return self.promotion_tracker.list_candidates()
+
+    async def _consult_llm_for_goal(
+        self,
+        agent: BotAgent,
+        conn_id: str | None,
+        ev_name: str,
+        directive: RouteDirective,
+    ) -> None:
+        goal = directive.goal
+        if goal is None:
+            return
+        target_conn = agent.conn_id or conn_id
+        step_action_type = goal.current_step.action_type if goal.current_step else goal.kind
+
+        allowed, reason = agent.budget.can_call(goal.goal_id)
+        if not allowed:
+            logger.warning("Goal consultation budget exceeded for bot %s goal %s: %s", agent.char_id, goal.goal_id, reason)
+            goal.status = GoalStatus.WAITING_CONFIRM
+            if goal.channel and target_conn:
+                await self._output.send_notice(
+                    goal.channel,
+                    f"목표 '{goal.title}' 진행 중 문제가 발생했고 확인 한도({reason})에 도달해 잠시 대기 중이에요: {directive.fact}",
+                    goal.requester_uid,
+                    conn_id=target_conn,
+                )
+            return
+
+        cp = build_consult_prompts(
+            agent.settings.llm.persona,
+            goal.to_dict(),
+            ev_name,
+            directive.fact,
+            directive.failure_signature,
+            get_locked_labels(agent.settings.feature_modes),
+            agent.settings.unavailable_capabilities,
+            is_remote_bpsr=(agent.settings.llm.backend == "remote_bpsr"),
+        )
+        raw, timed_out = await self._invoke_llm_guarded(
+            agent,
+            goal.goal_id,
+            agent.settings.llm,
+            cp.synth_trig,
+            cp.game_context,
+            "(최근 이전 대화 없음)",
+            cp.system_prompt,
+            cp.user_prompt,
+            cp.user_prompt,
+            persona_block=cp.persona_block,
+            system_instructions_block="",
+            extra_block=cp.extra_block,
+        )
+        decision = parse_consult_decision(raw) if not timed_out else None
+        if decision is None:
+            decision = ConsultDecision(
+                action="ask_user",
+                reply_text=f"'{goal.title}' 처리 중 문제가 생겼어요: {directive.fact}",
+                reason=directive.failure_signature or "unparseable_consult",
+            )
+
+        cand = self.promotion_tracker.record(
+            ev_name,
+            directive.failure_signature,
+            step_action_type,
+            decision.action,
+        )
+        if cand is not None:
+            logger.info("Rule promotion candidate threshold (%d) reached: %s", cand["count"], cand)
+
+        async with agent.lock:
+            if agent.goals.active_goal is not goal:
+                return
+            applied = self.event_router.apply_consult_decision(
+                agent,
+                goal,
+                decision,
+                check_admin_lock_fn=check_action_admin_lock,
+            )
+
+        await self._execute_route_directive(
+            agent,
+            target_conn,
+            ev_name,
+            {},
+            applied,
+            already_rendered=bool(decision.reply_text),
+        )
+
+    async def _execute_route_directive(
+        self,
+        agent: BotAgent,
+        conn_id: str | None,
+        ev_name: str,
+        data: dict[str, Any],
+        directive: RouteDirective,
+        *,
+        already_rendered: bool = False,
+    ) -> None:
+        target_conn = agent.conn_id or conn_id
+        if directive.kind == "noop":
+            return
+
+        if directive.kind == "revive_then_resume":
+            auto_rev_mode = agent.settings.feature_modes.get("auto_revive", 0)
+            if auto_rev_mode == 0 and target_conn:
+                await self._dispatch("revive", {}, conn_id=target_conn)
+            return
+
+        if directive.kind == "retry_step":
+            async def _do_retry() -> None:
+                if directive.delay_sec > 0:
+                    await asyncio.sleep(directive.delay_sec)
+                if target_conn and directive.goal is not None:
+                    async with agent.lock:
+                        if agent.goals.active_goal is directive.goal and not agent.goals.waiting_for_behavior_stop:
+                            await self._dispatch_active_goal_step(agent, target_conn)
+
+            if directive.delay_sec > 0:
+                task = asyncio.create_task(_do_retry())
+                self._retry_tasks.add(task)
+                task.add_done_callback(self._retry_tasks.discard)
+            else:
+                await _do_retry()
+            return
+
+        if directive.kind == "dispatch_next":
+            if target_conn and directive.goal is not None:
+                async with agent.lock:
+                    if agent.goals.active_goal is directive.goal and not agent.goals.waiting_for_behavior_stop:
+                        await self._dispatch_active_goal_step(agent, target_conn)
+            return
+
+        if directive.kind in ("announce_completed", "abort_and_announce"):
+            if directive.channel and directive.fact and target_conn:
+                out_txt = (
+                    directive.fact
+                    if already_rendered
+                    else await self._render_event_in_persona(target_conn, directive.channel, directive.fact)
+                )
+                await self._output.send_notice(
+                    directive.channel,
+                    out_txt,
+                    directive.requester_uid,
+                    conn_id=target_conn,
+                )
+            if directive.promoted_goal is not None and target_conn:
+                async with agent.lock:
+                    if agent.goals.active_goal is directive.promoted_goal and not agent.goals.waiting_for_behavior_stop:
+                        agent.goals.pending_start_goal_id = None
+                        await self._dispatch_active_goal_step(agent, target_conn)
+            return
+
+        if directive.kind == "consult_llm":
+            await self._consult_llm_for_goal(agent, target_conn, ev_name, directive)
+
+    async def tick_autonomous_agents(self) -> list[dict[str, Any]]:
+        started: list[dict[str, Any]] = []
+        for summary in self.agents.list_agents():
+            agent = self.agents.get_by_char_id(int(summary["char_id"]))
+            if agent is None or not agent.connected or not agent.in_world or not agent.conn_id:
+                continue
+            if not agent.goals.autonomous.enabled:
+                continue
+            grace = agent.is_manual_input_grace_active(agent.goals.autonomous.manual_input_grace_sec)
+            if not agent.goals.can_run_autonomous(grace) or agent.lock.locked():
+                continue
+
+            async with agent.lock:
+                # Re-verify under lock before polling client RPCs
+                grace = agent.is_manual_input_grace_active(agent.goals.autonomous.manual_input_grace_sec)
+                if not agent.goals.can_run_autonomous(grace) or not agent.conn_id:
+                    continue
+                emotes: list[str] = []
+                state_info: dict[str, Any] = {}
+                if agent.goals.autonomous.idle_emote:
+                    em_res = await self._dispatch("list_emotes", {}, conn_id=agent.conn_id)
+                    emotes = [
+                        str(e.get("name"))
+                        for e in (em_res.get("emotes") or [])
+                        if isinstance(e, dict) and e.get("name")
+                    ]
+                if agent.goals.autonomous.follow_commander_if_far:
+                    st = await self._dispatch("get_status", {}, conn_id=agent.conn_id)
+                    st_inner = (st.get("state") or {}) if isinstance(st, dict) else {}
+                    state_info = dict(st_inner)
+
+                prop_goal = self.event_router.evaluate_autonomous_idle(
+                    agent,
+                    state=state_info,
+                    unlocked_emotes=emotes,
+                )
+                if prop_goal is None:
+                    continue
+                dec = agent.goals.submit_goal(prop_goal)
+                if dec.action == "started":
+                    dres = await self._dispatch_active_goal_step(agent, agent.conn_id)
+                    started.append({"char_id": agent.char_id, "goal": prop_goal.to_dict(), "dispatch": dres})
+        return started
 
     async def _process_with_llm(self, trig: dict[str, Any], cfg: ClientChatSettings) -> None:
         conn_id = trig.get("conn_id")

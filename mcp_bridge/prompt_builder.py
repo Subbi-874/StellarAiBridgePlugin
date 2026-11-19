@@ -46,6 +46,18 @@ class EventPersonaPrompts:
     extra_block: str
 
 
+@dataclass(frozen=True)
+class ConsultPrompts:
+    """Prompt bundle for bounded failure/branch LLM consultation (C#-portable)."""
+
+    synth_trig: dict[str, Any]
+    game_context: dict[str, Any]
+    persona_block: str
+    system_prompt: str
+    user_prompt: str
+    extra_block: str
+
+
 def load_prompt_file(filename: str) -> str:
     return (PROMPTS_DIR / filename).read_text(encoding="utf-8").strip()
 
@@ -289,6 +301,66 @@ def build_event_persona_prompts(
     return EventPersonaPrompts(
         synth_trig=synth_trig,
         game_context={"수신 채팅 채널": channel, "알림 유형": "비동기 작업 상태 변경"},
+        persona_block=persona_block,
+        system_prompt=sys_prompt,
+        user_prompt=extra,
+        extra_block=extra if is_remote_bpsr else "",
+    )
+
+
+def build_consult_prompts(
+    persona: str,
+    goal_dict: dict[str, Any],
+    event_name: str,
+    event_fact: str,
+    failure_signature: str,
+    locked_labels: list[str],
+    unavailable_labels: list[str],
+    is_remote_bpsr: bool,
+) -> ConsultPrompts:
+    channel = str(goal_dict.get("channel") or "party")
+    synth_trig = {
+        "sender_name": str(goal_dict.get("requester_name") or "시스템"),
+        "sender_id": int(goal_dict.get("requester_uid") or 0),
+        "is_commander": True,
+        "text": f"[목표 예외 판단 요청: {event_name}] {event_fact}",
+    }
+    persona_text = (persona or "").strip() or DEFAULT_PERSONA
+    persona_block = (
+        "<persona>\n"
+        f"아래 캐릭터 페르소나(말투·성격) 지침에 맞춰 필요 시 reply_text를 작성하세요:\n"
+        f"{persona_text}\n"
+        "</persona>"
+    )
+    sys_prompt = (
+        f"{persona_block}\n\n"
+        "규칙으로 처리하지 못한 목표 진행 중 예외/선택 상황을 해결하기 위해 다음 5가지 action 중 정확히 하나만 고르세요:\n"
+        "- retry: 잠시 대기 후 현재 단계를 재시도 (delay_sec 지정 가능)\n"
+        "- skip_step: 현재 단계를 건너뛰고 다음 단계 진행\n"
+        "- ask_user: 사용자에게 상황을 알리고 결정/확인 요청 (reply_text 작성)\n"
+        "- abort_goal: 현재 목표를 포기·중단하고 사용자에게 안내 (reply_text 작성)\n"
+        "- switch_strategy: 현재 단계를 대체 액션(replacement_step: {\"type\": \"...\", ...})으로 교체\n\n"
+        "반드시 순수 JSON 객체 하나만 출력하세요:\n"
+        '{"action": "retry | skip_step | ask_user | abort_goal | switch_strategy", '
+        '"reply_text": "", "delay_sec": 0, "replacement_step": null, "reason": "..."}'
+    )
+    payload = {
+        "event_name": event_name,
+        "failure_signature": failure_signature,
+        "fact": event_fact,
+        "goal": goal_dict,
+        "locked_labels": locked_labels,
+        "unavailable_labels": unavailable_labels,
+    }
+    extra = (
+        "<goal_exception>\n"
+        + json.dumps(payload, ensure_ascii=False)
+        + "\n</goal_exception>\n"
+        "위 <goal_exception>을 분석해 위 5가지 허용 액션 중 하나를 순수 JSON으로 선택하세요."
+    )
+    return ConsultPrompts(
+        synth_trig=synth_trig,
+        game_context={"수신 채팅 채널": channel, "목표 예외 유형": event_name},
         persona_block=persona_block,
         system_prompt=sys_prompt,
         user_prompt=extra,

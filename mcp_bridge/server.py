@@ -232,6 +232,9 @@ async def dispatch_game_rpc(
             ),
         )
 
+    if method == "get_rule_promotion_candidates" and chat_monitor is not None:
+        return {"ok": True, "candidates": chat_monitor.get_rule_promotion_candidates()}
+
     if method == "wait_for_chat_trigger" and chat_monitor is not None:
         return await chat_monitor.wait_for_next_trigger(float(params.get("timeout_sec") or 60.0))
 
@@ -934,6 +937,13 @@ async def set_autonomous_mode(
 
 
 @mcp.tool()
+async def get_rule_promotion_candidates() -> str:
+    """Returns repeated LLM exception-consultation patterns eligible for promotion into deterministic rules."""
+    res = await invoke_game("get_rule_promotion_candidates", {})
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
 async def wait_for_chat_trigger(timeout_sec: float = 60.0) -> str:
     """Waits for the next triggered chat message when chat monitor is running with use_local_agy=False."""
     res = await invoke_game("wait_for_chat_trigger", {"timeout_sec": timeout_sec})
@@ -1109,6 +1119,10 @@ async def _run_daemon_with_watchdog(app: Any, host: str, port: int, keep_alive: 
             tick_count = (tick_count + 1) % 4
             if tick_count != 0:
                 continue
+            try:
+                await chat_monitor.tick_autonomous_agents()
+            except Exception as auto_exc:  # noqa: BLE001
+                logger.debug("Autonomous tick skipped: %r", auto_exc)
             if keep_alive:
                 continue
             if hub.is_connected or _any_game_process_running():
