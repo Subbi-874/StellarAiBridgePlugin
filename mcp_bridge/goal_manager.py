@@ -102,6 +102,8 @@ class GoalStep:
         act: dict[str, Any] = {"type": self.action_type, **dict(self.params)}
         if self.target_count > 0:
             act["count"] = self.remaining_count
+        elif self.action_type in ("gather_resource", "fish") and self.continuous:
+            act["count"] = 0
         return act
 
     def to_dict(self) -> dict[str, Any]:
@@ -160,12 +162,25 @@ class Goal:
             GoalStatus.ABORTED,
         )
 
-    def progress_summary(self) -> str:
+    def progress_summary(self, live_count: int | None = None) -> str:
         total = max(1, len(self.steps))
         cur = self.current_step
         step_pos = min(self.current_step_index + 1, total)
+        live_delta = max(0, int(live_count or 0)) if live_count is not None else 0
         if cur is not None and cur.target_count > 0:
-            return f"단계 {step_pos}/{total} ({cur.action_type}: {cur.completed_count}/{cur.target_count}, 남은 {cur.remaining_count})"
+            done = min(cur.target_count, cur.completed_count + live_delta)
+            rem = max(0, cur.target_count - done)
+            return f"단계 {step_pos}/{total} ({cur.action_type}: {done}/{cur.target_count}, 남은 {rem})"
+        if cur is not None and cur.continuous:
+            done = cur.completed_count + live_delta
+            mode_lbl = (
+                "집중력 소진 시까지"
+                if (cur.action_type == "gather_resource" and cur.params.get("use_focus") is True)
+                else "무제한/중단 전까지"
+            )
+            if done > 0:
+                return f"단계 {step_pos}/{total} ({cur.action_type}: {mode_lbl}, 현재 {done}회 진행 중)"
+            return f"단계 {step_pos}/{total} ({cur.action_type}: {mode_lbl}, {cur.status})"
         if cur is not None:
             return f"단계 {step_pos}/{total} ({cur.action_type}: {cur.status})"
         return f"단계 {step_pos}/{total}"
@@ -258,6 +273,14 @@ _STEP_PARAM_KEYS: tuple[str, ...] = (
     "gimmick",
     "enable",
     "continuous",
+    "recipe_id",
+    "query",
+    "item",
+    "recipe",
+    "item_id",
+    "target_count",
+    "item_name",
+    "recipe_name",
 )
 
 
@@ -274,7 +297,16 @@ def _build_step_from_dict(raw: dict[str, Any], default_sender_id: int = 0) -> Go
 
     raw_count = params.get("count")
     target_count = 0
-    if atype in ("gather_resource", "fish") and raw_count is not None:
+    if atype == "gather_resource":
+        if raw_count is None or raw_count == "":
+            target_count = 0 if raw.get("continuous") is True else 20
+        else:
+            try:
+                target_count = max(0, int(raw_count))
+            except (TypeError, ValueError):
+                target_count = 20
+        params["count"] = target_count
+    elif atype == "fish" and raw_count is not None:
         try:
             target_count = max(0, int(raw_count))
         except (TypeError, ValueError):
@@ -284,7 +316,7 @@ def _build_step_from_dict(raw: dict[str, Any], default_sender_id: int = 0) -> Go
         continuous = bool(raw["continuous"])
     elif atype == "follow_player":
         continuous = bool(params.get("continuous", True))
-    elif atype == "fish":
+    elif atype in ("fish", "gather_resource"):
         continuous = target_count == 0
     else:
         continuous = False
@@ -641,6 +673,7 @@ class GoalManager:
                 self.pending_preemption = None
             self.waiting_for_behavior_stop = False
             self.pending_start_goal_id = None
+            self.pending_craft_confirm = None
             return ScheduleDecision(
                 action="cancelled" if (had_active or cancelled_first or self.recent_finished) else "noop",
                 active_goal=None,
@@ -685,6 +718,7 @@ class GoalManager:
                 )
             self.waiting_for_behavior_stop = False
             self.pending_start_goal_id = None
+            self.pending_craft_confirm = None
             return ScheduleDecision(
                 action="cancelled",
                 active_goal=None,
@@ -732,11 +766,31 @@ class GoalManager:
             "recent_finished": [g.to_dict() for g in list(self.recent_finished)[-5:]],
         }
 
-    def format_prompt_summary(self) -> str:
+    @staticmethod
+    def _extract_live_step_count(goal: Goal | None, live_behavior: dict[str, Any] | None) -> int | None:
+        if goal is None or goal.current_step is None:
+            return None
+        if not isinstance(live_behavior, dict) or not live_behavior.get("active"):
+            return None
+        step = goal.current_step
+        live_kind = str(live_behavior.get("kind") or "").strip()
+        expected_kinds = {step.action_type, step.behavior_kind or infer_behavior_kind(step.action_type)}
+        if live_kind and live_kind not in expected_kinds:
+            return None
+        for key in ("gathered_count", "caught_count", "crafted_count", "farmed_count"):
+            if key in live_behavior and live_behavior[key] is not None:
+                try:
+                    return max(0, int(live_behavior[key]))
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    def format_prompt_summary(self, live_behavior: dict[str, Any] | None = None) -> str:
         parts: list[str] = []
         if self.active_goal is not None:
+            live_cnt = self._extract_live_step_count(self.active_goal, live_behavior)
             parts.append(
-                f"활성: {self.active_goal.title}[id={self.active_goal.goal_id}, 우선순위={self.active_goal.priority.name}, {self.active_goal.progress_summary()}]"
+                f"활성: {self.active_goal.title}[id={self.active_goal.goal_id}, 우선순위={self.active_goal.priority.name}, {self.active_goal.progress_summary(live_count=live_cnt)}]"
             )
         if self.paused_stack:
             paused_txt = ", ".join(f"{g.title}({g.progress_summary()})" for g in reversed(self.paused_stack))

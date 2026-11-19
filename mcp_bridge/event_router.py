@@ -339,8 +339,12 @@ class GoalEventRouter:
             return f"'{goal.title}' 완료!"
         if goal.kind == "gather_resource" or (cur_step and cur_step.action_type == "gather_resource"):
             rname = data.get("resource_name") or (cur_step.params.get("resource") if cur_step else "") or "채집"
-            cnt = cur_step.target_count if (cur_step and cur_step.target_count > 0) else data.get("gathered_count") or 0
-            return f"{rname} {cnt}회 목표 완료" if cnt else f"{rname} 목표 완료"
+            if cur_step and cur_step.target_count > 0:
+                return f"{rname} {cur_step.target_count}회 목표 완료"
+            cnt = int(data.get("gathered_count") or 0) + (cur_step.completed_count if cur_step else 0)
+            if (cur_step and cur_step.params.get("use_focus") is True) or data.get("focus_exhausted"):
+                return f"집중력 소진까지 {rname} {cnt}회 채집 완료" if cnt > 0 else f"집중력 소진까지 {rname} 채집 완료"
+            return f"{rname} {cnt}회 채집 완료" if cnt > 0 else f"{rname} 목표 완료"
         if goal.kind == "fish" or (cur_step and cur_step.action_type == "fish"):
             spot = data.get("landmark") or data.get("area_name") or "낚시"
             cnt = cur_step.target_count if (cur_step and cur_step.target_count > 0) else data.get("caught_count") or 0
@@ -468,6 +472,47 @@ class GoalEventRouter:
                 str(data.get("autogather_status") or snap.get("autogather_status") or ""),
             ]).lower()
             is_focus_or_temp = any(kw in detail_blob for kw in _FOCUS_OR_EARLY_KEYWORDS)
+
+            # Unlimited Focus-until-empty gather completes cleanly when Focus hits zero
+            if (
+                step.action_type == "gather_resource"
+                and step.target_count <= 0
+                and (
+                    step.params.get("use_focus") is True
+                    or data.get("focus_exhausted")
+                    or snap.get("focus_exhausted")
+                )
+                and is_focus_or_temp
+            ):
+                if run_key not in self._progress_recorded:
+                    cnt = self._extract_progress_count(data)
+                    if cnt > 0:
+                        self._progress_recorded.add(run_key)
+                        step.completed_count += cnt
+                self._step_run_done[run_key] = "completed"
+                self._prune_dedup()
+                dec = agent.goals.complete_current_step()
+                if dec.action == "started":
+                    return RouteDirective(
+                        kind="dispatch_next",
+                        goal=goal,
+                        channel=goal.channel,
+                        requester_uid=goal.requester_uid,
+                        handled_goal_event=True,
+                    )
+                fact_data = dict(data)
+                fact_data["gathered_count"] = 0
+                fact_data["focus_exhausted"] = True
+                return RouteDirective(
+                    kind="announce_completed",
+                    goal=goal,
+                    promoted_goal=dec.active_goal,
+                    fact=self._build_completion_fact(goal, fact_data),
+                    channel=goal.channel,
+                    requester_uid=goal.requester_uid,
+                    handled_goal_event=True,
+                )
+
             if is_focus_or_temp and step.attempts <= step.max_retries and goal.failure_policy != FailurePolicy.ABORT:
                 self._step_run_done[run_key] = "retry_scheduled"
                 self._prune_dedup()

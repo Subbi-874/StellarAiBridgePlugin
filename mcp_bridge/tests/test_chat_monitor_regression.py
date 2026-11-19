@@ -433,6 +433,53 @@ class ChatMonitorRegressionTests(unittest.IsolatedAsyncioTestCase):
         plain_env = json.dumps({"text": "그냥 평문 답변"})
         self.assertEqual(ChatMonitorService._extract_decision_json(plain_env)["reply_text"], "그냥 평문 답변")
 
+    async def test_whisper_triggers_without_bot_name_while_guild_still_requires_keyword(self) -> None:
+        rpc, calls = _make_fake_rpc({})
+        svc = ChatMonitorService(rpc)
+        svc.apply_ui_settings("c1", {
+            "enabled": True,
+            "channels": ["whisper", "guild"],
+            "authorized_commanders": ["패랭이#15977376"],
+            "llm_settings": {"backend": "gemini_api"},
+        })
+
+        fake_outputs = [
+            json.dumps({"reply_text": "철광석 5개 캐올게요!", "sticker": "", "actions": [{"type": "gather_resource", "resource": "철광석", "count": 5}]}, ensure_ascii=False),
+        ]
+
+        async def fake_invoke(*args, **kwargs):
+            return fake_outputs.pop(0), False
+
+        with patch.object(svc, "_invoke_llm", side_effect=fake_invoke) as inv_mock:
+            # 1. Whisper without bot name triggers and executes
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "chat_message",
+                "data": {"msg_id": 201, "channel": "whisper", "sender_id": 15977376, "sender_name": "패랭이", "text": "철광석 5개 캐와", "local_char_id": 999999, "local_char_name": "아기봇"},
+            })
+            await _wait_bg_tasks(svc)
+            self.assertEqual(inv_mock.call_count, 1)
+            self.assertIn(("gather_resource", {"resource": "철광석", "count": 5}, "c1"), calls)
+
+            svc._sender_cooldowns.clear()
+            # 2. Self-sent whisper is ignored
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "chat_message",
+                "data": {"msg_id": 202, "channel": "whisper", "sender_id": 999999, "sender_name": "아기봇", "text": "내가 보낸 귓속말", "local_char_id": 999999, "local_char_name": "아기봇"},
+            })
+            await _wait_bg_tasks(svc)
+            self.assertEqual(inv_mock.call_count, 1)
+
+            # 3. Guild message without bot name is ignored
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "chat_message",
+                "data": {"msg_id": 203, "channel": "guild", "sender_id": 15977376, "sender_name": "패랭이", "text": "철광석 5개 캐와", "local_char_id": 999999, "local_char_name": "아기봇"},
+            })
+            await _wait_bg_tasks(svc)
+            self.assertEqual(inv_mock.call_count, 1)
+
     async def test_legacy_compat_routing_for_old_vs_new_plugin(self) -> None:
         class _FakeHub:
             def __init__(self, modern: bool) -> None:

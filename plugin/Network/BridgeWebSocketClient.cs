@@ -84,7 +84,7 @@ public sealed class BridgeWebSocketClient : IDisposable
                 {
                     ["type"] = "hello",
                     ["plugin"] = "Stellar.AgyBridge",
-                    ["version"] = "0.9.22",
+                    ["version"] = "0.9.23",
                     ["pid"] = Environment.ProcessId,
                     ["game_dir"] = Environment.CurrentDirectory,
                     ["local_char_id"] = idObj?["local_char_id"]?.GetValue<long>() ?? 0L,

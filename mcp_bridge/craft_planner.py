@@ -1,10 +1,25 @@
 """Pure deterministic multi-stage crafting dependency planner (zero network I/O, C#-portable)."""
 
 from dataclasses import dataclass
+import difflib
 import math
+import re
 from typing import Any
 
 from goal_manager import GoalStep, infer_behavior_kind
+
+
+_RECIPE_NORM_STRIP_RE = re.compile(r"[\W_\u200b\ufeff]+", re.UNICODE)
+
+
+def normalize_recipe_name(text: str) -> str:
+    """Normalizes a recipe or item name by lowercasing and removing spaces and punctuation."""
+    return _RECIPE_NORM_STRIP_RE.sub("", (text or "").lower())
+
+
+def tokenize_recipe_name(text: str) -> tuple[str, ...]:
+    """Splits a recipe/item query into normalized alphanumeric tokens for separator-insensitive lookup."""
+    return tuple(tok for tok in _RECIPE_NORM_STRIP_RE.split((text or "").lower()) if tok)
 
 
 @dataclass(frozen=True)
@@ -104,6 +119,8 @@ def select_target_recipe(
     q_clean = (query or "").strip().lower()
     if not q_clean:
         return None
+    q_norm = normalize_recipe_name(query)
+    q_tokens = tokenize_recipe_name(query)
 
     cands: list[tuple[tuple[int, int, int, int], dict[str, Any]]] = []
     for r in recipes:
@@ -112,19 +129,62 @@ def select_target_recipe(
         out_name = str(r.get("output_name") or "").strip()
         n_low = name.lower()
         o_low = out_name.lower()
-        exact = (n_low == q_clean) or (o_low == q_clean)
-        partial = (q_clean in n_low) or (q_clean in o_low)
-        if not exact and not partial:
+        n_norm = normalize_recipe_name(name)
+        o_norm = normalize_recipe_name(out_name)
+
+        exact_raw = (n_low == q_clean) or (o_low == q_clean)
+        exact_norm = bool(q_norm) and ((n_norm == q_norm) or (o_norm == q_norm))
+        partial_raw = (q_clean in n_low) or (q_clean in o_low)
+        partial_norm = bool(q_norm) and ((q_norm in n_norm) or (q_norm in o_norm))
+        all_tokens = len(q_tokens) >= 2 and (
+            all(tok in n_norm for tok in q_tokens) or all(tok in o_norm for tok in q_tokens)
+        )
+
+        if exact_raw or exact_norm:
+            match_rank = 0
+        elif partial_raw or partial_norm:
+            match_rank = 1
+        elif all_tokens:
+            match_rank = 2
+        else:
+            continue
+
+        unlocked_rank = 0
+        if unlock_map is not None and rid in unlock_map:
+            unlocked_rank = 0 if unlock_map[rid] else 1
+        cands.append(((unlocked_rank, match_rank, len(n_norm) or len(name), rid), r))
+
+    if cands:
+        cands.sort(key=lambda pair: pair[0])
+        return cands[0][1]
+
+    if len(q_norm) < 2:
+        return None
+
+    fuzzy_cands: list[tuple[tuple[int, float, int, int], dict[str, Any]]] = []
+    for r in recipes:
+        rid = int(r.get("recipe_id") or 0)
+        name = str(r.get("name") or "").strip()
+        out_name = str(r.get("output_name") or "").strip()
+        n_norm = normalize_recipe_name(name)
+        o_norm = normalize_recipe_name(out_name)
+        best_ratio = 0.0
+        for cand_norm in (n_norm, o_norm):
+            if cand_norm:
+                ratio = difflib.SequenceMatcher(None, q_norm, cand_norm).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+        if best_ratio < 0.72:
             continue
         unlocked_rank = 0
         if unlock_map is not None and rid in unlock_map:
             unlocked_rank = 0 if unlock_map[rid] else 1
-        cands.append(((unlocked_rank, 0 if exact else 1, len(name), rid), r))
+        fuzzy_cands.append(((unlocked_rank, -round(best_ratio, 4), len(n_norm) or len(name), rid), r))
 
-    if not cands:
+    if not fuzzy_cands:
         return None
-    cands.sort(key=lambda pair: pair[0])
-    return cands[0][1]
+    fuzzy_cands.sort(key=lambda pair: pair[0])
+    return fuzzy_cands[0][1]
 
 
 def collect_candidate_item_ids(

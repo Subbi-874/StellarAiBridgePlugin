@@ -275,9 +275,15 @@ class ActionExecutor:
                 on_clear_kinds(("follow", "fish"))
         elif atype == "craft_item":
             method, default_err = "craft_item", "제작을 시작하지 못했어요"
+            craft_query = ""
+            for qk in ("query", "item", "item_name", "recipe", "recipe_name", "name", "target", "title"):
+                val = str(act.get(qk) or "").strip()
+                if val:
+                    craft_query = val
+                    break
             params = {
                 "recipe_id": int(act.get("recipe_id") or 0),
-                "query": str(act.get("query") or act.get("item") or act.get("recipe") or "").strip(),
+                "query": craft_query,
                 "count": max(1, int(act.get("count") or 1)),
             }
             if on_clear_kinds:
@@ -437,9 +443,17 @@ class ActionExecutor:
             elif atype == "gather_resource" and act.get("resource"):
                 if on_clear_kinds:
                     on_clear_kinds(("follow",))
+                raw_count = act.get("count")
+                if raw_count is None or raw_count == "":
+                    g_count = 20
+                else:
+                    try:
+                        g_count = max(0, int(raw_count))
+                    except (TypeError, ValueError):
+                        g_count = 20
                 g_params: dict[str, Any] = {
                     "resource": str(act["resource"]),
-                    "count": int(act.get("count") or 20),
+                    "count": g_count,
                 }
                 if act.get("use_focus") is not None:
                     g_params["use_focus"] = bool(act["use_focus"])

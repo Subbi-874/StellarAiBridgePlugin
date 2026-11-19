@@ -104,7 +104,7 @@ return false
             CultureInfo.InvariantCulture,
             $"local reqId = {itemId}\nlocal reqQuery = {LuaLiteral.Quote((query ?? "").Trim())}\nlocal reqIds = {{{idLiterals}}}\n");
 
-        const string body = @"
+        string body = LuaSearchHelpers + @"
 local itemsVm = Z.VMMgr.GetVM('items')
 local itemTbl = Z.TableMgr.GetTable('ItemTableMgr')
 if not itemsVm or not itemTbl then return { ok = false, error = 'items VM or ItemTableMgr unavailable' } end
@@ -139,37 +139,82 @@ if reqQuery == '' then
 end
 
 local qLow = string.lower(reqQuery)
+local qNorm = normSearch(reqQuery)
+local qTokens = splitNormTokens(reqQuery)
 local matches = {}
 local datas = itemTbl.GetDatas and itemTbl.GetDatas() or {}
 for _, row in pairs(datas) do
   local nm = row.Name or ''
   if nm ~= '' then
-    local nLow = string.lower(nm)
-    if nLow:find(qLow, 1, true) then
+    local rk = matchSearchQuery(nm, qLow, qNorm, qTokens)
+    if rk ~= nil then
       local cid = row.Id
       matches[#matches + 1] = {
         item_id = cid,
         name = nm,
-        exact = (nLow == qLow),
+        exact = (rk == 0),
+        _rank = rk,
+        _nlen = #normSearch(nm),
         count = tonumber(itemsVm.GetItemTotalCount(cid)) or 0
       }
     end
   end
 end
 table.sort(matches, function(a, b)
-  if a.exact ~= b.exact then return a.exact end
-  if #a.name ~= #b.name then return #a.name < #b.name end
+  if a._rank ~= b._rank then return a._rank < b._rank end
+  if a._nlen ~= b._nlen then return a._nlen < b._nlen end
   return a.item_id < b.item_id
 end)
 local trimmed = {}
-for i = 1, math.min(#matches, 15) do trimmed[i] = matches[i] end
+for i = 1, math.min(#matches, 15) do
+  matches[i]._rank = nil
+  matches[i]._nlen = nil
+  trimmed[i] = matches[i]
+end
 return { ok = true, query = reqQuery, vitality = vitality, matches = trimmed }
 ";
         return UnwrapEval(_lua.Eval(header + body));
     }
 
+    private const string LuaSearchHelpers = @"
+local _SEP_DOT = string.char(227, 131, 187)
+local _MID_DOT = string.char(194, 183)
+local _BULLET  = string.char(226, 128, 162)
+local _ZWSP    = string.char(226, 128, 139)
+local _BOM     = string.char(239, 187, 191)
+local function normSearch(s)
+  s = string.lower(tostring(s or ''))
+  s = s:gsub(_SEP_DOT, ''):gsub(_MID_DOT, ''):gsub(_BULLET, ''):gsub(_ZWSP, ''):gsub(_BOM, '')
+  s = s:gsub('[%s%p]+', '')
+  return s
+end
+local function splitNormTokens(s)
+  s = string.lower(tostring(s or ''))
+  s = s:gsub(_SEP_DOT, ' '):gsub(_MID_DOT, ' '):gsub(_BULLET, ' '):gsub(_ZWSP, ' '):gsub(_BOM, ' ')
+  s = s:gsub('[%s%p]+', ' ')
+  local toks = {}
+  for w in s:gmatch('%S+') do toks[#toks + 1] = w end
+  return toks
+end
+local function matchSearchQuery(hayRaw, qLow, qNorm, qTokens)
+  local hLow = string.lower(tostring(hayRaw or ''))
+  if hLow == '' then return nil end
+  local hNorm = normSearch(hLow)
+  if hLow == qLow or (qNorm ~= '' and hNorm == qNorm) then return 0 end
+  if hLow:find(qLow, 1, true) or (qNorm ~= '' and hNorm:find(qNorm, 1, true)) then return 1 end
+  if #qTokens >= 2 then
+    local okAll = true
+    for _, tok in ipairs(qTokens) do
+      if not hNorm:find(tok, 1, true) then okAll = false break end
+    end
+    if okAll then return 2 end
+  end
+  return nil
+end
+";
+
     // Shared Lua helper snippets used by both GetRecipe and ExportRecipeCatalog.
-    private const string LuaRecipeHelpers = @"
+    private const string LuaRecipeHelpers = LuaSearchHelpers + @"
 local function resolveStation(row)
   if row.QuickJumpType == 1 and type(row.QuickJump) == 'table' and #row.QuickJump >= 3 then
     local sid, eid = row.QuickJump[1], row.QuickJump[3]
@@ -472,16 +517,23 @@ if reqQuery == '' then
 end
 
 local qLow = string.lower(reqQuery)
+local qNorm = normSearch(reqQuery)
+local qTokens = splitNormTokens(reqQuery)
 local matches = {}
 if prodTbl and prodTbl.GetDatas then
   for _, r in pairs(prodTbl.GetDatas()) do
-    local nm = string.lower(r.Name or '')
+    local nm = tostring(r.Name or '')
     local outRow = (r.RelatedItemId and r.RelatedItemId > 0 and itemTbl) and itemTbl.GetRow(r.RelatedItemId, true) or nil
-    local onm = outRow and string.lower(outRow.Name or '') or ''
-    if (nm ~= '' and nm:find(qLow, 1, true)) or (onm ~= '' and onm:find(qLow, 1, true)) then
+    local onm = outRow and tostring(outRow.Name or '') or ''
+    local rk1 = matchSearchQuery(nm, qLow, qNorm, qTokens)
+    local rk2 = matchSearchQuery(onm, qLow, qNorm, qTokens)
+    local rk = nil
+    if rk1 and rk2 then rk = math.min(rk1, rk2) else rk = rk1 or rk2 end
+    if rk ~= nil then
       local rec = convertLifeRow(r, lpVm, itemTbl, parentSet, fishByTypeB, true)
       if rec then
-        rec._exact = (nm == qLow or onm == qLow)
+        rec._rank = rk
+        rec._nlen = #normSearch(rec.name)
         matches[#matches + 1] = rec
       end
     end
@@ -490,24 +542,27 @@ end
 if eqTbl and eqTbl.GetDatas then
   for _, r in pairs(eqTbl.GetDatas()) do
     local ir = (r.EquipId and r.EquipId > 0 and itemTbl) and itemTbl.GetRow(r.EquipId, true) or nil
-    local onm = ir and string.lower(ir.Name or '') or ''
-    if onm ~= '' and onm:find(qLow, 1, true) then
+    local onm = ir and tostring(ir.Name or '') or ''
+    local rk = matchSearchQuery(onm, qLow, qNorm, qTokens)
+    if rk ~= nil then
       local rec = convertEquipRow(r, eqVm, itemTbl, true)
       if rec then
-        rec._exact = (onm == qLow)
+        rec._rank = rk
+        rec._nlen = #normSearch(rec.name)
         matches[#matches + 1] = rec
       end
     end
   end
 end
 table.sort(matches, function(a, b)
-  if a._exact ~= b._exact then return a._exact end
-  if #a.name ~= #b.name then return #a.name < #b.name end
+  if a._rank ~= b._rank then return a._rank < b._rank end
+  if a._nlen ~= b._nlen then return a._nlen < b._nlen end
   return a.recipe_id < b.recipe_id
 end)
 local outMatches = {}
 for i = 1, math.min(#matches, 12) do
-  matches[i]._exact = nil
+  matches[i]._rank = nil
+  matches[i]._nlen = nil
   attachLiveCounts(matches[i])
   outMatches[i] = matches[i]
 end

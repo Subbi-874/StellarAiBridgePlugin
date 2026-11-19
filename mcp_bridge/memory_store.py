@@ -1099,6 +1099,8 @@ class SqliteMemoryStore:
             clauses.append("recipe_kind = ?")
             params.append(recipe_kind.strip())
         q_clean = sanitize_text(query, 64)
+        base_clauses = list(clauses)
+        base_params = list(params)
         if q_clean:
             pat = f"%{escape_like_pattern(q_clean)}%"
             clauses.append("(name LIKE ? ESCAPE '\\' OR output_name LIKE ? ESCAPE '\\')")
@@ -1111,13 +1113,57 @@ class SqliteMemoryStore:
         with self._lock:
             rows = self._conn.execute(sql, [*params, lim]).fetchall()
             out: list[dict[str, Any]] = []
+            seen_rids: set[int] = set()
             for r in rows:
                 try:
                     parsed = json.loads(str(r["data_json"]))
                     if isinstance(parsed, dict):
+                        rid_val = int(parsed.get("recipe_id") or 0)
+                        if rid_val > 0:
+                            seen_rids.add(rid_val)
                         out.append(parsed)
                 except json.JSONDecodeError:
                     pass
+
+            if q_clean and len(out) < lim and recipe_id <= 0:
+                norm_re = re.compile(r"[\W_\u200b\ufeff]+", re.UNICODE)
+                q_norm = norm_re.sub("", q_clean.lower())
+                q_tokens = [t for t in norm_re.split(q_clean.lower()) if t]
+                if q_norm:
+                    fb_sql = (
+                        f"SELECT recipe_id, name, output_name, data_json FROM recipes_cache "
+                        f"WHERE {' AND '.join(base_clauses)} ORDER BY LENGTH(name) ASC, recipe_id ASC"
+                    )
+                    scored: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+                    for r in self._conn.execute(fb_sql, base_params).fetchall():
+                        rid_val = int(r["recipe_id"] or 0)
+                        if rid_val in seen_rids:
+                            continue
+                        n_raw = str(r["name"] or "")
+                        o_raw = str(r["output_name"] or "")
+                        n_norm = norm_re.sub("", n_raw.lower())
+                        o_norm = norm_re.sub("", o_raw.lower())
+                        if n_norm == q_norm or o_norm == q_norm:
+                            rank = 0
+                        elif q_norm in n_norm or q_norm in o_norm:
+                            rank = 1
+                        elif len(q_tokens) >= 2 and (
+                            all(t in n_norm for t in q_tokens) or all(t in o_norm for t in q_tokens)
+                        ):
+                            rank = 2
+                        else:
+                            continue
+                        try:
+                            parsed = json.loads(str(r["data_json"]))
+                            if isinstance(parsed, dict):
+                                scored.append(((rank, len(n_norm) or len(n_raw), rid_val), parsed))
+                        except json.JSONDecodeError:
+                            pass
+                    scored.sort(key=lambda item: item[0])
+                    for _, parsed in scored:
+                        if len(out) >= lim:
+                            break
+                        out.append(parsed)
             return out
 
     def get_cached_item_obtain_way(self, item_id: int) -> dict[str, Any] | None:

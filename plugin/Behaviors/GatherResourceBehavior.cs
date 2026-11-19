@@ -45,6 +45,7 @@ public sealed class GatherResourceBehavior : IBehavior
     private float _counterUnreadableSec;
     private const float CounterUnreadableLimitSec = 10f;
     private string _lastAgStatus = "";
+    private bool _focusExhausted;
 
     public string Kind => "gather_resource";
     public bool IsFinished { get; private set; }
@@ -71,8 +72,17 @@ public sealed class GatherResourceBehavior : IBehavior
         _boost = boost;
         _autoGather = autoGather;
         _resourceQuery = resourceQuery;
-        _targetCount = Math.Max(1, targetCount);
+        _targetCount = Math.Max(0, targetCount);
         _useFocus = useFocus;
+    }
+
+    private string FormatGoalText(int done)
+    {
+        if (_targetCount > 0)
+            return $"{done}/{_targetCount}";
+        return _useFocus == true
+            ? $"{done}회 (집중력 소진 시까지)"
+            : $"{done}회 (무제한)";
     }
 
     public void Start()
@@ -98,7 +108,7 @@ public sealed class GatherResourceBehavior : IBehavior
         _autoCombat.SuppressForCatchup = true;
         _moveDriver.Install(this);
         _phase = "routing_to_cluster";
-        _detail = $"Target '{_target.Name}' (id={_target.CollectionId}, scene={_target.SceneName} #{_target.SceneId}, goal=0/{_targetCount})";
+        _detail = $"Target '{_target.Name}' (id={_target.CollectionId}, scene={_target.SceneName} #{_target.SceneId}, goal={FormatGoalText(0)})";
         _services.Log.Info($"[AgyBridge][Gather] Started: {_detail}");
     }
 
@@ -264,8 +274,8 @@ public sealed class GatherResourceBehavior : IBehavior
 
         _delegatedToAutoGather = true;
         _phase = "gathering";
-        _detail = $"Gathering '{_target.Name}' (0/{_targetCount})";
-        _services.Log.Info($"[AgyBridge][Gather] Handed off to Stellar.AutoGather (id={_target.CollectionId}, baselineCounter={_baselineCollectCounter}, goal={_targetCount})");
+        _detail = $"Gathering '{_target.Name}' ({FormatGoalText(0)})";
+        _services.Log.Info($"[AgyBridge][Gather] Handed off to Stellar.AutoGather (id={_target.CollectionId}, baselineCounter={_baselineCollectCounter}, goal={FormatGoalText(0)})");
     }
 
     private void TickAutoGatherMonitoring(float dt)
@@ -281,7 +291,7 @@ public sealed class GatherResourceBehavior : IBehavior
             if (_counterUnreadableSec >= CounterUnreadableLimitSec)
             {
                 _autoGather.StopAutoGather();
-                Fail("counter_unavailable", $"채집 횟수를 읽을 수 없어 안전하게 중단했어요 ({_gatheredCount}/{_targetCount}).");
+                Fail("counter_unavailable", $"채집 횟수를 읽을 수 없어 안전하게 중단했어요 ({FormatGoalText(_gatheredCount)}).");
                 return;
             }
         }
@@ -302,14 +312,14 @@ public sealed class GatherResourceBehavior : IBehavior
         }
 
         _lastAgStatus = _autoGather.GetControllerStatus();
-        _detail = $"채집 중: {_target.Name} ({_gatheredCount}/{_targetCount}) [{_lastAgStatus}]";
+        _detail = $"채집 중: {_target.Name} ({FormatGoalText(_gatheredCount)}) [{_lastAgStatus}]";
 
-        if (_gatheredCount >= _targetCount)
+        if (_targetCount > 0 && _gatheredCount >= _targetCount)
         {
             _autoGather.StopAutoGather();
             _autoCombat.SuppressForCatchup = false;
             _phase = "completed";
-            _detail = $"Completed gathering '{_target.Name}' ({_gatheredCount}/{_targetCount}).";
+            _detail = $"Completed gathering '{_target.Name}' ({FormatGoalText(_gatheredCount)}).";
             IsFinished = true;
             _services.Log.Info($"[AgyBridge][Gather] Completed! {_detail}");
             _world.EmitBridgeEvent("gather_completed", GetSnapshot());
@@ -319,9 +329,25 @@ public sealed class GatherResourceBehavior : IBehavior
         // Check if AutoGather stopped on its own (e.g. out of Focus in strict Focus mode)
         if (!_autoGather.IsGatheringEnabled())
         {
+            bool focusExhausted = _lastAgStatus.Contains("집중력", StringComparison.OrdinalIgnoreCase)
+                || _lastAgStatus.Contains("활력", StringComparison.OrdinalIgnoreCase)
+                || _lastAgStatus.Contains("focus", StringComparison.OrdinalIgnoreCase);
+            _focusExhausted = focusExhausted;
+
+            if (_targetCount <= 0 && (focusExhausted || _useFocus == true))
+            {
+                _autoCombat.SuppressForCatchup = false;
+                _phase = "completed";
+                _detail = $"집중력 소진까지 '{_target.Name}' {_gatheredCount}회 채집 완료 (status={_lastAgStatus}).";
+                IsFinished = true;
+                _services.Log.Info($"[AgyBridge][Gather] Completed (focus exhausted): {_detail}");
+                _world.EmitBridgeEvent("gather_completed", GetSnapshot());
+                return;
+            }
+
             _autoCombat.SuppressForCatchup = false;
             _phase = "stopped_by_autogather";
-            _detail = $"Stellar.AutoGather stopped early at {_gatheredCount}/{_targetCount} (status={_lastAgStatus}).";
+            _detail = $"Stellar.AutoGather stopped early at {FormatGoalText(_gatheredCount)} (status={_lastAgStatus}).";
             IsFinished = true;
             _services.Log.Info($"[AgyBridge][Gather] Early stop: {_detail}");
             _world.EmitBridgeEvent("gather_stopped", GetSnapshot());
@@ -367,6 +393,8 @@ public sealed class GatherResourceBehavior : IBehavior
         ["scene_name"] = _target?.SceneName ?? "",
         ["gathered_count"] = _gatheredCount,
         ["target_count"] = _targetCount,
+        ["use_focus"] = _useFocus.HasValue ? (JsonNode)_useFocus.Value : null,
+        ["focus_exhausted"] = _focusExhausted,
         ["autogather_status"] = _lastAgStatus
     };
 }

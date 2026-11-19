@@ -108,7 +108,7 @@ description: >-
      - 아군 회복/버프용 녹색 장판과 파티 **분담/집합 장판(`"분담"`, `"[집합]"`, 아군 화살표 추적)** 은 회피 대상에서 자동 제외해 뭉침을 유지합니다.
    - **이동형 필드/던전 기믹 (`use_gimmick` / `list_gimmicks`)**: 바람의 통로·기류·활공 발판·맵 내 순간 이동 장치 등 이동 기믹을 찾아 접근·작동합니다(던전 출구, 상자, 상점, 의자 앉기, 낚시터는 자동 제외).
 10. **봇별 목표 스케줄러 · 우선순위 선점 (`set_goal` / `cancel_goal` / `list_goals`)**:
-    - 다단계 작업(예: 채집 후 이동)은 `set_goal`로 등록하며, 유저가 `"이거 먼저/우선 해"`라고 지시하면 `priority: "urgent", preempt: true`로 현재 진행 중이던 복귀 가능 목표를 잔여 수량까지 보존해 일시 정지한 뒤 새 목표를 먼저 실행하고 종료 후 자동 복귀합니다.
+    - 다단계 작업(예: 채집 후 이동)은 `set_goal`로 등록하며, 단발 장기 작업(`gather_resource`, `fish`, `seek_monster`, `craft_item`, `farm_monster_item`)도 브릿지가 자동으로 `진행 중 목표`에 등록·추적합니다. 유저가 `"이거 먼저/우선 해"`라고 지시하면 `priority: "urgent", preempt: true`로 현재 진행 중이던 복귀 가능 목표를 잔여 수량까지 보존해 일시 정지한 뒤 새 목표를 먼저 실행하고 종료 후 자동 복귀합니다.
 11. **봇별 영구 기억 및 공통 유저 닉변 추적 (`remember` / `forget`)**:
     - 브릿지는 내 캐릭터(`bot_char_id`)별로 기억과 최근 사건 로그를 분리 저장하고, 플레이어 UID별 닉변 이력만 전 봇이 공유합니다. **명령권자 요청만** `remember`/`forget`으로 저장·삭제하며, 비명령권자의 채팅으로는 절대 기억을 수정하지 않습니다.
 12. **전체 제작 목표 (`craft_goal`, 생활 제작·요리·연금술·홈 가구·장비 단조 전부 지원)**:
@@ -134,7 +134,7 @@ description: >-
 5. **대화 모니터링 종료 (`disable_chat_monitor`)**:
    - `{"type": "disable_chat_monitor"}` ('대화 모니터링 꺼 / 조용히 해')
 6. **생활 자원 자동 채집 (`gather_resource`)**:
-   - `{"type": "gather_resource", "resource": "사향 분말", "count": 20}` (집중력/활력 사용 여부 언급 시 `"use_focus": true/false` 추가)
+   - `{"type": "gather_resource", "resource": "사향 분말", "count": 20}` (`"count": 0` + `"use_focus": true`면 횟수 상한 없이 **집중력을 다 쓸 때까지 계속 채집**하며 자동 완료 보고, 일반 집중력/활력 토글 시 `"use_focus": true/false` 추가; 단발 호출도 `진행 중 목표`에 자동 등록됨)
 7. **파티 관리 (`party_action`)**:
    - 생성: `{"type": "party_action", "party_op": "create", "auto_accept": true, "leave_first": true}`
    - 자동 수락 토글(파티장만): `{"type": "party_action", "party_op": "set_auto_accept", "auto_accept": true}` (또는 `false`)

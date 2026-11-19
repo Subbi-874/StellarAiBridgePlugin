@@ -350,6 +350,194 @@ class GoalManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         assert a2.goals.active_goal is not None
         self.assertEqual(a2.goals.active_goal.goal_id, "a2_g")
 
+    async def test_standalone_focus_unlimited_gather_wraps_as_goal_tracks_live_progress_and_completes(self) -> None:
+        calls: list[tuple[str, dict]] = []
+        status_behavior: list[dict] = [{"active": False, "kind": "idle"}]
+
+        async def rpc(method: str, params: dict | None = None, conn_id: str | None = None) -> dict:
+            p = dict(params or {})
+            calls.append((method, p))
+            if method == "get_status":
+                return {
+                    "ok": True,
+                    "state": {"scene_name": "몽테놀 계곡", "line_id": 1, "party": {}, "player": {"char_id": 1001, "name": "패랭이"}},
+                    "feature_modes": {},
+                    "capabilities": {"missing_labels": []},
+                    "behavior": status_behavior[0],
+                }
+            if method in ("list_emotes", "get_social_roster", "get_chats", "get_party"):
+                return {"ok": True, "emotes": [], "members": [], "messages": []}
+            return {"ok": True}
+
+        svc = ChatMonitorService(rpc)
+        svc.apply_ui_settings("c1", {
+            "enabled": True,
+            "channels": ["whisper"],
+            "authorized_commanders": ["쵸로기#620931"],
+            "llm_settings": {"backend": "gemini_api", "send_system_prompt": True},
+        })
+
+        seen_prompts: list[str] = []
+        seen_contexts: list[dict] = []
+        outputs = [
+            json.dumps({
+                "reply_text": "집중력을 다 쓸 때까지 황사철광을 계속 채집할게요.",
+                "sticker": "",
+                "actions": [{"type": "gather_resource", "resource": "황사철광", "count": 0, "use_focus": True}],
+            }, ensure_ascii=False),
+            json.dumps({
+                "reply_text": "지금 황사철광을 집중력 다 쓸 때까지 채집 중이고 3회 진행했어요.",
+                "sticker": "",
+                "actions": [],
+            }, ensure_ascii=False),
+            json.dumps({
+                "reply_text": "집중력 소진까지 황사철광 10회 채집을 완료했어요!",
+                "sticker": "",
+                "actions": [],
+            }, ensure_ascii=False),
+            json.dumps({
+                "reply_text": "다시 집중력 소진 시까지 캘게요.",
+                "sticker": "",
+                "actions": [{"type": "gather_resource", "resource": "철광석", "count": 0, "use_focus": True}],
+            }, ensure_ascii=False),
+            json.dumps({
+                "reply_text": "집중력이 모두 소진되어 철광석 4회 채집을 마쳤어요!",
+                "sticker": "",
+                "actions": [],
+            }, ensure_ascii=False),
+        ]
+
+        async def fake_invoke(*args, **kwargs):
+            seen_contexts.append(dict(args[2] or {}) if len(args) > 2 else {})
+            seen_prompts.append(str(args[5] if len(args) > 5 else kwargs.get("user_prompt") or ""))
+            return outputs.pop(0), False
+
+        with patch.object(svc, "_invoke_llm", side_effect=fake_invoke):
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "chat_message",
+                "data": {"msg_id": 1, "channel": "whisper", "sender_id": 620931, "sender_name": "쵸로기", "text": "패랭이야 집중력 다 쓸때까지 황사철광 캐", "local_char_id": 1001, "local_char_name": "패랭이"},
+            })
+            await _wait_all_bg_tasks()
+
+            gather_calls = [p for m, p in calls if m == "gather_resource"]
+            self.assertEqual(gather_calls, [{"resource": "황사철광", "count": 0, "use_focus": True}])
+
+            agent = svc.agents.get_by_char_id(1001)
+            assert agent is not None and agent.goals.active_goal is not None
+            self.assertEqual(agent.goals.active_goal.title, "황사철광 채집 (집중력 소진 시까지)")
+            self.assertTrue(agent.goals.active_goal.is_continuous)
+            assert agent.goals.active_goal.current_step is not None
+            self.assertEqual(agent.goals.active_goal.current_step.target_count, 0)
+
+            status_behavior[0] = {"active": True, "kind": "gather_resource", "gathered_count": 3}
+            svc._sender_cooldowns.clear()
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "chat_message",
+                "data": {"msg_id": 2, "channel": "whisper", "sender_id": 620931, "sender_name": "쵸로기", "text": "패랭이야 지금 설정된 목표 뭐니", "local_char_id": 1001, "local_char_name": "패랭이"},
+            })
+            await _wait_all_bg_tasks()
+            self.assertIn("황사철광 채집 (집중력 소진 시까지)", seen_prompts[1])
+            self.assertIn("집중력 소진 시까지, 현재 3회 진행 중", seen_prompts[1])
+            self.assertIn("황사철광 채집 (집중력 소진 시까지)", str(seen_contexts[1].get("진행 중 목표", "")))
+            self.assertIn("집중력 소진 시까지, 현재 3회 진행 중", str(seen_contexts[1].get("진행 중 목표", "")))
+
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "gather_completed",
+                "data": {"local_char_id": 1001, "resource_name": "황사 철광", "gathered_count": 10, "focus_exhausted": True},
+            })
+            self.assertIsNone(agent.goals.active_goal)
+            sent_texts = [p["text"] for m, p in calls if m == "send_chat"]
+            self.assertIn("집중력 소진까지 황사철광 10회 채집을 완료했어요!", sent_texts)
+
+            # Fallback gather_stopped with Focus exhaustion status also completes without retrying
+            calls.clear()
+            svc._sender_cooldowns.clear()
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "chat_message",
+                "data": {"msg_id": 3, "channel": "whisper", "sender_id": 620931, "sender_name": "쵸로기", "text": "패랭이야 철광석도 캐", "local_char_id": 1001, "local_char_name": "패랭이"},
+            })
+            await _wait_all_bg_tasks()
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "gather_stopped",
+                "data": {"local_char_id": 1001, "resource_name": "철광석", "gathered_count": 4, "autogather_status": "집중력 한도 도달"},
+            })
+            self.assertIsNone(agent.goals.active_goal)
+            self.assertEqual([m for m, _ in calls if m == "gather_resource"], ["gather_resource"])
+            self.assertIn("집중력이 모두 소진되어 철광석 4회 채집을 마쳤어요!", [p["text"] for m, p in calls if m == "send_chat"])
+
+    async def test_nested_idle_stop_response_dispatches_replacement_goal_immediately(self) -> None:
+        calls: list[tuple[str, dict]] = []
+
+        async def rpc(method: str, params: dict | None = None, conn_id: str | None = None) -> dict:
+            p = dict(params or {})
+            calls.append((method, p))
+            if method == "stop":
+                return {"ok": True, "stopped": {"active": False, "kind": "idle", "reason": p.get("reason", "replaced")}}
+            return {"ok": True}
+
+        svc = ChatMonitorService(rpc)
+        agent = svc.agents.bind_connection("c1", 1001, "패랭이", in_world=True)
+        assert agent is not None
+        g_old = Goal("g_old", "기존", "gather_resource", [GoalStep("gather_resource", {"resource": "철광석"}, target_count=5)])
+        agent.goals.submit_goal(g_old)
+
+        rec, err, info = await svc._handle_goal_action(
+            agent,
+            "c1",
+            agent.settings,
+            "set_goal",
+            {"type": "set_goal", "title": "새 목표", "replace_active": True, "steps": [{"type": "gather_resource", "resource": "동광석", "count": 7}]},
+            {"channel": "party", "sender_id": 620931, "sender_name": "쵸로기"},
+        )
+        self.assertIsNone(err)
+        self.assertIsNone(info)
+        self.assertFalse(agent.goals.waiting_for_behavior_stop)
+        self.assertIn(("gather_resource", {"resource": "동광석", "count": 7}), calls)
+        assert agent.goals.active_goal is not None
+        self.assertEqual(agent.goals.active_goal.title, "새 목표")
+
+    async def test_failed_standalone_goal_dispatch_clears_active_goal(self) -> None:
+        async def rpc(method: str, params: dict | None = None, conn_id: str | None = None) -> dict:
+            if method == "get_status":
+                return {"ok": True, "state": {"scene_name": "아스텔리즈", "line_id": 1, "party": {}, "player": {"char_id": 1001, "name": "패랭이"}}, "feature_modes": {}, "capabilities": {"missing_labels": []}}
+            if method == "gather_resource":
+                return {"ok": False, "error": "resource_not_found"}
+            if method in ("list_emotes", "get_social_roster", "get_chats", "get_party"):
+                return {"ok": True, "emotes": [], "members": [], "messages": []}
+            return {"ok": True}
+
+        svc = ChatMonitorService(rpc)
+        svc.apply_ui_settings("c1", {
+            "enabled": True,
+            "channels": ["party"],
+            "authorized_commanders": ["쵸로기#620931"],
+            "llm_settings": {"backend": "gemini_api", "send_system_prompt": True},
+        })
+        outputs = [
+            json.dumps({"reply_text": "찾아볼게요.", "sticker": "", "actions": [{"type": "gather_resource", "resource": "없는광물", "count": 5}]}, ensure_ascii=False),
+            json.dumps({"reply_text": "없는광물은 찾지 못했어요.", "sticker": "", "actions": []}, ensure_ascii=False),
+        ]
+
+        async def fake_invoke(*args, **kwargs):
+            return outputs.pop(0), False
+
+        with patch.object(svc, "_invoke_llm", side_effect=fake_invoke):
+            await svc.on_bridge_event({
+                "conn_id": "c1",
+                "event": "chat_message",
+                "data": {"msg_id": 10, "channel": "party", "sender_id": 620931, "sender_name": "쵸로기", "text": "패랭이 없는광물 캐", "local_char_id": 1001, "local_char_name": "패랭이"},
+            })
+            await _wait_all_bg_tasks()
+
+        agent = svc.agents.get_by_char_id(1001)
+        assert agent is not None
+        self.assertIsNone(agent.goals.active_goal)
+
 
 if __name__ == "__main__":
     unittest.main()

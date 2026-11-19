@@ -10,7 +10,7 @@ if str(BRIDGE_DIR) not in sys.path:
     sys.path.insert(0, str(BRIDGE_DIR))
 
 from chat_monitor import ChatMonitorService  # noqa: E402
-from craft_planner import CraftPlanner  # noqa: E402
+from craft_planner import CraftPlanner, select_target_recipe  # noqa: E402
 from memory_store import SqliteMemoryStore  # noqa: E402
 
 
@@ -237,6 +237,29 @@ class CraftPlannerUnitTests(unittest.TestCase):
         cyc_res = planner.plan_craft(cyc, {}, {}, recipe_id=999, requested_count=1)
         self.assertEqual(cyc_res.status, "blocked")
 
+    def test_recipe_search_normalization_punctuation_and_fuzzy(self) -> None:
+        special_recipes = [
+            {"recipe_id": 2030037, "recipe_kind": "life_build", "name": "빛의 프리즘・심곡 기술", "output_item_id": 1220411, "output_name": "빛의 프리즘", "yield_per_craft": 1, "focus_cost": 0, "materials": []},
+            {"recipe_id": 2030038, "recipe_kind": "life_build", "name": "빛의 프리즘・심곡 기술 숙련", "output_item_id": 1220411, "output_name": "빛의 프리즘", "yield_per_craft": 1, "focus_cost": 0, "materials": []},
+            {"recipe_id": 2030901, "recipe_kind": "equip_create", "name": "[극]개천 단해 메가 블레이드・중재", "output_item_id": 800001, "output_name": "[극]개천 단해 메가 블레이드・중재", "yield_per_craft": 1, "focus_cost": 0, "materials": []},
+            {"recipe_id": 2050901, "recipe_kind": "house_furniture", "name": "빈티지 빨간색 샹들리에\u200b\u200b", "output_item_id": 900001, "output_name": "빈티지 빨간색 샹들리에\u200b\u200b", "yield_per_craft": 1, "focus_cost": 0, "materials": []},
+            {"recipe_id": 2060232, "recipe_kind": "life_build", "name": "부드러운 면직물", "output_item_id": 1085039, "output_name": "부드러운 면직물", "yield_per_craft": 1, "focus_cost": 10, "materials": []},
+        ]
+        self.assertEqual(select_target_recipe(special_recipes, query="빛의 프리즘 심곡 기술")["recipe_id"], 2030037)
+        self.assertEqual(select_target_recipe(special_recipes, query="빛의 프리즘 심곡")["recipe_id"], 2030037)
+        self.assertEqual(select_target_recipe(special_recipes, query="개천 단해 메가 블레이드 중재")["recipe_id"], 2030901)
+        self.assertEqual(select_target_recipe(special_recipes, query="빈티지 빨간색 샹들리에")["recipe_id"], 2050901)
+        self.assertEqual(select_target_recipe(special_recipes, query="부드런 면직물")["recipe_id"], 2060232)
+        self.assertIsNone(select_target_recipe(special_recipes, query="존재하지않는아이템xyz"))
+
+        store = SqliteMemoryStore(":memory:")
+        try:
+            store.replace_recipe_catalog("1.0.46907", special_recipes, [])
+            db_hits = store.find_cached_recipes(query="빛의 프리즘 심곡")
+            self.assertEqual([r["recipe_id"] for r in db_hits], [2030037, 2030038])
+        finally:
+            store.close()
+
 
 class ChatMonitorCraftingIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_craft_goal_monster_confirm_flow_and_completion(self) -> None:
@@ -392,6 +415,105 @@ class ChatMonitorCraftingIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any("생고기 가공" in txt for txt in sent_notices))
                 ev_types = [e.event_type for e in svc.memory.list_recent_events(1001, limit=10)]
                 self.assertIn("goal_completed", ev_types)
+        finally:
+            svc.memory.close()
+
+    async def test_craft_goal_item_name_alias_and_punctuation_lookup(self) -> None:
+        recipes = [
+            {
+                "recipe_id": 2060232,
+                "recipe_kind": "life_build",
+                "name": "부드러운 면직물",
+                "output_item_id": 1085039,
+                "output_name": "부드러운 면직물",
+                "yield_per_craft": 1,
+                "focus_cost": 10,
+                "materials": [],
+            },
+            {
+                "recipe_id": 2030037,
+                "recipe_kind": "life_build",
+                "name": "빛의 프리즘・심곡 기술",
+                "output_item_id": 1220411,
+                "output_name": "빛의 프리즘",
+                "yield_per_craft": 1,
+                "focus_cost": 0,
+                "materials": [],
+            },
+        ]
+        rpc_calls: list[tuple[str, dict]] = []
+
+        async def rpc(method: str, params: dict | None = None, conn_id: str | None = None) -> dict:
+            p = dict(params or {})
+            rpc_calls.append((method, p))
+            if method == "get_status":
+                return {
+                    "ok": True,
+                    "state": {"scene_name": "아스텔리즈", "line_id": 1, "party": {}, "player": {"char_id": 1001, "name": "패랭이봇"}},
+                    "feature_modes": {},
+                    "capabilities": {"missing_labels": []},
+                }
+            if method == "export_recipes":
+                return {
+                    "ok": True,
+                    "game_version": "1.0.46907",
+                    "total": len(recipes),
+                    "offset": 0,
+                    "next_offset": len(recipes),
+                    "has_more": False,
+                    "recipes": recipes,
+                    "items": [],
+                }
+            if method == "get_item_count":
+                return {"ok": True, "vitality": 1000, "items": [{"item_id": iid, "count": 0} for iid in (p.get("item_ids") or [])]}
+            if method == "get_recipe":
+                return {"ok": True, "matches": [{"recipe_id": p.get("recipe_id"), "unlocked": True}]}
+            if method in ("list_emotes", "get_social_roster", "get_chats", "get_party"):
+                return {"ok": True, "emotes": [], "members": [], "messages": []}
+            return {"ok": True}
+
+        svc = ChatMonitorService(rpc)
+        try:
+            await svc.on_bridge_event({"conn_id": "c1", "event": "client_hello", "data": {"local_char_id": 1001, "local_char_name": "패랭이봇", "in_world": True}})
+            svc.apply_ui_settings("c1", {
+                "enabled": True,
+                "channels": ["whisper"],
+                "authorized_commanders": ["패랭이#15977376"],
+                "llm_settings": {"backend": "gemini_api", "send_system_prompt": True},
+            })
+
+            outputs = [
+                json.dumps({"reply_text": "부드러운 면직물 1개 만들게요!", "sticker": "ok", "actions": [{"type": "craft_goal", "item_name": "부드러운 면직물", "count": 1}]}, ensure_ascii=False),
+                json.dumps({"reply_text": "부드러운 면직물 1개 제작을 완료했어요!", "sticker": "", "actions": []}, ensure_ascii=False),
+                json.dumps({"reply_text": "빛의 프리즘・심곡 기술 1개 만들게요!", "sticker": "ok", "actions": [{"type": "craft_goal", "recipe_name": "빛의 프리즘 심곡 기술", "count": 1}]}, ensure_ascii=False),
+            ]
+
+            async def fake_invoke(*_args, **_kwargs):
+                return outputs.pop(0), False
+
+            with patch.object(svc, "_invoke_llm", side_effect=fake_invoke):
+                await svc.on_bridge_event({
+                    "conn_id": "c1",
+                    "event": "chat_message",
+                    "data": {"msg_id": 1, "channel": "whisper", "sender_id": 15977376, "sender_name": "패랭이", "text": "부드러운 면직물 1개 만들어", "local_char_id": 1001, "local_char_name": "패랭이봇"},
+                })
+                await _wait_all_bg_tasks()
+                self.assertIn(("craft_item", {"recipe_id": 2060232, "query": "부드러운 면직물", "count": 1}), rpc_calls)
+
+                # Mark first craft completed before starting second
+                await svc.on_bridge_event({
+                    "conn_id": "c1",
+                    "event": "craft_completed",
+                    "data": {"local_char_id": 1001, "recipe_id": 2060232, "recipe_name": "부드러운 면직물", "gained_count": 1},
+                })
+                svc._sender_cooldowns.clear()
+                await svc.on_bridge_event({
+                    "conn_id": "c1",
+                    "event": "chat_message",
+                    "data": {"msg_id": 2, "channel": "whisper", "sender_id": 15977376, "sender_name": "패랭이", "text": "빛의 프리즘 심곡 기술 1개 만들어", "local_char_id": 1001, "local_char_name": "패랭이봇"},
+                })
+                await _wait_all_bg_tasks()
+                self.assertIn(("craft_item", {"recipe_id": 2030037, "query": "빛의 프리즘・심곡 기술", "count": 1}), rpc_calls)
         finally:
             svc.memory.close()
 

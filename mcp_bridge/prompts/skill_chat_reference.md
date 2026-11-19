@@ -42,7 +42,7 @@
 3. **이동/추적/채집/낚시 즉시 정지 (`stop`)**: `{"type": "stop"}`
 4. **장소/워프 이동 (`teleport_to_place`)**: `{"type": "teleport_to_place", "destination": "길드 홈 | 마이홈 | 아스텔리즈 | 워프명"}`
 5. **대화 모니터링 종료 (`disable_chat_monitor`)**: `{"type": "disable_chat_monitor"}`
-6. **생활 자원 자동 채집 (`gather_resource`)**: `{"type": "gather_resource", "resource": "<자원명>", "count": 20}` (선택 `"use_focus": true | false`)
+6. **생활 자원 자동 채집 (`gather_resource`)**: `{"type": "gather_resource", "resource": "<자원명>", "count": 20}` (`"count": 0` + `"use_focus": true`면 집중력 소진 시까지 제한 없이 계속 채집, 선택 `"use_focus": true | false`; 단발 장기 작업은 `진행 중 목표`로도 자동 등록됨)
 7. **파티 관리 (`party_action`)**: `{"type": "party_action", "party_op": "create | join | leave | invite | accept_apply | set_auto_accept | transfer_leader | kick | merge | set_member_type", "target": "<UID>", "auto_accept": true | false, "leave_first": true, "size": 5 | 20}`
 8. **3D 감정표현 실행/중지 (`play_emote` / `stop_emote`)**: `{"type": "play_emote", "emote": "<보유 목록 정확 이름>"}` / `{"type": "stop_emote"}`
 9. **부활 (`revive`)**: `{"type": "revive"}`

@@ -91,6 +91,88 @@ logger = logging.getLogger("agy-bridge.chat-monitor")
 BOT_SANDBOX_DIR = Path(__file__).resolve().parent / "bot_sandbox"
 
 
+def _extract_craft_query(act: dict[str, Any]) -> str:
+    for key in ("item", "item_name", "query", "recipe", "recipe_name", "name", "target", "title"):
+        val = str(act.get(key) or "").strip()
+        if val:
+            return val
+    return ""
+
+
+def _wrap_standalone_long_action_as_goal(act: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalizes single-step long behaviors emitted directly by the LLM into GoalManager goals."""
+    if not isinstance(act, dict):
+        return None
+    atype = str(act.get("type") or "").strip()
+    if atype == "gather_resource":
+        res = str(act.get("resource") or "").strip()
+        if not res:
+            return None
+        raw_count = act.get("count")
+        if raw_count is None or raw_count == "":
+            cnt = 0 if act.get("continuous") is True else 20
+        else:
+            try:
+                cnt = max(0, int(raw_count))
+            except (TypeError, ValueError):
+                cnt = 20
+        if cnt == 0 and act.get("use_focus") is True:
+            title = f"{res} 채집 (집중력 소진 시까지)"
+        elif cnt == 0:
+            title = f"{res} 계속 채집"
+        else:
+            title = f"{res} {cnt}회 채집"
+    elif atype == "fish":
+        spot = str(act.get("spot") or act.get("destination") or act.get("resource") or act.get("name") or "").strip()
+        try:
+            cnt = max(0, int(act.get("count") or 0))
+        except (TypeError, ValueError):
+            cnt = 0
+        place = f"{spot} " if spot else ""
+        title = f"{place}낚시 {cnt}마리" if cnt > 0 else f"{place}계속 낚시"
+    elif atype == "seek_monster":
+        mon = str(act.get("monster") or "").strip()
+        if not mon:
+            return None
+        title = f"{mon} 사냥" if act.get("engage") else f"{mon} 추적 이동"
+    elif atype == "craft_item":
+        item = _extract_craft_query(act)
+        try:
+            rid = int(act.get("recipe_id") or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        if not item and rid <= 0:
+            return None
+        try:
+            cnt = max(1, int(act.get("count") or 1))
+        except (TypeError, ValueError):
+            cnt = 1
+        title = f"{item or f'레시피 #{rid}'} {cnt}개 제작"
+    elif atype == "farm_monster_item":
+        mon = str(act.get("monster") or act.get("query") or "").strip()
+        try:
+            item_id = int(act.get("item_id") or 0)
+        except (TypeError, ValueError):
+            item_id = 0
+        if not mon and item_id <= 0:
+            return None
+        try:
+            cnt = max(1, int(act.get("target_count") or act.get("count") or 1))
+        except (TypeError, ValueError):
+            cnt = 1
+        title = f"{mon or f'아이템 #{item_id}'} 재료 {cnt}개 파밍"
+    else:
+        return None
+
+    return {
+        "type": "set_goal",
+        "title": title,
+        "goal_kind": atype,
+        "replace_active": True,
+        "steps": [dict(act)],
+    }
+
+
 class ChatMonitorService:
     """
     Monitors real-time in-game chat events per connected game client, enforces commander UID
@@ -499,10 +581,11 @@ class ChatMonitorService:
         if (local_cid > 0 and sender_id == local_cid) or (local_name and sender_name == local_name):
             return
 
-        triggers = ([local_name] if local_name else []) + self.extra_triggers
-        text_low = text.lower()
-        if not triggers or not any(t.lower() in text_low for t in triggers if t):
-            return
+        if not (norm_ch == "whisper" and sender_id > 0):
+            triggers = ([local_name] if local_name else []) + self.extra_triggers
+            text_low = text.lower()
+            if not triggers or not any(t.lower() in text_low for t in triggers if t):
+                return
 
         is_commander = await self._is_sender_authorized(cfg, conn_id, sender_id, sender_name)
         if not is_commander and not cfg.allow_non_commander_reply:
@@ -1096,6 +1179,7 @@ class ChatMonitorService:
             err_msg = (batch.refusals or batch.action_errors)[0]
             step.status = "failed"
             step.last_error = err_msg
+            agent.goals.fail_or_abort_active_goal(err_msg, abort=False)
             return {
                 "ok": False,
                 "error": err_msg,
@@ -1111,10 +1195,17 @@ class ChatMonitorService:
         stop_reason: str,
     ) -> dict[str, Any]:
         stop_res = await self._dispatch("stop", {"reason": stop_reason}, conn_id=conn_id)
+        stopped_obj = (
+            stop_res.get("stopped")
+            if isinstance(stop_res, dict) and isinstance(stop_res.get("stopped"), dict)
+            else {}
+        )
         is_idle = (
             not isinstance(stop_res, dict)
             or stop_res.get("active") is False
             or stop_res.get("kind") == "idle"
+            or stopped_obj.get("active") is False
+            or stopped_obj.get("kind") == "idle"
             or not stop_res.get("ok", True)
         )
         if is_idle:
@@ -1377,7 +1468,7 @@ class ChatMonitorService:
                 act = {**act, "allow_monster_farm": True}
 
         recipe_id = int(act.get("recipe_id") or 0)
-        query = str(act.get("item") or act.get("query") or act.get("recipe") or "").strip()
+        query = _extract_craft_query(act)
         count = max(1, int(act.get("count") or 1))
         count_mode = str(act.get("count_mode") or "additional").strip().lower() or "additional"
         allow_monster = bool(act.get("allow_monster_farm", False))
@@ -1831,7 +1922,11 @@ class ChatMonitorService:
                 )
 
                 active_goals_summary = (
-                    agent.goals.format_prompt_summary() if agent is not None else "(활성 목표 없음)"
+                    agent.goals.format_prompt_summary(
+                        live_behavior=st.get("behavior") if isinstance(st, dict) else None
+                    )
+                    if agent is not None
+                    else "(활성 목표 없음)"
                 )
                 memory_context = (
                     self.memory.build_prompt_context(
@@ -1894,6 +1989,14 @@ class ChatMonitorService:
                 actions_to_run = (decision.get("actions") or []) if is_cmd else []
                 if not is_cmd and decision.get("actions"):
                     decision["actions"] = []
+                elif agent is not None and actions_to_run and not any(
+                    isinstance(a, dict) and str(a.get("type") or "") in ("set_goal", "craft_goal", "cancel_goal")
+                    for a in actions_to_run
+                ):
+                    actions_to_run = [
+                        (_wrap_standalone_long_action_as_goal(a) or a) if isinstance(a, dict) else a
+                        for a in actions_to_run
+                    ]
 
                 def _remember_kind(kind: str) -> None:
                     self._remember_trigger(conn_id, kind, trig, agent=agent)
