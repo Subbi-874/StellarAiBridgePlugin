@@ -31,6 +31,16 @@ from llm_backends import (
     call_openai_compatible,
     call_remote_bpsr,
 )
+from goal_manager import (  # noqa: F401
+    FailurePolicy,
+    Goal,
+    GoalManager,
+    GoalPriority,
+    GoalStatus,
+    GoalStep,
+    build_goal_from_action,
+    parse_priority,
+)
 from policy import (  # noqa: F401
     ACTION_POLICY_MAP,
     DEFAULT_FEATURE_MODES,
@@ -38,6 +48,7 @@ from policy import (  # noqa: F401
     RECV_CHANNEL_POLICY_MAP,
     ClientChatSettings,
     _parse_commander_token,
+    check_action_admin_lock,
     get_locked_labels,
     is_sender_authorized_sync,
     needs_party_lookup_for_auth,
@@ -302,6 +313,12 @@ class ChatMonitorService:
             )
             if agent is not None:
                 agent.last_behavior_finished = dict(data)
+                if agent.goals.waiting_for_behavior_stop:
+                    target_conn = agent.conn_id or conn_id
+                    async with agent.lock:
+                        ready_goal = agent.goals.on_behavior_stopped_ack()
+                        if ready_goal is not None and target_conn:
+                            await self._dispatch_active_goal_step(agent, target_conn)
             await self._notify_behavior_finished_listeners(conn_id, agent, data)
             return
 
@@ -658,6 +675,234 @@ class ChatMonitorService:
         text = await self._render_event_in_persona(conn_id, channel, fact)
         await self._output.send_notice(channel, text, sender_id, conn_id=conn_id)
 
+    def configure_autonomous_mode(
+        self,
+        enabled: bool,
+        conn_id: str | None = None,
+        char_id: int = 0,
+        manual_input_grace_sec: float | None = None,
+    ) -> dict[str, Any]:
+        agent = self._resolve_agent(conn_id, char_id)
+        if agent is None:
+            return {"ok": False, "error": "봇 에이전트가 아직 월드에 바인딩되지 않았습니다."}
+        agent.goals.autonomous.enabled = bool(enabled)
+        if manual_input_grace_sec is not None:
+            agent.goals.autonomous.manual_input_grace_sec = max(0.0, float(manual_input_grace_sec))
+        return {
+            "ok": True,
+            "char_id": agent.char_id,
+            "char_name": agent.char_name,
+            "autonomous": agent.goals.autonomous.to_dict(),
+        }
+
+    def get_bot_goals_summary(self, conn_id: str | None = None, char_id: int = 0) -> dict[str, Any]:
+        agent = self._resolve_agent(conn_id, char_id)
+        if agent is not None:
+            return {
+                "ok": True,
+                "char_id": agent.char_id,
+                "char_name": agent.char_name,
+                "goals": agent.goals.list_goals_summary(),
+            }
+        return {"ok": True, "agents": self.agents.list_agents()}
+
+    async def cancel_bot_goal(
+        self,
+        goal_id: str = "",
+        cancel_all: bool = False,
+        conn_id: str | None = None,
+        char_id: int = 0,
+    ) -> dict[str, Any]:
+        agent = self._resolve_agent(conn_id, char_id)
+        if agent is None:
+            return {"ok": False, "error": "봇 에이전트가 아직 월드에 바인딩되지 않았습니다."}
+        async with agent.lock:
+            dec = agent.goals.cancel_goal(goal_id=goal_id or None, cancel_all=cancel_all)
+            target_conn = agent.conn_id or conn_id
+            if dec.need_stop_current_behavior and target_conn:
+                await self._stop_behavior_then_start_goal(agent, target_conn, dec.stop_reason or "cancelled")
+        return {"ok": True, "decision": dec.to_dict(), "goals": agent.goals.list_goals_summary()}
+
+    async def _dispatch_active_goal_step(self, agent: BotAgent, conn_id: str | None) -> dict[str, Any]:
+        goal = agent.goals.active_goal
+        if goal is None or goal.current_step is None:
+            return {"ok": False, "error": "활성 목표가 없습니다."}
+        if agent.goals.waiting_for_behavior_stop:
+            return {"ok": True, "deferred": True}
+
+        step = goal.current_step
+        pol = check_action_admin_lock(agent.settings.feature_modes, step.action_type)
+        if not pol.allowed:
+            agent.goals.fail_or_abort_active_goal(pol.error_message, abort=True)
+            return {"ok": False, "error": pol.error_message, "admin_locked": True}
+
+        step.status = "running"
+        step.attempts += 1
+        act = step.build_dispatch_action()
+        synth_trig = {
+            "conn_id": conn_id,
+            "local_char_id": agent.char_id,
+            "local_char_name": agent.char_name or str(goal.metadata.get("local_char_name") or ""),
+            "channel": goal.channel or "party",
+            "sender_id": goal.requester_uid,
+            "sender_name": goal.requester_name,
+        }
+
+        def _rem_kind(kind: str) -> None:
+            self._remember_trigger(conn_id, kind, synth_trig, agent=agent)
+
+        def _clr_kinds(kinds: tuple[str, ...]) -> None:
+            agent.clear_action_triggers(kinds)
+            if conn_id:
+                for k in kinds:
+                    self._last_action_trigger.pop((conn_id, k), None)
+
+        def _rem_gather() -> None:
+            entry = (synth_trig["channel"], int(synth_trig["sender_id"] or 0))
+            agent.last_gather_trigger = entry
+            if conn_id:
+                self._last_gather_trigger_ch[conn_id] = entry
+
+        batch = await self._executor.execute_batch(
+            [act],
+            agent.settings,
+            synth_trig,
+            conn_id,
+            on_remember=_rem_kind,
+            on_clear_kinds=_clr_kinds,
+            on_remember_gather=_rem_gather,
+        )
+        if batch.refusals or batch.action_errors:
+            err_msg = (batch.refusals or batch.action_errors)[0]
+            step.status = "failed"
+            step.last_error = err_msg
+            return {
+                "ok": False,
+                "error": err_msg,
+                "refused": bool(batch.refusals),
+                "executed": batch.executed,
+            }
+        return {"ok": True, "executed": batch.executed}
+
+    async def _stop_behavior_then_start_goal(
+        self,
+        agent: BotAgent,
+        conn_id: str | None,
+        stop_reason: str,
+    ) -> dict[str, Any]:
+        stop_res = await self._dispatch("stop", {"reason": stop_reason}, conn_id=conn_id)
+        is_idle = (
+            not isinstance(stop_res, dict)
+            or stop_res.get("active") is False
+            or stop_res.get("kind") == "idle"
+            or not stop_res.get("ok", True)
+        )
+        if is_idle:
+            ready = agent.goals.on_behavior_stopped_ack()
+            if ready is not None:
+                return await self._dispatch_active_goal_step(agent, conn_id)
+        return {"ok": True, "waiting_for_behavior_finished": True, "stop_res": stop_res}
+
+    async def _handle_goal_action(
+        self,
+        agent: BotAgent | None,
+        conn_id: str | None,
+        cfg: ClientChatSettings,
+        atype: str,
+        act: dict[str, Any],
+        trig: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
+        if agent is None:
+            rec = {"action": atype, "res": {"ok": False, "error": "에이전트 미바인딩"}}
+            return rec, "봇 캐릭터 UID가 아직 확인되지 않아 목표를 관리할 수 없어요.", None
+
+        if atype == "stop_active_goal":
+            dec = agent.goals.cancel_goal(cancel_all=True)
+            return {"action": atype, "decision": dec.to_dict()}, None, None
+
+        if atype == "list_goals":
+            summary = agent.goals.list_goals_summary()
+            rec = {"action": atype, "res": {"ok": True, "goals": summary}}
+            info = {"action": atype, "target": str(agent.char_id), "result": summary}
+            return rec, None, info
+
+        if atype == "cancel_goal":
+            dec = agent.goals.cancel_goal(
+                goal_id=str(act.get("goal_id") or "") or None,
+                cancel_all=bool(act.get("cancel_all", False)),
+            )
+            if dec.need_stop_current_behavior:
+                await self._stop_behavior_then_start_goal(agent, conn_id, dec.stop_reason or "cancelled")
+            rec = {"action": atype, "decision": dec.to_dict(), "res": {"ok": dec.action != "noop"}}
+            return rec, None, None
+
+        if atype == "set_goal":
+            if act.get("confirm_preemption") is not None:
+                dec = agent.goals.confirm_pending_preemption(bool(act["confirm_preemption"]))
+                dispatch_res: dict[str, Any] = {"ok": True}
+                if dec.action == "preempted_and_started":
+                    dispatch_res = await self._stop_behavior_then_start_goal(agent, conn_id, dec.stop_reason or "aborted")
+                elif dec.action == "started":
+                    dispatch_res = await self._dispatch_active_goal_step(agent, conn_id)
+                rec = {"action": atype, "decision": dec.to_dict(), "dispatch": dispatch_res}
+                if dispatch_res.get("ok") is False and dispatch_res.get("error"):
+                    return rec, str(dispatch_res["error"]), None
+                return rec, None, None
+
+            goal = build_goal_from_action(act, trig)
+            if not goal.steps:
+                rec = {"action": atype, "res": {"ok": False, "error": "실행할 목표 단계가 비어 있어요."}}
+                return rec, "목표에 실행할 단계가 지정되지 않았어요.", None
+
+            for st_item in goal.steps:
+                pol = check_action_admin_lock(cfg.feature_modes, st_item.action_type)
+                if not pol.allowed:
+                    rec = {
+                        "action": atype,
+                        "blocked_by_admin_lock": True,
+                        "policy_key": pol.policy_key,
+                    }
+                    return rec, pol.error_message, None
+
+            dec = agent.goals.submit_goal(
+                goal,
+                preempt=bool(act.get("preempt", False)),
+                replace_active=bool(act.get("replace_active", False)),
+                force_abort_non_resumable=bool(act.get("force_abort", False)),
+            )
+            rec = {"action": atype, "decision": dec.to_dict()}
+
+            if dec.action == "needs_confirm":
+                info = {
+                    "action": atype,
+                    "target": dec.active_goal.title if dec.active_goal else goal.title,
+                    "result": {
+                        "needs_confirm": True,
+                        "message": dec.message,
+                        "current_goal": dec.active_goal.to_dict() if dec.active_goal else None,
+                        "proposed_goal": dec.affected_goal.to_dict() if dec.affected_goal else None,
+                    },
+                }
+                return rec, None, info
+
+            if dec.action == "started":
+                dres = await self._dispatch_active_goal_step(agent, conn_id)
+                rec["dispatch"] = dres
+                if dres.get("ok") is False and dres.get("error"):
+                    return rec, str(dres["error"]), None
+                return rec, None, None
+
+            if dec.action == "preempted_and_started":
+                dres = await self._stop_behavior_then_start_goal(agent, conn_id, dec.stop_reason or "preempted")
+                rec["dispatch"] = dres
+                if dres.get("ok") is False and dres.get("error"):
+                    return rec, str(dres["error"]), None
+                return rec, None, None
+
+            return rec, None, None
+
+        return {"action": atype, "res": {"ok": False}}, None, None
+
     async def _process_with_llm(self, trig: dict[str, Any], cfg: ClientChatSettings) -> None:
         conn_id = trig.get("conn_id")
         local_cid = int(trig.get("local_char_id") or 0)
@@ -723,6 +968,9 @@ class ChatMonitorService:
                     else "(미지정 — 모든 유저 허용)"
                 )
 
+                active_goals_summary = (
+                    agent.goals.format_prompt_summary() if agent is not None else "(활성 목표 없음)"
+                )
                 prompts = build_llm_prompts(
                     cfg,
                     trig,
@@ -735,6 +983,7 @@ class ChatMonitorService:
                     now_dt,
                     korean_time,
                     unavailable_labels=cfg.unavailable_capabilities,
+                    active_goals_summary=active_goals_summary,
                 )
                 raw_out, timed_out = await self._invoke_llm_guarded(
                     agent,
@@ -790,6 +1039,9 @@ class ChatMonitorService:
                     if conn_id:
                         self._last_gather_trigger_ch[conn_id] = entry
 
+                async def _on_goal_action(act_type: str, act_obj: dict[str, Any], trig_obj: dict[str, Any]):
+                    return await self._handle_goal_action(agent, conn_id, cfg, act_type, act_obj, trig_obj)
+
                 batch = await self._executor.execute_batch(
                     actions_to_run,
                     cfg,
@@ -798,6 +1050,7 @@ class ChatMonitorService:
                     on_remember=_remember_kind,
                     on_clear_kinds=_clear_kinds,
                     on_remember_gather=_remember_gather,
+                    on_goal_action=_on_goal_action,
                 )
 
                 reply_text = str(decision.get("reply_text") or "").strip()

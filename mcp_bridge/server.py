@@ -206,6 +206,32 @@ async def dispatch_game_rpc(
     if method == "get_chat_monitor_status" and chat_monitor is not None:
         return {"ok": True, "chat_monitor": chat_monitor.status(conn_id=active_cid)}
 
+    if method == "get_bot_goals" and chat_monitor is not None:
+        return chat_monitor.get_bot_goals_summary(
+            conn_id=active_cid,
+            char_id=int(params.get("char_id") or 0),
+        )
+
+    if method == "cancel_bot_goal" and chat_monitor is not None:
+        return await chat_monitor.cancel_bot_goal(
+            goal_id=str(params.get("goal_id") or ""),
+            cancel_all=bool(params.get("cancel_all", False)),
+            conn_id=active_cid,
+            char_id=int(params.get("char_id") or 0),
+        )
+
+    if method == "set_autonomous_mode" and chat_monitor is not None:
+        return chat_monitor.configure_autonomous_mode(
+            enabled=bool(params.get("enabled", False)),
+            conn_id=active_cid,
+            char_id=int(params.get("char_id") or 0),
+            manual_input_grace_sec=(
+                float(params["manual_input_grace_sec"])
+                if params.get("manual_input_grace_sec") is not None
+                else None
+            ),
+        )
+
     if method == "wait_for_chat_trigger" and chat_monitor is not None:
         return await chat_monitor.wait_for_next_trigger(float(params.get("timeout_sec") or 60.0))
 
@@ -873,6 +899,37 @@ async def configure_chat_monitor(
 async def get_chat_monitor_status() -> str:
     """Returns current chat monitor configuration, local AGY CLI readiness, and recent handled chat triggers."""
     res = await invoke_game("get_chat_monitor_status", {})
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def get_bot_goals(char_id: int = 0) -> str:
+    """Returns the per-bot GoalManager state (active goal, paused resume stack, queued goals, autonomous config)."""
+    res = await invoke_game("get_bot_goals", {"char_id": char_id})
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def cancel_bot_goal(goal_id: str = "", cancel_all: bool = False, char_id: int = 0) -> str:
+    """Cancels an active, paused, or queued goal on the selected bot (or all goals when cancel_all=True)."""
+    res = await invoke_game(
+        "cancel_bot_goal",
+        {"goal_id": goal_id, "cancel_all": cancel_all, "char_id": char_id},
+    )
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def set_autonomous_mode(
+    enabled: bool,
+    char_id: int = 0,
+    manual_input_grace_sec: float | None = None,
+) -> str:
+    """Toggles per-bot autonomous idle mode (default OFF) and optional manual-input grace window in seconds."""
+    params: dict[str, Any] = {"enabled": enabled, "char_id": char_id}
+    if manual_input_grace_sec is not None:
+        params["manual_input_grace_sec"] = manual_input_grace_sec
+    res = await invoke_game("set_autonomous_mode", params)
     return json.dumps(res, ensure_ascii=False, indent=2)
 
 

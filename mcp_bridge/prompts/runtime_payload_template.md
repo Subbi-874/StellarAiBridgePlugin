@@ -4,6 +4,7 @@
 - 내 캐릭터명: {{local_char_name}}
 - 현재 시각: {{current_time_iso}} ({{korean_time}})
 - 내 캐릭터 상태: {{state_summary_json}}
+- 진행 중 목표: {{active_goals}}
 - 현재 어드민락(🔒 대화·원격 절대 해제 불가) 잠금 항목: {{locked_labels}}
 - 현재 패치로 사용 불가 기능: {{unavailable_labels}}
 - 온라인 파티/친구/길드원 UID 목록: {{online_roster}}

@@ -103,16 +103,19 @@ def build_llm_prompts_tuple(
     now_dt: datetime,
     korean_time: str,
     unavailable_labels: list[str] | None = None,
+    active_goals_summary: str = "",
 ) -> tuple[dict[str, Any], str, str, str, str, str]:
     """Builds `(game_context, persona_block, system_instructions_block, system_prompt, user_prompt, full_cli_prompt)`."""
     is_cmd = bool(trig.get("is_commander", False))
     commander_status = "있음" if is_cmd else "없음"
     time_display = f"{now_dt.strftime('%Y-%m-%d %H:%M:%S')} ({korean_time})"
     unavail_list = [str(x).strip() for x in (unavailable_labels or []) if str(x).strip()]
+    goals_text = (active_goals_summary or "").strip() or "(활성 목표 없음)"
     game_context = {
         "내 캐릭터명": str(trig["local_char_name"]),
         "현재 시각": time_display,
         "내 캐릭터 상태": state_summary,
+        "진행 중 목표": goals_text,
         "어드민락 잠금 항목": locked_labels if locked_labels else ["(없음)"],
         "현재 패치로 사용 불가 기능": unavail_list if unavail_list else ["(없음)"],
         "온라인 파티/친구/길드원 UID 목록": online_roster_labels,
@@ -139,6 +142,7 @@ def build_llm_prompts_tuple(
         f"- 내 캐릭터명: {trig['local_char_name']}\n"
         f"- 현재 시각: {time_display}\n"
         f"- 내 캐릭터 상태: {state_json}\n"
+        f"- 진행 중 목표: {goals_text}\n"
         f"- 어드민락(🔒) 잠금 항목: {locked_str}\n"
         f"- 현재 패치로 사용 불가 기능: {unavailable_str}\n"
         f"- 온라인 파티/친구/길드원 UID 목록: {roster_str}\n"
@@ -183,6 +187,7 @@ def build_llm_prompts_tuple(
                 "current_time_iso": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "korean_time": korean_time,
                 "state_summary_json": state_json,
+                "active_goals": goals_text,
                 "locked_labels": locked_str,
                 "unavailable_labels": unavailable_str,
                 "online_roster": roster_str,
@@ -219,6 +224,7 @@ def build_llm_prompts(
     now_dt: datetime,
     korean_time: str,
     unavailable_labels: list[str] | None = None,
+    active_goals_summary: str = "",
 ) -> BuiltPrompts:
     return BuiltPrompts(
         *build_llm_prompts_tuple(
@@ -233,6 +239,7 @@ def build_llm_prompts(
             now_dt,
             korean_time,
             unavailable_labels=unavailable_labels,
+            active_goals_summary=active_goals_summary,
         )
     )
 

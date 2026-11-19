@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import time
 from typing import Any, Callable
 
+from goal_manager import GoalManager
 from policy import ClientChatSettings
 
 
@@ -82,6 +83,7 @@ class BotAgent:
     last_action_triggers: dict[str, tuple[str, int, float]] = field(default_factory=dict)
     last_behavior_finished: dict[str, Any] | None = None
     history: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
+    goals: GoalManager = field(default_factory=GoalManager)
 
     def _now(self) -> float:
         return (self.clock or time.monotonic)()
@@ -131,6 +133,7 @@ class BotAgent:
             "manual_input_grace_active": self.is_manual_input_grace_active(),
             "last_behavior_finished": self.last_behavior_finished,
             "recent_history_count": len(self.history),
+            "goals": self.goals.list_goals_summary(),
         }
 
 
@@ -198,6 +201,7 @@ class BotAgentRegistry:
                     clock=self._clock,
                 ),
                 clock=self._clock,
+                goals=GoalManager(clock=self._clock),
             )
             self._agents_by_uid[char_id] = agent
 

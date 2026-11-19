@@ -41,7 +41,10 @@
               "switch_channel",
               "fish",
               "leave_dungeon",
-              "use_gimmick"
+              "use_gimmick",
+              "set_goal",
+              "cancel_goal",
+              "list_goals"
             ]
           },
           "enable": {
@@ -168,6 +171,45 @@
           },
           "gimmick": {
             "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "goal_id": {
+            "type": "string"
+          },
+          "goal_kind": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string"
+          },
+          "preempt": {
+            "type": "boolean"
+          },
+          "replace_active": {
+            "type": "boolean"
+          },
+          "force_abort": {
+            "type": "boolean"
+          },
+          "confirm_preemption": {
+            "type": "boolean"
+          },
+          "resumable": {
+            "type": "boolean"
+          },
+          "failure_policy": {
+            "type": "string"
+          },
+          "cancel_all": {
+            "type": "boolean"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           }
         },
         "required": [

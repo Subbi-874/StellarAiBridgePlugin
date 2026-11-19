@@ -9,6 +9,8 @@ from policy import ClientChatSettings, check_action_admin_lock
 
 INFO_ACTIONS: frozenset[str] = frozenset({"query_player_location"})
 
+GOAL_ACTION_TYPES: frozenset[str] = frozenset({"set_goal", "cancel_goal", "list_goals"})
+
 
 EXTENDED_ACTION_TYPES: frozenset[str] = frozenset({
     "revive",
@@ -304,6 +306,10 @@ class ActionExecutor:
         on_remember: Callable[[str], None] | None = None,
         on_clear_kinds: Callable[[tuple[str, ...]], None] | None = None,
         on_remember_gather: Callable[[], None] | None = None,
+        on_goal_action: Callable[
+            [str, dict[str, Any], dict[str, Any]],
+            Awaitable[tuple[dict[str, Any], str | None, dict[str, Any] | None]],
+        ] | None = None,
     ) -> ActionBatchResult:
         batch = ActionBatchResult()
         for act in actions_to_run:
@@ -315,6 +321,18 @@ class ActionExecutor:
                         "sticker_id": int(act.get("sticker_id") or 0),
                     }
                 )
+                continue
+
+            if atype in GOAL_ACTION_TYPES:
+                if on_goal_action is not None:
+                    rec, err, info = await on_goal_action(atype, act, trig)
+                    batch.executed.append(rec)
+                    if err:
+                        batch.action_errors.append(err)
+                    else:
+                        batch.succeeded_actions += 1
+                    if info is not None:
+                        batch.info_results.append(info)
                 continue
 
             pol = check_action_admin_lock(cfg.feature_modes, atype)
@@ -355,6 +373,8 @@ class ActionExecutor:
                 batch.executed.append({"action": atype, "res": r})
                 if r.get("ok"):
                     batch.succeeded_actions += 1
+                if on_goal_action is not None:
+                    await on_goal_action("stop_active_goal", act, trig)
             elif atype == "teleport_to_place" and act.get("destination"):
                 if on_clear_kinds:
                     on_clear_kinds(("follow",))

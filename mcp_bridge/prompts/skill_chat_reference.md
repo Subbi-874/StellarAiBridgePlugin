@@ -36,7 +36,7 @@
    - **저스트 회피 우선 & 보스 붉은 섬광 회피 (`auto_evade`)**: 자동전투가 켜져 있을 때 일반 평타/일반 탄막(`BulletStage`)은 무시하고 불필요한 이동키 회피를 억제하며, 바닥 위험 장판 폭발 직전(`~82%` 이상 또는 잔여 `0.19초` 이하) 및 보스 붉은 섬광 전조(`ZUISkillWarning`/붉은 섬광 이펙트) 타이밍에 맞춰 회피키 대시(`Rush`)로 **저스트 회피**합니다. 녹색 회복 장판과 파티 분담/집합 장판(`"분담"`, `"[집합]"`, 아군 화살표 추적)은 회피에서 제외합니다.
    - **감정표현 vs 내장 스티커**: `play_emote`는 `[보유 감정표현 목록]`의 해금 3D 모션만 사용(미보유 시 `actions` 제외 후 안내). 2D 그림 이모티콘은 최상위 `"sticker"` 필드(`greet`, `thanks`, `thumbsup`, `cheer`, `heart`, `laugh`, `cute`, `ok`, `think`, `sorry`, `sad`, `random`)를 사용합니다.
 
-## 3. JSON `actions` 규격 명세 (22종)
+## 3. JSON `actions` 규격 명세 (25종)
 1. **유저 따라가기 (`follow_player`)**: `{"type": "follow_player", "target": "<숫자 UID 우선 또는 닉네임>", "continuous": true}` (`false`면 1회 접근 후 정지)
 2. **자동전투 (`set_auto_combat`)**: `{"type": "set_auto_combat", "enable": true | false}`
 3. **이동/추적/채집/낚시 즉시 정지 (`stop`)**: `{"type": "stop"}`
@@ -62,4 +62,7 @@
 20. **자동 낚시 (`fish`)**: `{"type": "fish", "spot": "<해변·호수·어종명 또는 ''>", "count": 10}` (`count: 0`이면 지속 낚시)
 21. **던전·특수 공간 나가기 (`leave_dungeon`)**: `{"type": "leave_dungeon"}`
 22. **이동 기믹 사용 (`use_gimmick`)**: `{"type": "use_gimmick", "gimmick": "<바람 통로·기믹명 또는 ''>"}`
+23. **목표 등록·우선순위 선점 (`set_goal`)**: `{"type": "set_goal", "title": "<목표명>", "priority": "urgent | command | background", "preempt": true | false, "replace_active": false, "resumable": true | false, "steps": [{"type": "<액션>", ...}]}` (유저가 "이거 먼저/우선 해" 요청 시 `"priority": "urgent", "preempt": true`, 복귀 불가 목표 중단 확인 응답 시 `"confirm_preemption": true | false`)
+24. **목표 취소 (`cancel_goal`)**: `{"type": "cancel_goal", "goal_id": "<ID 또는 ''>", "cancel_all": false}`
+25. **진행 중 목표 조회 (`list_goals`)**: `{"type": "list_goals"}` (2차 결과 `<action_results>`로 현황 전달됨)
 </skill_reference>
