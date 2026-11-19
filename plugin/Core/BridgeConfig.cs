@@ -151,7 +151,7 @@ public sealed class BridgeConfig
         AuthToken = _cfg.Get<string>("auth_token", "") ?? "";
         ReconnectDelayMs = _cfg.Get<int>("reconnect_delay_ms", 2000);
         AutoStartLocalBridge = _cfg.Get<bool>("auto_start_local_bridge", true);
-        LocalBridgeDir = _cfg.Get<string>("local_bridge_dir", @"E:\StarLauncher\StellarAgyBridge\mcp_bridge") ?? @"E:\StarLauncher\StellarAgyBridge\mcp_bridge";
+        LocalBridgeDir = _cfg.Get<string>("local_bridge_dir", "") ?? "";
         DefaultFollowDistance = _cfg.Get<float>("default_follow_distance", 2.5f);
         FollowResumeHysteresis = _cfg.Get<float>("follow_resume_hysteresis", 1.0f);
         DefaultArrivalRadius = _cfg.Get<float>("default_arrival_radius", 1.8f);
@@ -195,7 +195,7 @@ public sealed class BridgeConfig
         LastFollowTargetUid = long.TryParse(_cfg.Get<string>("last_follow_target_uid", "0"), NumberStyles.Integer, CultureInfo.InvariantCulture, out long savedFollowUid)
             ? Math.Max(0L, savedFollowUid)
             : 0L;
-        LastFollowTarget = _cfg.Get<string>("last_follow_target", "패랭이") ?? "패랭이";
+        LastFollowTarget = _cfg.Get<string>("last_follow_target", "") ?? "";
         bool legacyChatMon = _cfg.Get<bool>("chat_monitor_enabled", false);
         bool legacyGuild = _cfg.Get<bool>("monitor_guild", true);
         bool legacyParty = _cfg.Get<bool>("monitor_party", true);
@@ -244,7 +244,7 @@ public sealed class BridgeConfig
         CommandPermissionMode = _cfg.Get<string>("command_permission_mode", "party_or_whitelist") ?? "party_or_whitelist";
         AllowNonCommanderChatReply = _cfg.Get<bool>("allow_non_commander_chat_reply", true);
 
-        string rawCommanders = _cfg.Get<string>("authorized_commanders", "패랭이#15977376") ?? "";
+        string rawCommanders = _cfg.Get<string>("authorized_commanders", "") ?? "";
         CommanderEntries = ParseCommanderList(rawCommanders);
 
         string rawBackend = (_cfg.Get<string>("llm_backend", "local_agent") ?? "local_agent").Trim().ToLowerInvariant();
@@ -252,9 +252,7 @@ public sealed class BridgeConfig
         if (rawBackend == "remote_bpsr")
         {
             LlmBackend = "local_agent";
-            LlmEndpointUrl = string.IsNullOrWhiteSpace(rawEndpoint)
-                ? "http://192.168.2.20:28000/bpsr/chat"
-                : rawEndpoint;
+            LlmEndpointUrl = rawEndpoint;
         }
         else if (rawBackend is "local_cli" or "local_agy" or "cli")
         {

@@ -348,7 +348,7 @@ class ChatMonitorService:
                 "fts5_enabled": bool(getattr(self.memory, "fts5_enabled", False)),
             },
             "agy_cli_path": config.AGY_CLI_PATH,
-            "agy_cli_exists": Path(config.AGY_CLI_PATH).exists(),
+            "agy_cli_exists": bool(config.AGY_CLI_PATH) and Path(config.AGY_CLI_PATH).exists(),
             "agy_cli_model": config.AGY_CLI_MODEL,
             "agy_cli_effort": config.AGY_CLI_EFFORT,
             "extra_triggers": list(self.extra_triggers),

@@ -13,8 +13,8 @@ function Copy-FilteredTree {
         [string]$SourceDir,
         [string]$TargetDir
     )
-    $ExcludedDirs = @(".venv", "runtime", "__pycache__", "tests")
-    $ExcludedMasks = @("*.log*", "*.db", "*.sqlite*", ".env*", "*.pyc")
+    $ExcludedDirs = @(".venv", "runtime", "__pycache__", "tests", "linux_bpsr_workspace")
+    $ExcludedMasks = @("*.log*", "*.db", "*.sqlite*", ".env*", "*.pyc", "LINUX_SERVER_PROMPT_GUIDE.md")
 
     New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
     foreach ($entry in Get-ChildItem -LiteralPath $SourceDir -Force) {
@@ -80,9 +80,12 @@ $BundleDir = Join-Path $DistRoot $BundleName
 if (Test-Path -LiteralPath $BundleDir) {
     Remove-Item -LiteralPath $BundleDir -Recurse -Force
 }
-$RuntimeDir = Join-Path $BundleDir "runtime"
+$StellarDir = Join-Path $BundleDir "stellar"
+$PluginOutDir = Join-Path $StellarDir "plugins\agybridge"
+$BridgeRootDir = Join-Path $StellarDir "agybridge"
+$RuntimeDir = Join-Path $BridgeRootDir "runtime"
 $SitePackages = Join-Path $RuntimeDir "Lib\site-packages"
-$PluginOutDir = Join-Path $BundleDir "plugin"
+$StagedBridgeDir = Join-Path $BridgeRootDir "mcp_bridge"
 New-Item -ItemType Directory -Force -Path $RuntimeDir, $SitePackages, $PluginOutDir | Out-Null
 
 # 4. Download & unpack Python Embeddable package
@@ -132,11 +135,12 @@ if (Test-Path -LiteralPath $PyWinSys32) {
     Copy-Item -Path (Join-Path $PyWinSys32 "*.dll") -Destination $RuntimeDir -Force
 }
 
-# 6. Stage mcp_bridge, start_bridge.bat, and built plugin DLL
-Write-Host "[4/6] Staging mcp_bridge, start_bridge.bat, and plugin DLL..."
-Copy-FilteredTree -SourceDir (Join-Path $RepoRoot "mcp_bridge") -TargetDir (Join-Path $BundleDir "mcp_bridge")
-Copy-Item -LiteralPath (Join-Path $RepoRoot "start_bridge.bat") -Destination (Join-Path $BundleDir "start_bridge.bat") -Force
+# 6. Stage stellar\agybridge (mcp_bridge, start_bridge.bat) and stellar\plugins\agybridge (DLL + .plugin-version)
+Write-Host "[4/6] Staging stellar/agybridge and stellar/plugins/agybridge..."
+Copy-FilteredTree -SourceDir (Join-Path $RepoRoot "mcp_bridge") -TargetDir $StagedBridgeDir
+Copy-Item -LiteralPath (Join-Path $RepoRoot "start_bridge.bat") -Destination (Join-Path $BridgeRootDir "start_bridge.bat") -Force
 Copy-Item -LiteralPath $OutDll -Destination (Join-Path $PluginOutDir "Stellar.AgyBridge.dll") -Force
+[System.IO.File]::WriteAllText((Join-Path $PluginOutDir ".plugin-version"), $PluginVersion, [System.Text.UTF8Encoding]::new($false))
 
 # 7. Verify portable runtime imports & start_bridge.bat CLI execution
 Write-Host "[5/6] Verifying portable runtime..."
@@ -145,18 +149,27 @@ $PortablePy = Join-Path $RuntimeDir "python.exe"
 if ($LASTEXITCODE -ne 0) {
     throw "Portable runtime import verification failed with exit code $LASTEXITCODE"
 }
-$PortableBat = Join-Path $BundleDir "start_bridge.bat"
+$PortableBat = Join-Path $BridgeRootDir "start_bridge.bat"
 cmd /c "`"$PortableBat`" --help" | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Portable start_bridge.bat --help failed with exit code $LASTEXITCODE"
 }
 Write-Host "Portable start_bridge.bat --help passed."
 
-# 8. Create ZIP archive
+# Remove temporary bytecode caches and empty logs generated during self-verification
+Get-ChildItem -LiteralPath $StagedBridgeDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.PSIsContainer -and $_.Name -eq "__pycache__") {
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    } elseif (-not $_.PSIsContainer -and ($_.Name -like "bridge.log*" -or $_.Extension -eq ".pyc")) {
+        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 8. Create ZIP archive rooted at stellar\
 if (-not $SkipZip) {
     $ZipPath = Join-Path $DistRoot "$BundleName.zip"
     Write-Host "[6/6] Creating ZIP archive: $ZipPath"
-    Compress-Archive -Path $BundleDir -DestinationPath $ZipPath -Force
+    Compress-Archive -Path $StellarDir -DestinationPath $ZipPath -Force
     $zipItem = Get-Item -LiteralPath $ZipPath
     Write-Host "Created portable package: $($zipItem.FullName) ($($zipItem.Length) bytes)"
 } else {

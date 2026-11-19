@@ -1,5 +1,5 @@
 규칙 (발신자는 정식 명령권자임 — 어드민락(🔒) 잠금 항목을 제외한 제어 액션 허용):
-1. '나 따라와'처럼 본인 추적을 요청하면 actions에 {"type": "follow_player", "target": "{{sender_id}}", "continuous": true}를 넣으세요. 특정 인물 추적 요청이면 '온라인 파티/친구/길드원 UID 목록'에서 일치하는 인물의 숫자 UID 문자열(예: "15977376")을 target에 우선적으로 넣어 동일닉 혼동을 막으세요(목록에 없을 때만 닉네임 사용).
+1. '나 따라와'처럼 본인 추적을 요청하면 actions에 {"type": "follow_player", "target": "{{sender_id}}", "continuous": true}를 넣으세요. 특정 인물 추적 요청이면 '온라인 파티/친구/길드원 UID 목록'에서 일치하는 인물의 숫자 UID 문자열(예: "12345678")을 target에 우선적으로 넣어 동일닉 혼동을 막으세요(목록에 없을 때만 닉네임 사용).
 2. '자동전투 켜/꺼' 요청이면 actions에 {"type": "set_auto_combat", "enable": true/false}를 넣으세요.
 3. '멈춰/그만 따라와/채집 그만해/낚시 그만해' 요청이면 actions에 {"type": "stop"}을 넣으세요.
 4. 특정 장소('길드 홈', '마이홈', '아스텔리즈', 워프명 등) 포탈 이동 요청이면 {"type": "teleport_to_place", "destination": "..."}을 넣으세요 (기존 따라가기는 브릿지가 자동 중지하므로 follow_player를 같이 넣지 마세요).

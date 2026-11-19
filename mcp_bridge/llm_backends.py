@@ -137,6 +137,8 @@ class LlmClientConfig:
 
 def normalize_remote_bpsr_url(raw_url: str) -> str:
     url = (raw_url or "").strip() or config.REMOTE_BPSR_CHAT_URL
+    if not url:
+        return ""
     parsed = urllib.parse.urlparse(url)
     if parsed.path in ("", "/"):
         return url.rstrip("/") + "/bpsr/chat"
@@ -179,7 +181,7 @@ def resolve_cli_executable(flavor: str, custom_cmd: str) -> list[str]:
             return parts
 
     candidates_map: dict[str, list[str]] = {
-        "agy": ["agy", config.AGY_CLI_PATH, r"C:\Users\cjs_9\AppData\Local\agy\bin\agy.EXE"],
+        "agy": ["agy", config.AGY_CLI_PATH],
         "claude": ["claude", str(Path.home() / "AppData/Roaming/npm/claude.cmd")],
         "codex": ["codex", str(Path.home() / "AppData/Roaming/npm/codex.cmd")],
         "gemini": ["gemini", str(Path.home() / "AppData/Roaming/npm/gemini.cmd")],
@@ -308,6 +310,8 @@ async def call_remote_bpsr(
         parts.append(extra_block)
 
     url = normalize_remote_bpsr_url(llm.endpoint_url)
+    if not url:
+        raise RuntimeError("Remote agent endpoint URL is not configured.")
     req_payload: dict[str, Any] = {
         "message": "\n\n".join(parts),
         "context": game_context,

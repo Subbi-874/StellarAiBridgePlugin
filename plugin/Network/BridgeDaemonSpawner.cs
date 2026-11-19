@@ -121,14 +121,20 @@ public static class BridgeDaemonSpawner
         if (!string.IsNullOrWhiteSpace(configuredDir) && Directory.Exists(configuredDir))
             return configuredDir;
 
-        // Check paths adjacent to Stellar.AgyBridge.dll for portable distributions
+        // Check paths relative to Stellar.AgyBridge.dll (stellar\plugins\agybridge\ -> stellar\agybridge\mcp_bridge)
         try
         {
             string asmLoc = typeof(BridgeDaemonSpawner).Assembly.Location;
             string? dllDir = string.IsNullOrWhiteSpace(asmLoc) ? null : Path.GetDirectoryName(asmLoc);
             if (!string.IsNullOrWhiteSpace(dllDir))
             {
-                foreach (string rel in new[] { "mcp_bridge", Path.Combine("..", "mcp_bridge") })
+                string[] rels =
+                {
+                    Path.Combine("..", "..", "agybridge", "mcp_bridge"),
+                    "mcp_bridge",
+                    Path.Combine("..", "mcp_bridge"),
+                };
+                foreach (string rel in rels)
                 {
                     string candidate = Path.GetFullPath(Path.Combine(dllDir, rel));
                     if (File.Exists(Path.Combine(candidate, "server.py")))
@@ -138,7 +144,16 @@ public static class BridgeDaemonSpawner
         }
         catch { }
 
-        // Dynamic fallback relative to E:\StarLauncher if GameMiniDir is under StarLauncher
+        // Fallback relative to game working directory when Assembly.Location is unavailable
+        try
+        {
+            string cwdBridge = Path.Combine(Environment.CurrentDirectory, "stellar", "agybridge", "mcp_bridge");
+            if (File.Exists(Path.Combine(cwdBridge, "server.py")))
+                return cwdBridge;
+        }
+        catch { }
+
+        // Ancestor walk for local development repo layout (<root>\StellarAgyBridge\mcp_bridge)
         try
         {
             var cur = new DirectoryInfo(Environment.CurrentDirectory);
@@ -151,7 +166,6 @@ public static class BridgeDaemonSpawner
         }
         catch { }
 
-        const string defaultPath = @"E:\StarLauncher\StellarAgyBridge\mcp_bridge";
-        return Directory.Exists(defaultPath) ? defaultPath : null;
+        return null;
     }
 }

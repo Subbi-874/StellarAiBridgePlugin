@@ -165,8 +165,8 @@ class ClientChatSettings:
     channels: set[str] = field(default_factory=lambda: {"guild", "party"})
     permission_mode: str = "party_or_whitelist"
     allow_non_commander_reply: bool = True
-    authorized_commanders: list[str] = field(default_factory=lambda: ["패랭이#15977376"])
-    authorized_commander_uids: set[int] = field(default_factory=lambda: {15977376})
+    authorized_commanders: list[str] = field(default_factory=list)
+    authorized_commander_uids: set[int] = field(default_factory=set)
     legacy_commander_names: set[str] = field(default_factory=set)
     feature_modes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FEATURE_MODES))
     llm: LlmClientConfig = field(default_factory=LlmClientConfig)

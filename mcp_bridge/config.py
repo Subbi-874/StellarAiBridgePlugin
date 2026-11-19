@@ -11,19 +11,21 @@ DEFAULT_RPC_TIMEOUT = float(os.getenv("BRIDGE_RPC_TIMEOUT", "12.0"))
 
 # LLM backend selection: 'local_agent' (blank URL -> local CLI, non-empty URL -> remote HTTP /bpsr/chat),
 # 'openai_api', or 'gemini_api' (legacy aliases 'remote_bpsr' / 'local_cli' auto-migrate to 'local_agent').
-LLM_BACKEND = os.getenv("BPSR_LLM_BACKEND", "remote_bpsr").strip().lower()
+LLM_BACKEND = os.getenv("BPSR_LLM_BACKEND", "local_agent").strip().lower()
 
-REMOTE_BPSR_BASE_URL = os.getenv("REMOTE_BPSR_BASE_URL", "http://192.168.2.20:28000").rstrip("/")
-REMOTE_BPSR_CHAT_URL = os.getenv("REMOTE_BPSR_CHAT_URL", f"{REMOTE_BPSR_BASE_URL}/bpsr/chat")
-REMOTE_BPSR_HEALTH_URL = os.getenv("REMOTE_BPSR_HEALTH_URL", f"{REMOTE_BPSR_BASE_URL}/bpsr/health")
+REMOTE_BPSR_BASE_URL = os.getenv("REMOTE_BPSR_BASE_URL", "").strip().rstrip("/")
+REMOTE_BPSR_CHAT_URL = os.getenv(
+    "REMOTE_BPSR_CHAT_URL",
+    f"{REMOTE_BPSR_BASE_URL}/bpsr/chat" if REMOTE_BPSR_BASE_URL else "",
+).strip()
+REMOTE_BPSR_HEALTH_URL = os.getenv(
+    "REMOTE_BPSR_HEALTH_URL",
+    f"{REMOTE_BPSR_BASE_URL}/bpsr/health" if REMOTE_BPSR_BASE_URL else "",
+).strip()
 REMOTE_BPSR_MODEL = os.getenv("REMOTE_BPSR_MODEL", "gemini-4-hydrogen-low")
 REMOTE_BPSR_TIMEOUT = float(os.getenv("REMOTE_BPSR_TIMEOUT", "75.0"))
 
-AGY_CLI_PATH = (
-    os.getenv("AGY_CLI_PATH")
-    or shutil.which("agy")
-    or r"C:\Users\cjs_9\AppData\Local\agy\bin\agy.EXE"
-)
+AGY_CLI_PATH = (os.getenv("AGY_CLI_PATH") or shutil.which("agy") or "").strip()
 AGY_CLI_MODEL = os.getenv("AGY_CLI_MODEL", "gemini-4-hydrogen-low")
 AGY_CLI_EFFORT = os.getenv("AGY_CLI_EFFORT", "low")
 AGY_CLI_TIMEOUT = float(os.getenv("AGY_CLI_TIMEOUT", "75.0"))

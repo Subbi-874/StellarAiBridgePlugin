@@ -27,6 +27,7 @@ from llm_backends import (  # noqa: E402
     normalize_openai_chat_url,
 )
 from memory_store import SqliteMemoryStore  # noqa: E402
+from policy import ClientChatSettings  # noqa: E402
 
 
 def _make_tool_test_rpc(responses: dict[str, list[dict] | dict] | None = None):
@@ -119,12 +120,27 @@ class LocalAgentConfigMigrationTests(unittest.TestCase):
         self.assertEqual(remote_cfg.effective_mode, "remote_agent")
         self.assertFalse(remote_cfg.send_system_prompt)
 
-        # 3. Legacy remote_bpsr migrates losslessly to local_agent preserving/filling URL
-        legacy_remote = LlmClientConfig.from_ui_dict({"backend": "remote_bpsr"})
-        self.assertEqual(legacy_remote.backend, "local_agent")
-        self.assertEqual(legacy_remote.endpoint_url, config.REMOTE_BPSR_CHAT_URL)
-        self.assertTrue(legacy_remote.is_remote_agent)
-        self.assertFalse(legacy_remote.send_system_prompt)
+        # 3. Legacy remote_bpsr migrates losslessly to local_agent (with or without explicit URL)
+        legacy_remote_with_url = LlmClientConfig.from_ui_dict({
+            "backend": "remote_bpsr",
+            "endpoint_url": "http://127.0.0.1:28000/bpsr/chat",
+        })
+        self.assertEqual(legacy_remote_with_url.backend, "local_agent")
+        self.assertEqual(legacy_remote_with_url.endpoint_url, "http://127.0.0.1:28000/bpsr/chat")
+        self.assertTrue(legacy_remote_with_url.is_remote_agent)
+        self.assertFalse(legacy_remote_with_url.send_system_prompt)
+
+        legacy_remote_blank = LlmClientConfig.from_ui_dict({"backend": "remote_bpsr"})
+        self.assertEqual(legacy_remote_blank.backend, "local_agent")
+        self.assertEqual(legacy_remote_blank.endpoint_url, "")
+        self.assertTrue(legacy_remote_blank.is_local_cli)
+
+        # Clean public defaults contain no personal IP, CLI path, or commander identity
+        self.assertEqual(config.REMOTE_BPSR_BASE_URL, "")
+        self.assertEqual(config.REMOTE_BPSR_CHAT_URL, "")
+        self.assertNotIn("cjs_9", Path(config.__file__).read_text(encoding="utf-8"))
+        self.assertEqual(ClientChatSettings().authorized_commanders, [])
+        self.assertEqual(ClientChatSettings().authorized_commander_uids, set())
 
         # 4. Legacy local_cli migrates to local_agent with blank URL even if default existed
         legacy_cli = LlmClientConfig.from_ui_dict({"backend": "local_cli", "cli_flavor": "codex"})
