@@ -186,7 +186,13 @@ public sealed class PlayerLocatorService
     public FollowCheckResult EvaluateFollow(string query, long lockedCharId = 0L, bool forceRefresh = false)
     {
         string q = (query ?? "").Trim();
-        if (q.Equals("leader", StringComparison.OrdinalIgnoreCase) || q == "파티장" || q == "리더")
+        if (q.Equals("leader", StringComparison.OrdinalIgnoreCase)
+            || q.Equals("party leader", StringComparison.OrdinalIgnoreCase)
+            || q == "파티장"
+            || q == "리더"
+            || q == "リーダー"
+            || q == "パーティリーダー"
+            || q.Equals("ptリーダー", StringComparison.OrdinalIgnoreCase))
             q = "leader";
 
         var t = _world.FindAnyPlayerTarget(q, lockedCharId: lockedCharId, requestSocial: true, fastPoll: true);

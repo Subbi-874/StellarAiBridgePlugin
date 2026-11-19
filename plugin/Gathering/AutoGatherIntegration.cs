@@ -63,8 +63,14 @@ public sealed class AutoGatherIntegration
         string qTrim = resourceQuery.Trim();
         if (qTrim.Equals("any", StringComparison.OrdinalIgnoreCase)
             || qTrim.Equals("all", StringComparison.OrdinalIgnoreCase)
+            || qTrim.Equals("nearby", StringComparison.OrdinalIgnoreCase)
+            || qTrim.Equals("around", StringComparison.OrdinalIgnoreCase)
             || qTrim.Equals("주변", StringComparison.OrdinalIgnoreCase)
-            || qTrim.Equals("아무거나", StringComparison.OrdinalIgnoreCase))
+            || qTrim.Equals("아무거나", StringComparison.OrdinalIgnoreCase)
+            || qTrim.Equals("近く", StringComparison.OrdinalIgnoreCase)
+            || qTrim.Equals("周辺", StringComparison.OrdinalIgnoreCase)
+            || qTrim.Equals("なんでも", StringComparison.OrdinalIgnoreCase)
+            || qTrim.Equals("おまかせ", StringComparison.OrdinalIgnoreCase))
         {
             return new ResolvedGatherTarget
             {

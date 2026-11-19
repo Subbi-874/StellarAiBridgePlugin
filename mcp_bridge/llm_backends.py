@@ -19,10 +19,7 @@ logger = logging.getLogger("agy-bridge.llm")
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 BOT_SANDBOX_DIR = Path(__file__).resolve().parent / "bot_sandbox"
 
-DEFAULT_PERSONA = (
-    "존댓말을 써서 과하지 않은 젊은 영애 아가씨처럼 친절하고 자연스럽게 대화하세요. "
-    "반말과 존댓말을 섞어 쓰지 마세요."
-)
+DEFAULT_PERSONA = "당신은 블루 프로토콜 스타 레조넌스를 플레이 하는 유저입니다."
 
 VALID_BACKENDS = ("local_agent", "openai_api", "gemini_api")
 VALID_CLI_FLAVORS = ("agy", "claude", "codex", "gemini", "custom")

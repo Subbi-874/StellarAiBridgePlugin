@@ -90,6 +90,15 @@ public static class CapabilityKeys
     };
 
     public static string GetLabel(string key) => Labels.TryGetValue(key, out var label) ? label : key;
+
+    public static string GetLabel(string key, ILocalization? loc)
+    {
+        string fallback = GetLabel(key);
+        if (loc == null) return fallback;
+        string locKey = $"cap.{key}";
+        string val = loc.T(locKey);
+        return string.Equals(val, locKey, StringComparison.Ordinal) ? fallback : val;
+    }
 }
 
 internal static class CapabilityProbeHelper

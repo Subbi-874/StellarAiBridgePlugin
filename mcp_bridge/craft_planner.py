@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from goal_manager import GoalStep, infer_behavior_kind
+from i18n import t as i18n_t
 
 
 _RECIPE_NORM_STRIP_RE = re.compile(r"[\W_\u200b\ufeff]+", re.UNICODE)
@@ -291,6 +292,7 @@ class CraftPlanner:
         available_focus: int = -1,
         unlock_map: dict[int, bool] | None = None,
         unequipped_base_equip_counts: dict[int, int] | None = None,
+        lang: str = "ko",
     ) -> CraftPlanResult:
         req_cnt = max(1, int(requested_count or 1))
         root = select_target_recipe(
@@ -304,7 +306,7 @@ class CraftPlanner:
             return CraftPlanResult(
                 status="not_found",
                 requested_count=req_cnt,
-                message=f"'{label}' 제작 레시피를 찾지 못했어요.",
+                message=i18n_t("craft_not_found", lang, label=label),
             )
 
         root_id = int(root["recipe_id"])
@@ -322,7 +324,12 @@ class CraftPlanner:
                     target_recipe=root,
                     requested_count=req_cnt,
                     crafts_needed=0,
-                    message=f"'{root.get('output_name') or root.get('name')}'은(는) 이미 {root_owned}개 보유 중이에요.",
+                    message=i18n_t(
+                        "craft_already_owned",
+                        lang,
+                        name=root.get("output_name") or root.get("name"),
+                        owned=root_owned,
+                    ),
                 )
             root_crafts = math.ceil(root_deficit / root_yield)
         else:
@@ -382,7 +389,7 @@ class CraftPlanner:
                         owned=initial_bag.get(oid, 0),
                         deficit=crafts_cnt * ryield,
                         reason="recipe_locked",
-                        obtain_hints=("제작 레시피가 아직 해금되지 않았어요",),
+                        obtain_hints=(i18n_t("craft_recipe_locked", lang),),
                     )
                 )
                 return
@@ -399,7 +406,7 @@ class CraftPlanner:
                                 owned=base_have,
                                 deficit=crafts_cnt - base_have,
                                 reason="missing_base_equip",
-                                obtain_hints=("장비 단조에 소모할 미착용 하위 장비가 부족해요",),
+                                obtain_hints=(i18n_t("craft_missing_base_equip", lang),),
                             )
                         )
                         return
@@ -447,7 +454,7 @@ class CraftPlanner:
                                 owned=total_need - rem,
                                 deficit=rem,
                                 reason="unknown_fish_category",
-                                obtain_hints=("해당 등급 물고기 정보를 찾지 못했어요",),
+                                obtain_hints=(i18n_t("craft_fish_grade_missing", lang),),
                             )
                         )
                     continue
@@ -530,7 +537,11 @@ class CraftPlanner:
                     if unlock_map is not None and unlock_map.get(int(c["recipe_id"])) is False
                 ]
                 reason = "sub_recipe_locked" if locked_cands else "non_automatable_source"
-                hints = other_ways or (("하위 제작 레시피가 미해금 상태예요",) if locked_cands else ("거래소·상점·직접 획득 필요",))
+                hints = other_ways or (
+                    (i18n_t("craft_sub_recipe_locked", lang),)
+                    if locked_cands
+                    else (i18n_t("craft_external_source_hint", lang),)
+                )
                 blocked.append(
                     BlockedMaterial(
                         item_id=mid,
@@ -563,12 +574,12 @@ class CraftPlanner:
             blocked.append(
                 BlockedMaterial(
                     item_id=20003,
-                    item_name="집중력",
+                    item_name=i18n_t("craft_focus_name", lang),
                     needed=focus_total[0],
                     owned=available_focus,
                     deficit=focus_total[0] - available_focus,
                     reason="insufficient_focus",
-                    obtain_hints=(f"집중력이 부족해요 (필요 {focus_total[0]}, 보유 {available_focus})",),
+                    obtain_hints=(i18n_t("craft_focus_shortage", lang, needed=focus_total[0], owned=available_focus),),
                 )
             )
 
@@ -581,7 +592,13 @@ class CraftPlanner:
                 crafts_needed=root_crafts,
                 total_focus_needed=focus_total[0],
                 blocked_materials=tuple(blocked),
-                message=f"'{first_b.item_name}' {first_b.deficit}개 부족으로 자동 제작이 막혔어요 ({', '.join(first_b.obtain_hints)}).",
+                message=i18n_t(
+                    "craft_blocked",
+                    lang,
+                    item_name=first_b.item_name,
+                    deficit=first_b.deficit,
+                    hints=", ".join(first_b.obtain_hints),
+                ),
             )
 
         if monster_deficits and not allow_monster_farm:
@@ -595,7 +612,10 @@ class CraftPlanner:
                 )
                 for mid, tot_def in monster_deficits.items()
             )
-            desc = ", ".join(f"{p.item_name} {p.deficit}개({p.monster_name})" for p in prompts)
+            desc = ", ".join(
+                i18n_t("craft_monster_item_fmt", lang, item_name=p.item_name, deficit=p.deficit, monster_name=p.monster_name)
+                for p in prompts
+            )
             return CraftPlanResult(
                 status="needs_monster_confirm",
                 target_recipe=root,
@@ -603,7 +623,7 @@ class CraftPlanner:
                 crafts_needed=root_crafts,
                 total_focus_needed=focus_total[0],
                 monster_prompts=prompts,
-                message=f"부족한 몬스터 드랍 재료가 있어요: {desc}. 몬스터 사냥을 시작할까요?",
+                message=i18n_t("craft_needs_monster_confirm", lang, desc=desc),
             )
 
         final_steps = tuple(self._coalesce_steps(steps))
@@ -614,5 +634,5 @@ class CraftPlanner:
             crafts_needed=root_crafts,
             total_focus_needed=focus_total[0],
             steps=final_steps,
-            message=f"'{root.get('name')}' x{root_crafts} 제작 계획 {len(final_steps)}단계 준비 완료",
+            message=i18n_t("craft_ready", lang, name=root.get("name"), crafts=root_crafts, steps=len(final_steps)),
         )

@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from i18n import POLICY_LABELS_BY_LANG, normalize_ui_language, policy_label, t as i18n_t
 from llm_backends import LlmClientConfig
 
 
@@ -39,37 +40,7 @@ DEFAULT_FEATURE_MODES: dict[str, int] = {
 }
 
 
-POLICY_LABELS: dict[str, str] = {
-    "send_world": "월드(전체) 채팅 발신",
-    "send_say": "일반(주변) 채팅 발신",
-    "send_guild": "길드 채팅 발신",
-    "send_party": "파티 채팅 발신",
-    "send_whisper": "귓속말 발신",
-    "chat_monitor": "대화 모니터링 전체",
-    "recv_guild": "길드 채팅 감지",
-    "recv_party": "파티 채팅 감지",
-    "recv_whisper": "귓속말 감지",
-    "recv_say": "일반 채팅 감지",
-    "follow_move": "대상 추적·이동",
-    "teleport_channel": "맵 포탈·채널 이동",
-    "auto_combat": "자동전투",
-    "boost_move": "3단 가속 이동",
-    "closest_portal": "최단거리 포탈 이동",
-    "emote": "감정표현",
-    "party_manage": "파티 생성·가입·탈퇴",
-    "auto_gather": "자동 채집",
-    "lua_eval": "외부 Lua 스크립트",
-    "auto_revive": "사망 시 자동 부활 (무료)",
-    "ride": "탈것 탑승·하차",
-    "interaction_accept": "상호작용·동승·파티초대 요청 (승인/발신)",
-    "player_locate": "유저 위치 조회",
-    "loadout_switch": "직업·스킬 프리셋 변경",
-    "outfit_switch": "의상 프리셋 변경",
-    "auto_ready": "던전·레이드·월드보스 자동 준비",
-    "dungeon_enter": "던전·레이드·불안정공간 입장 시작",
-    "auto_fish": "자동 낚시 제어",
-    "auto_craft": "아이템·요리·가구·장비 제작",
-}
+POLICY_LABELS: dict[str, str] = dict(POLICY_LABELS_BY_LANG["ko"])
 
 
 ACTION_POLICY_MAP: dict[str, str] = {
@@ -112,19 +83,29 @@ SEND_CHANNEL_POLICY_MAP: dict[str, str] = {
     "world": "send_world",
     "월드": "send_world",
     "전체": "send_world",
+    "ワールド": "send_world",
+    "全体": "send_world",
     "say": "send_say",
     "local": "send_say",
     "current": "send_say",
     "일반": "send_say",
+    "通常": "send_say",
+    "周囲": "send_say",
     "guild": "send_guild",
     "union": "send_guild",
     "길드": "send_guild",
+    "ギルド": "send_guild",
+    "ユニオン": "send_guild",
     "party": "send_party",
     "team": "send_party",
     "파티": "send_party",
+    "パーティ": "send_party",
+    "pt": "send_party",
     "whisper": "send_whisper",
     "private": "send_whisper",
     "귓속말": "send_whisper",
+    "ささやき": "send_whisper",
+    "密談": "send_whisper",
 }
 
 
@@ -134,18 +115,29 @@ def normalize_channel(raw: str) -> str:
         "guild": "guild",
         "union": "guild",
         "길드": "guild",
+        "ギルド": "guild",
+        "ユニオン": "guild",
         "party": "party",
         "team": "party",
         "파티": "party",
+        "パーティ": "party",
+        "pt": "party",
         "say": "say",
         "local": "say",
         "current": "say",
         "일반": "say",
+        "通常": "say",
+        "周囲": "say",
         "world": "world",
         "월드": "world",
+        "전체": "world",
+        "ワールド": "world",
+        "全体": "world",
         "whisper": "whisper",
         "private": "whisper",
         "귓속말": "whisper",
+        "ささやき": "whisper",
+        "密談": "whisper",
     }
     return mapping.get(val, val)
 
@@ -179,6 +171,7 @@ class ClientChatSettings:
     feature_modes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FEATURE_MODES))
     llm: LlmClientConfig = field(default_factory=LlmClientConfig)
     unavailable_capabilities: list[str] = field(default_factory=list)
+    ui_language: str = "ko"
 
     def set_commanders_from_tokens(
         self,
@@ -242,22 +235,22 @@ class PolicyCheckResult:
     error_message: str = ""
 
 
-def get_locked_labels(feature_modes: dict[str, int]) -> list[str]:
+def get_locked_labels(feature_modes: dict[str, int], lang: str = "ko") -> list[str]:
     """Returns human-readable labels for all features locked (mode == 2)."""
-    return [POLICY_LABELS.get(k, k) for k, v in feature_modes.items() if v == 2]
+    return [policy_label(k, lang) for k, v in feature_modes.items() if v == 2]
 
 
-def check_action_admin_lock(feature_modes: dict[str, int], action_type: str) -> PolicyCheckResult:
+def check_action_admin_lock(feature_modes: dict[str, int], action_type: str, lang: str = "ko") -> PolicyCheckResult:
     """Checks whether `action_type` is blocked by AdminLock (mode == 2)."""
     pol_key = ACTION_POLICY_MAP.get(action_type, "")
     if pol_key and feature_modes.get(pol_key) == 2:
-        lbl = POLICY_LABELS.get(pol_key, pol_key)
+        lbl = policy_label(pol_key, lang)
         return PolicyCheckResult(
             allowed=False,
             policy_key=pol_key,
             label=lbl,
             admin_locked=True,
-            error_message=f"'{lbl}' 기능은 어드민락(🔒) 상태라 대화로 실행하거나 변경할 수 없어요.",
+            error_message=i18n_t("admin_lock_error", lang, label=lbl),
         )
     return PolicyCheckResult(allowed=True, policy_key=pol_key)
 

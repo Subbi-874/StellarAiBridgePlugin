@@ -62,12 +62,10 @@ public static class BridgeDaemonSpawner
                 if (!File.Exists(serverPy))
                     return;
 
-                string pythonExe = Path.Combine(bridgeDir, ".venv", "Scripts", "pythonw.exe");
-                if (!File.Exists(pythonExe))
-                    pythonExe = Path.Combine(bridgeDir, ".venv", "Scripts", "python.exe");
-                if (!File.Exists(pythonExe))
+                string? pythonExe = ResolvePythonExecutable(bridgeDir);
+                if (pythonExe == null)
                 {
-                    log.Warning($"[AgyBridge][AutoSpawn] Python venv executable not found under {bridgeDir}");
+                    log.Warning($"[AgyBridge][AutoSpawn] Python runtime executable not found under {bridgeDir}");
                     return;
                 }
 
@@ -98,10 +96,47 @@ public static class BridgeDaemonSpawner
         }
     }
 
+    private static string? ResolvePythonExecutable(string bridgeDir)
+    {
+        string rootDir = Directory.GetParent(bridgeDir)?.FullName ?? bridgeDir;
+        string[] candidates =
+        {
+            Path.Combine(rootDir, "runtime", "pythonw.exe"),
+            Path.Combine(rootDir, "runtime", "python.exe"),
+            Path.Combine(bridgeDir, "runtime", "pythonw.exe"),
+            Path.Combine(bridgeDir, "runtime", "python.exe"),
+            Path.Combine(bridgeDir, ".venv", "Scripts", "pythonw.exe"),
+            Path.Combine(bridgeDir, ".venv", "Scripts", "python.exe"),
+        };
+        foreach (string path in candidates)
+        {
+            if (File.Exists(path))
+                return path;
+        }
+        return null;
+    }
+
     private static string? ResolveBridgeDirectory(string configuredDir)
     {
         if (!string.IsNullOrWhiteSpace(configuredDir) && Directory.Exists(configuredDir))
             return configuredDir;
+
+        // Check paths adjacent to Stellar.AgyBridge.dll for portable distributions
+        try
+        {
+            string asmLoc = typeof(BridgeDaemonSpawner).Assembly.Location;
+            string? dllDir = string.IsNullOrWhiteSpace(asmLoc) ? null : Path.GetDirectoryName(asmLoc);
+            if (!string.IsNullOrWhiteSpace(dllDir))
+            {
+                foreach (string rel in new[] { "mcp_bridge", Path.Combine("..", "mcp_bridge") })
+                {
+                    string candidate = Path.GetFullPath(Path.Combine(dllDir, rel));
+                    if (File.Exists(Path.Combine(candidate, "server.py")))
+                        return candidate;
+                }
+            }
+        }
+        catch { }
 
         // Dynamic fallback relative to E:\StarLauncher if GameMiniDir is under StarLauncher
         try

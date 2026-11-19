@@ -307,10 +307,14 @@ public sealed class WorldStateService : IDisposable
         var members = GetPartyTargets(requestSocialIfMissingLine: requestSocial, activeFollowCharId: followHint);
         if (members.Count == 0) return null;
 
-        // 1. Special keywords: "leader" / "파티장" / "리더"
+        // 1. Special keywords: "leader" / "party leader" / "파티장" / "리더" / JA
         if (query.Equals("leader", StringComparison.OrdinalIgnoreCase)
+            || query.Equals("party leader", StringComparison.OrdinalIgnoreCase)
             || query.Equals("파티장", StringComparison.OrdinalIgnoreCase)
-            || query.Equals("리더", StringComparison.OrdinalIgnoreCase))
+            || query.Equals("리더", StringComparison.OrdinalIgnoreCase)
+            || query.Equals("リーダー", StringComparison.OrdinalIgnoreCase)
+            || query.Equals("パーティリーダー", StringComparison.OrdinalIgnoreCase)
+            || query.Equals("ptリーダー", StringComparison.OrdinalIgnoreCase))
         {
             foreach (var m in members)
                 if (m.IsLeader && !m.IsSelf) return m;

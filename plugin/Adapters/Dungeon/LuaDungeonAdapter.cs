@@ -224,6 +224,13 @@ local function norm(s)
   return s
 end
 
+local function hasAnyKw(hay, list)
+  for _, pat in ipairs(list) do
+    if hay:find(pat, 1, true) then return true end
+  end
+  return false
+end
+
 local function buildOpenDungeonPool()
   local dtm = Z.TableMgr.GetTable('DungeonsTableMgr')
   local mcdt = Z.TableMgr.GetTable('MasterChallengeDungeonTableMgr')
@@ -271,9 +278,10 @@ local function buildOpenDungeonPool()
         for _, s in pairs(secs) do
           if type(s) == 'table' then
             local sName = tostring(s.Name or '')
+            local sLow = sName:lower()
             local sFunc = tonumber(s.FunctionId or 0) or 0
-            local isUnstableGroup = (sFunc == 300200) or (sName:find('불안정', 1, true) ~= nil)
-            local isExtremityGroup = (sName:find('극한', 1, true) ~= nil)
+            local isUnstableGroup = (sFunc == 300200) or hasAnyKw(sLow, { '불안정', 'unstable', '不安定', '虚蝕' })
+            local isExtremityGroup = hasAnyKw(sLow, { '극한', 'extrem', '極限', '極致', 'master', 'マスター' })
 
             local okTh, thirds = pcall(function() return rpd:GetThirdTagsById(s.Id) end)
             if okTh and type(thirds) == 'table' and next(thirds) ~= nil then
@@ -338,6 +346,13 @@ local function buildOpenDungeonPool()
     return 0
   end
 
+  local function hasOpenActName(kws)
+    for k, _ in pairs(openActNames) do
+      if hasAnyKw(k, kws) then return true end
+    end
+    return false
+  end
+
   local function isDungeonOpenNow(did, r)
     local pt = tonumber(r.PlayType or -1) or -1
     local condFunc = getCondFuncId(r)
@@ -364,14 +379,14 @@ local function buildOpenDungeonPool()
       end
       return openDirectDids[did] == true
     elseif pt == 16 then
-      if not (openActFuncs[500888] or openActNames[norm('시디문 유적')]) then return false end
+      if not (openActFuncs[500888] or hasOpenActName({ '시디문', 'stimen', 'スティメン' })) then return false end
       if Z.ConditionHelper and Z.ConditionHelper.CheckCondition and r.Condition then
         local okC, cPass = pcall(function() return Z.ConditionHelper.CheckCondition(r.Condition, false) end)
         if okC and cPass == false then return false end
       end
       return true
     elseif pt == 13 then
-      return (openActFuncs[500151] == true) or (openActNames[norm('길드 사냥')] ~= nil)
+      return (openActFuncs[500151] == true) or hasOpenActName({ '길드사냥', 'guildhunt', 'ギルドハント', 'ギルド討伐' })
     end
     return false
   end
@@ -463,8 +478,8 @@ end
 local combined = (rawQuery .. ' ' .. rawDiff)
 local allNorm = norm(combined)
 
--- 1. World Boss matchmaking request ('월드 보스', '월드보스', '세계의 지배자') — strictly enforce open time!
-if explicitId <= 0 and (allNorm:find('월드보스', 1, true) or allNorm:find('세계의지배자', 1, true)) then
+-- 1. World Boss matchmaking request ('월드 보스', 'world boss', 'ワールドボス', etc.) — strictly enforce open time!
+if explicitId <= 0 and hasAnyKw(allNorm, { '월드보스', '세계의지배자', 'worldboss', 'ワールドボス', '世界の支配者' }) then
   if not pool.wbOpen then
     return {
       ok = false,
@@ -498,41 +513,57 @@ if explicitId <= 0 and (allNorm:find('월드보스', 1, true) or allNorm:find('�
 end
 
 -- 2. Parse difficulty intent & master tier (1..20)
-local wantUnstable = allNorm:find('불안정', 1, true) ~= nil
-local wantMaster = (allNorm:find('마스터', 1, true) ~= nil) or (allNorm:find('master', 1, true) ~= nil)
+local KW_UNSTABLE = { '불안정', 'unstable', '不安定' }
+local KW_MASTER = { '마스터', 'master', 'マスター' }
+local KW_HARD = { '하드', '어려움', 'hard', 'ハード', '困難' }
+local KW_NORMAL = { '노멀', '일반', '보통', 'normal', 'ノーマル', '通常', '普通' }
+local KW_EASY = { '이지', '쉬움', 'easy', 'イージー', '簡単' }
+local KW_NIGHTMARE = { '나이트메어', '악몽', 'nightmare', 'ナイトメア', '悪夢' }
+local KW_EROSION = { '침식', 'erosion', 'corrupt', '侵食', '浸食' }
+
+local wantUnstable = hasAnyKw(allNorm, KW_UNSTABLE)
+local wantMaster = hasAnyKw(allNorm, KW_MASTER)
 local masterDiff = 0
 if wantMaster then
   local numStr = combined:match('마스터%s*난?이?도?%s*(%d+)')
     or combined:match('[Mm]aster%s*(%d+)')
-    or rawDiff:match('(%d+)')
+    or combined:match('マスター%s*(%d+)')
     or combined:match('(%d+)%s*단')
+    or combined:match('(%d+)%s*段')
+    or combined:match('[Tt]ier%s*(%d+)')
+    or rawDiff:match('(%d+)')
   masterDiff = tonumber(numStr or 1) or 1
   if masterDiff < 1 then masterDiff = 1 end
 end
 
-local wantHard = (not wantMaster) and (allNorm:find('하드', 1, true) ~= nil or allNorm:find('어려움', 1, true) ~= nil or allNorm:find('hard', 1, true) ~= nil)
-local wantNormal = (not wantMaster) and (allNorm:find('노멀', 1, true) ~= nil or allNorm:find('일반', 1, true) ~= nil or allNorm:find('보통', 1, true) ~= nil or allNorm:find('normal', 1, true) ~= nil)
-local wantEasy = allNorm:find('이지', 1, true) ~= nil or allNorm:find('쉬움', 1, true) ~= nil or allNorm:find('easy', 1, true) ~= nil
-local wantNightmare = allNorm:find('나이트메어', 1, true) ~= nil or allNorm:find('악몽', 1, true) ~= nil
-local wantRaidTier = nil
-if allNorm:find('결전', 1, true) then wantRaidTier = '결전'
-elseif allNorm:find('혈전', 1, true) then wantRaidTier = '혈전'
-elseif allNorm:find('회귀', 1, true) then wantRaidTier = '회귀'
-elseif allNorm:find('격투', 1, true) then wantRaidTier = '격투'
+local wantHard = (not wantMaster) and hasAnyKw(allNorm, KW_HARD)
+local wantNormal = (not wantMaster) and hasAnyKw(allNorm, KW_NORMAL)
+local wantEasy = hasAnyKw(allNorm, KW_EASY)
+local wantNightmare = hasAnyKw(allNorm, KW_NIGHTMARE)
+local wantRaidTierKws = nil
+if hasAnyKw(allNorm, { '결전', 'decisive', '決戦' }) then wantRaidTierKws = { '결전', 'decisive', '決戦' }
+elseif hasAnyKw(allNorm, { '혈전', 'blood', '血戦' }) then wantRaidTierKws = { '혈전', 'blood', '血戦' }
+elseif hasAnyKw(allNorm, { '회귀', 'return', '回帰' }) then wantRaidTierKws = { '회귀', 'return', '回帰' }
+elseif hasAnyKw(allNorm, { '격투', 'brawl', 'clash', '激闘' }) then wantRaidTierKws = { '격투', 'brawl', 'clash', '激闘' }
 end
 
-local wantErosion = allNorm:find('침식', 1, true) ~= nil
+local wantErosion = hasAnyKw(allNorm, KW_EROSION)
 
-local cleanSearch = rawQuery
+local cleanSearch = rawQuery:lower()
 for _, tok in ipairs({
-  '불안정 공간', '불안정공간', '불안정',
-  '마스터 난이도', '마스터난이도', '마스터', 'master',
-  '나이트메어', '노멀', '일반', '하드', '어려움', '이지', '쉬움',
-  '회귀', '혈전', '결전', '격투', '레이드'
+  '불안정 공간', '불안정공간', '불안정', 'unstable space', 'unstable', '不安定空間', '不安定',
+  '마스터 난이도', '마스터난이도', '마스터', 'master', 'マスター',
+  '나이트메어', 'nightmare', 'ナイトメア',
+  '노멀', 'normal', 'ノーマル',
+  '하드', 'hard', 'ハード',
+  '어려움', '일반',
+  '이지', 'easy', 'イージー',
+  '쉬움',
+  '회귀', '혈전', '결전', '격투', '레이드', 'raid', 'レイド'
 }) do
   cleanSearch = cleanSearch:gsub(tok, ' ')
 end
-cleanSearch = cleanSearch:gsub('%d+%s*단', ' ')
+cleanSearch = cleanSearch:gsub('%d+%s*단', ' '):gsub('%d+%s*段', ' '):gsub('tier%s*%d+', ' ')
 local searchNorm = norm(cleanSearch)
 local searchNoUi = norm(cleanSearch:gsub('의%s+', ' '):gsub('의', ''))
 
@@ -589,25 +620,25 @@ else
         end
 
         if nameMatched then
-          local isErosionRow = nm:find('침식', 1, true) ~= nil
+          local isErosionRow = hasAnyKw(nmNorm, KW_EROSION)
           if wantErosion and isErosionRow then score = score + 80
           elseif (not wantErosion) and isErosionRow then score = score - 25 end
 
           local diffOk = true
           if wantMaster then
             if (pool.masterMaxByDid[did] or 0) < masterDiff then diffOk = false else score = score + 200 end
-          elseif wantRaidTier then
-            if nm:find(wantRaidTier, 1, true) then score = score + 200 else diffOk = false end
+          elseif wantRaidTierKws then
+            if hasAnyKw(nmNorm, wantRaidTierKws) then score = score + 200 else diffOk = false end
           elseif wantNightmare then
-            if nmNorm:find('나이트메어', 1, true) or tnNorm:find('나이트메어', 1, true) or nm:find('결전', 1, true) then score = score + 200 else diffOk = false end
+            if hasAnyKw(nmNorm, KW_NIGHTMARE) or hasAnyKw(tnNorm, KW_NIGHTMARE) or hasAnyKw(nmNorm, { '결전', 'decisive', '決戦' }) then score = score + 200 else diffOk = false end
           elseif wantHard then
-            if tnNorm:find('하드', 1, true) or nmNorm:find('하드', 1, true) or nm:find('혈전', 1, true) then score = score + 200 else diffOk = false end
+            if hasAnyKw(tnNorm, KW_HARD) or hasAnyKw(nmNorm, KW_HARD) or hasAnyKw(nmNorm, { '혈전', 'blood', '血戦' }) then score = score + 200 else diffOk = false end
           elseif wantEasy then
-            if tnNorm:find('이지', 1, true) or nmNorm:find('이지', 1, true) or nm:find('회귀', 1, true) or nm:find('격투', 1, true) then score = score + 200 else diffOk = false end
+            if hasAnyKw(tnNorm, KW_EASY) or hasAnyKw(nmNorm, KW_EASY) or hasAnyKw(nmNorm, { '회귀', '격투', '回帰', '激闘' }) then score = score + 200 else diffOk = false end
           elseif wantNormal then
-            if tnNorm:find('노멀', 1, true) or nmNorm:find('노멀', 1, true) or (tn == '' and pt == 2) then score = score + 200 else diffOk = false end
+            if hasAnyKw(tnNorm, KW_NORMAL) or hasAnyKw(nmNorm, KW_NORMAL) or (tn == '' and pt == 2) then score = score + 200 else diffOk = false end
           else
-            if tnNorm:find('노멀', 1, true) or nm:find('회귀', 1, true) or nm:find('격투', 1, true) or nmNorm:find('이지', 1, true) then
+            if hasAnyKw(tnNorm, KW_NORMAL) or hasAnyKw(nmNorm, { '회귀', '격투', '回帰', '激闘' }) or hasAnyKw(nmNorm, KW_EASY) or hasAnyKw(tnNorm, KW_EASY) then
               score = score + 45
             end
           end

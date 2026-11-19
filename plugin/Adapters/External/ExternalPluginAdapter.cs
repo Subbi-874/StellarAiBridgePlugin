@@ -943,7 +943,8 @@ local function isFishingOption(e)
   end
   local txt = ''
   pcall(function() txt = tostring(e:GetContentStr() or '') end)
-  if txt:find('낚시', 1, true) then return true end
+  local txtLow = txt:lower()
+  if txt:find('낚시', 1, true) or txtLow:find('fish', 1, true) or txt:find('釣り', 1, true) then return true end
   return false
 end
 ";
@@ -984,7 +985,11 @@ return false
 local function norm(s)
   s = tostring(s or ''):lower()
   s = s:gsub('아스테리즈', '아스텔리즈')
-  s = s:gsub('순간%s*이동%s*[-–]?%s*', '')
+  s = s:gsub('순간%s*이동%s*[-–:]?%s*', '')
+  s = s:gsub('teleport%s*[-–:]?%s*', '')
+  s = s:gsub('warp%s*[-–:]?%s*', '')
+  s = s:gsub('テレポート%s*[-–：:]?%s*', '')
+  s = s:gsub('転送%s*[-–：:]?%s*', '')
   s = s:gsub('[%s%p·・]+', '')
   return s
 end
@@ -994,7 +999,9 @@ local function tokenize(raw)
   cleaned = cleaned:gsub('아스테리즈', '아스텔리즈')
   for _, sw in ipairs({
     '낚시터', '낚시 포인트', '낚시포인트', '낚시', '포인트', '할 수 있는 곳',
-    '근처', '주변', '여기', '이곳', '이 근처', '가까운', '아무데나', '보유'
+    '근처', '주변', '여기', '이곳', '이 근처', '가까운', '아무데나', '보유',
+    'fishing spot', 'fishing point', 'fishing', 'fish', 'spot', 'nearby', 'near', 'here', 'anywhere', 'around',
+    '釣り場', '釣りポイント', '釣り', '近く', '周辺', 'ここ', 'どこでも'
   }) do
     cleaned = cleaned:gsub(sw, ' ')
   end
@@ -1065,11 +1072,12 @@ local function buildFishingCatalog()
     end
   end
 
-  -- Discover ALL SceneObjectIds representing a Fishing Point (InteractionTemplate contains 2200 or Name == '낚시 포인트')
+  -- Discover ALL SceneObjectIds representing a Fishing Point (InteractionTemplate contains 2200 or localized Fishing Spot name)
   local fishSobjSet = {}
   if sot and sot.GetDatas then
     for id, r in pairs(sot.GetDatas()) do
-      local isFish = (tostring(r.Name or '') == '낚시 포인트')
+      local rn = tostring(r.Name or ''):lower()
+      local isFish = (rn == '낚시 포인트' or rn == 'fishing spot' or rn == 'fishing point' or rn == '釣りポイント' or rn == '釣り場')
       if not isFish and type(r.InteractionTemplate) == 'table' then
         for _, tpl in ipairs(r.InteractionTemplate) do
           if type(tpl) == 'table' and tonumber(tpl[2] or 0) == 2200 then
@@ -1100,7 +1108,11 @@ local function buildFishingCatalog()
             end
             local tr = ttm and ttm.GetRow(tpId, true) or nil
             local nm = tr and tostring(tr.Name or '') or ''
-            nm = nm:gsub('^순간%s*이동%s*[-–]%s*', '')
+            nm = nm:gsub('^순간%s*이동%s*[-–:]?%s*', '')
+            nm = nm:gsub('^[Tt]eleport%s*[-–:]?%s*', '')
+            nm = nm:gsub('^[Ww]arp%s*[-–:]?%s*', '')
+            nm = nm:gsub('^テレポート%s*[-–：:]?%s*', '')
+            nm = nm:gsub('^転送%s*[-–：:]?%s*', '')
             wlist[#wlist + 1] = {
               tp_id = tpId,
               name = nm,
@@ -1190,7 +1202,11 @@ if #cat.spots == 0 then
 end
 
 local qNorm = norm(rawQ)
-local hereWords = { ['']=true, ['여기']=true, ['근처']=true, ['주변']=true, ['이곳']=true, ['이근처']=true, ['가까운곳']=true, ['아무데나']=true, ['낚시']=true, ['낚시터']=true }
+local hereWords = {
+  ['']=true, ['여기']=true, ['근처']=true, ['주변']=true, ['이곳']=true, ['이근처']=true, ['가까운곳']=true, ['아무데나']=true, ['낚시']=true, ['낚시터']=true,
+  ['here']=true, ['nearby']=true, ['near']=true, ['around']=true, ['anywhere']=true, ['any']=true, ['fish']=true, ['fishing']=true, ['fishingspot']=true,
+  ['ここ']=true, ['近く']=true, ['周辺']=true, ['どこでも']=true, ['釣り']=true, ['釣り場']=true
+}
 
 -- 1. Try matching an exact/partial fish species name from FishingTableMgr first
 local matchedFish = nil
@@ -1256,6 +1272,25 @@ local synonyms = {
   ['강'] = { '담수', '계류', '계곡' },
   ['강가'] = { '담수', '계류', '계곡' },
   ['호수'] = { '호수', '담수' },
+  ['sea'] = { 'sea', 'ocean', 'beach', 'coast', 'harbor', 'port', 'saltwater', 'bay', 'shore' },
+  ['ocean'] = { 'ocean', 'sea', 'beach', 'coast', 'harbor', 'port', 'saltwater', 'bay' },
+  ['beach'] = { 'beach', 'coast', 'sea', 'ocean', 'bay', 'shore' },
+  ['coast'] = { 'coast', 'beach', 'sea', 'ocean', 'harbor', 'port' },
+  ['harbor'] = { 'harbor', 'port', 'sea', 'coast' },
+  ['port'] = { 'port', 'harbor', 'sea', 'coast' },
+  ['river'] = { 'river', 'stream', 'lake', 'freshwater', 'pond', 'creek', 'brook', 'valley' },
+  ['stream'] = { 'stream', 'river', 'freshwater', 'creek', 'brook', 'valley' },
+  ['lake'] = { 'lake', 'freshwater', 'pond', 'river' },
+  ['freshwater'] = { 'freshwater', 'lake', 'river', 'stream', 'pond' },
+  ['pond'] = { 'pond', 'lake', 'freshwater' },
+  ['海'] = { '海', '海水', '海岸', '浜', '港', 'ビーチ' },
+  ['海岸'] = { '海岸', '海', '浜', 'ビーチ', '港' },
+  ['浜'] = { '浜', '海岸', '海', 'ビーチ' },
+  ['港'] = { '港', '海', '海岸' },
+  ['川'] = { '川', '渓流', '淡水', '湖' },
+  ['渓流'] = { '渓流', '川', '淡水', '渓谷' },
+  ['湖'] = { '湖', '淡水', '池' },
+  ['淡水'] = { '淡水', '湖', '川', '渓流', '池' },
 }
 
 for _, sp in ipairs(cat.spots) do

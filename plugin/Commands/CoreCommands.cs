@@ -52,6 +52,7 @@ public static class CoreCommands
         TraversalGimmickService traversal,
         AutoCameraGuardService cameraGuard,
         CapabilityRegistry capabilities,
+        EcoModeService ecoMode,
         Action? onUiStateChanged = null)
     {
         registry.Register(new DelegateBridgeCommand("ping", _ => new JsonObject
@@ -83,6 +84,7 @@ public static class CoreCommands
             ["autogather_available"] = autoGather.IsAvailable,
             ["autofishing_available"] = autoFishing.IsAvailable,
             ["capabilities"] = capabilities.BuildStatusJson(),
+            ["eco_mode"] = ecoMode.GetStatusJson(),
             ["smart_pathfinding"] = config.EnableSmartPathfinding,
             ["nav_mode"] = boost.PathNavigator.ActiveNavMode,
             ["move_inject_path"] = moveDriver.InjectPath,
@@ -255,8 +257,12 @@ public static class CoreCommands
             {
                 string trimmedTarget = target.Trim();
                 if (trimmedTarget.Equals("leader", StringComparison.OrdinalIgnoreCase)
+                    || trimmedTarget.Equals("party leader", StringComparison.OrdinalIgnoreCase)
                     || trimmedTarget.Equals("파티장", StringComparison.OrdinalIgnoreCase)
-                    || trimmedTarget.Equals("리더", StringComparison.OrdinalIgnoreCase))
+                    || trimmedTarget.Equals("리더", StringComparison.OrdinalIgnoreCase)
+                    || trimmedTarget.Equals("リーダー", StringComparison.OrdinalIgnoreCase)
+                    || trimmedTarget.Equals("パーティリーダー", StringComparison.OrdinalIgnoreCase)
+                    || trimmedTarget.Equals("ptリーダー", StringComparison.OrdinalIgnoreCase))
                 {
                     config.LastFollowTargetUid = 0L;
                     config.LastFollowTarget = "leader";
@@ -587,6 +593,23 @@ public static class CoreCommands
         {
             string reason = p?["reason"]?.GetValue<string>() ?? "rpc";
             return cameraGuard.ForceRestoreNow(reason);
+        }));
+
+        registry.Register(new DelegateBridgeCommand("set_eco_mode", p =>
+        {
+            string mode = p?["mode"]?.GetValue<string>() ?? "standard";
+            bool? pauseOnFocus = p?["auto_pause_on_focus"] != null ? p["auto_pause_on_focus"]!.GetValue<bool>() : null;
+            bool persist = p?["persist"]?.GetValue<bool>() ?? true;
+            var res = ecoMode.SetMode(mode, pauseOnFocus, persist);
+            onUiStateChanged?.Invoke();
+            return res;
+        }));
+
+        registry.Register(new DelegateBridgeCommand("trim_memory", p =>
+        {
+            bool emptyWs = p?["empty_working_set"]?.GetValue<bool>() ?? true;
+            bool unload = p?["unload_assets"]?.GetValue<bool>() ?? true;
+            return ecoMode.TrimMemoryNow(emptyWorkingSet: emptyWs, unloadAssets: unload);
         }));
 
         registry.Register(new DelegateBridgeCommand("party_action", p =>

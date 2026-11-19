@@ -17,6 +17,7 @@ public sealed class AutoCombatKeeper
 
     private float _settleTimer;
     private float _pollTimer;
+    private float _passivePollTimer;
     private int _lastSceneId;
     private int _restoreAttemptsInScene;
     private bool _suppressForCatchup;
@@ -126,6 +127,7 @@ public sealed class AutoCombatKeeper
             || !_services.PlayerState.IsAvailable)
         {
             _settleTimer = 2.0f;
+            LastKnownInGameEnabled = false;
             return;
         }
 
@@ -143,7 +145,18 @@ public sealed class AutoCombatKeeper
         }
 
         if (!DesiredEnabled || IsSuppressed)
+        {
+            if (!IsSuppressed)
+            {
+                _passivePollTimer -= dt;
+                if (_passivePollTimer <= 0f)
+                {
+                    _passivePollTimer = 1.0f;
+                    QueryInGameState();
+                }
+            }
             return;
+        }
 
         _pollTimer -= dt;
         if (_pollTimer > 0f) return;

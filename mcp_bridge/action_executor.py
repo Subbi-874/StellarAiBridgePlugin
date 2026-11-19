@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from i18n import FOLLOW_CANCEL_MESSAGES_BY_LANG, normalize_ui_language, t as i18n_t
 from policy import ClientChatSettings, check_action_admin_lock
 
 
@@ -38,17 +39,7 @@ EXTENDED_ACTION_TYPES: frozenset[str] = frozenset({
 PARTY_OPS_AWAIT_RESULT: frozenset[str] = frozenset({"merge", "set_member_type", "kick", "transfer_leader"})
 
 
-FOLLOW_CANCEL_MESSAGES: dict[str, str] = {
-    "cancelled_unenterable_scene": "{name}님이 있는 '{scene}' 지역은 입장 불가 구역이어서 따라가기 중단됨",
-    "cancelled_target_offline": "{name}님이 오프라인 상태여서 따라가기 중단됨",
-    "cancelled_target_not_found": "대상 '{query}'을(를) 찾지 못해 따라가기 실패함",
-    "cancelled_locked_channel": "{name}님 채널이 잠겨 있어 채널 이동 불가로 따라가기 중단됨",
-    "cancelled_teleport_unavailable": "{name}님 위치로 순간이동할 수 없어 따라가기 중단됨",
-    "cancelled_unreachable_scene": "{name}님이 있는 맵으로 이동할 수 없어 따라가기 중단됨",
-    "cancelled_different_scene": "맵 이동 기능이 꺼져 있어 다른 맵에 있는 {name}님에게 이동 불가함",
-    "cancelled_transfer_rejected": "{name}님 위치로의 이동이 서버에서 거부되어 따라가기 중단됨",
-    "cancelled_admin_lock": "따라가기 기능이 어드민락 잠금 상태여서 중단됨",
-}
+FOLLOW_CANCEL_MESSAGES: dict[str, str] = dict(FOLLOW_CANCEL_MESSAGES_BY_LANG["ko"])
 
 
 @dataclass
@@ -83,38 +74,41 @@ class ActionBatchResult:
         return items
 
 
-def format_task_event_fact(ev_name: str, data: dict[str, Any]) -> tuple[str, str]:
+def format_task_event_fact(ev_name: str, data: dict[str, Any], lang: str = "ko") -> tuple[str, str]:
     """Maps an asynchronous task lifecycle event into `(kind_key, fact_text)`."""
+    lang_code = normalize_ui_language(lang)
     if ev_name == "follow_cancelled":
         phase = str(data.get("phase") or "")
-        tmpl = FOLLOW_CANCEL_MESSAGES.get(phase, "따라가기 중단됨 (사유: {phase})")
+        cancel_map = FOLLOW_CANCEL_MESSAGES_BY_LANG.get(lang_code) or FOLLOW_CANCEL_MESSAGES
+        tmpl = cancel_map.get(phase) or i18n_t("task_follow_default", lang_code)
+        target_fallback = i18n_t("target_default", lang_code)
         fact = tmpl.format(
-            name=data.get("target_name") or data.get("target_query") or "대상",
-            scene=data.get("target_scene_name") or data.get("target_scene_id") or "해당 구역",
-            query=data.get("target_query") or "대상",
+            name=data.get("target_name") or data.get("target_query") or target_fallback,
+            scene=data.get("target_scene_name") or data.get("target_scene_id") or i18n_t("area_default", lang_code),
+            query=data.get("target_query") or target_fallback,
             phase=phase,
         )
         return "follow", fact
     if ev_name in ("fishing_completed", "fishing_stopped"):
-        spot = data.get("landmark") or data.get("area_name") or data.get("scene_name") or "낚시터"
+        spot = data.get("landmark") or data.get("area_name") or data.get("scene_name") or i18n_t("task_fish_spot_default", lang_code)
         caught = int(data.get("caught_count") or 0)
         fact = (
-            f"{spot}에서 낚시 {caught}마리 완료"
+            i18n_t("task_fish_done", lang_code, spot=spot, caught=caught)
             if ev_name == "fishing_completed"
-            else str(data.get("detail") or f"{spot} 낚시 종료 (총 {caught}마리)")
+            else str(data.get("detail") or i18n_t("task_fish_stopped", lang_code, spot=spot, caught=caught))
         )
         return "fish", fact
     if ev_name == "gimmick_failed":
-        return "gimmick", str(data.get("detail") or "이동 기믹 사용 실패")
+        return "gimmick", str(data.get("detail") or i18n_t("task_gimmick_failed", lang_code))
     if ev_name in ("craft_completed", "craft_failed"):
-        fallback = "제작 완료" if ev_name == "craft_completed" else "제작 실패"
+        fallback = i18n_t("task_craft_done" if ev_name == "craft_completed" else "task_craft_failed", lang_code)
         return "craft", str(data.get("detail") or fallback)
     if ev_name in ("monster_farm_completed", "monster_farm_failed"):
-        fallback = "몬스터 드랍 재료 확보 완료" if ev_name == "monster_farm_completed" else "몬스터 재료 파밍 실패"
+        fallback = i18n_t("task_farm_done" if ev_name == "monster_farm_completed" else "task_farm_failed", lang_code)
         return "monster_farm", str(data.get("detail") or fallback)
     if ev_name == "monster_seek_arrived":
-        return "monster", str(data.get("detail") or "목표 몬스터 출현 위치 도착 완료")
-    return "monster", str(data.get("detail") or "목표 몬스터 위치 이동 실패")
+        return "monster", str(data.get("detail") or i18n_t("task_monster_arrived", lang_code))
+    return "monster", str(data.get("detail") or i18n_t("task_monster_failed", lang_code))
 
 
 class ActionExecutor:
@@ -378,7 +372,7 @@ class ActionExecutor:
                         batch.info_results.append(info)
                 continue
 
-            pol = check_action_admin_lock(cfg.feature_modes, atype)
+            pol = check_action_admin_lock(cfg.feature_modes, atype, lang=cfg.ui_language)
             if not pol.allowed:
                 batch.action_errors.append(pol.error_message)
                 batch.executed.append({"action": atype, "blocked_by_admin_lock": True, "policy_key": pol.policy_key})

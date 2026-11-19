@@ -331,7 +331,13 @@ public sealed class GatherResourceBehavior : IBehavior
         {
             bool focusExhausted = _lastAgStatus.Contains("집중력", StringComparison.OrdinalIgnoreCase)
                 || _lastAgStatus.Contains("활력", StringComparison.OrdinalIgnoreCase)
-                || _lastAgStatus.Contains("focus", StringComparison.OrdinalIgnoreCase);
+                || _lastAgStatus.Contains("focus", StringComparison.OrdinalIgnoreCase)
+                || _lastAgStatus.Contains("stamina", StringComparison.OrdinalIgnoreCase)
+                || _lastAgStatus.Contains("vigor", StringComparison.OrdinalIgnoreCase)
+                || _lastAgStatus.Contains("energy", StringComparison.OrdinalIgnoreCase)
+                || _lastAgStatus.Contains("集中", StringComparison.OrdinalIgnoreCase)
+                || _lastAgStatus.Contains("スタミナ", StringComparison.OrdinalIgnoreCase)
+                || _lastAgStatus.Contains("活力", StringComparison.OrdinalIgnoreCase);
             _focusExhausted = focusExhausted;
 
             if (_targetCount <= 0 && (focusExhausted || _useFocus == true))

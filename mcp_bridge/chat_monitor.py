@@ -63,6 +63,7 @@ from goal_manager import (  # noqa: F401
     build_goal_from_action,
     parse_priority,
 )
+from i18n import normalize_ui_language, t as i18n_t
 from memory_store import (  # noqa: F401
     ALLOWED_MEMORY_CATEGORIES,
     MemoryStore,
@@ -304,6 +305,8 @@ class ChatMonitorService:
             )
         if isinstance(data.get("llm_settings"), dict):
             cfg.llm = LlmClientConfig.from_ui_dict(data["llm_settings"])
+        if "ui_language" in data:
+            cfg.ui_language = normalize_ui_language(data.get("ui_language"))
         logger.info("Synchronized chat settings for [%s]: %s", conn_id or "default", self.status(conn_id))
 
     def status(self, conn_id: str | None = None) -> dict[str, Any]:
@@ -316,6 +319,7 @@ class ChatMonitorService:
                 "authorized_commanders": list(c.authorized_commanders),
                 "authorized_commander_uids": sorted(c.authorized_commander_uids),
                 "feature_modes": dict(c.feature_modes),
+                "ui_language": c.ui_language,
                 "llm_settings": c.llm.masked_dict(),
             }
             for cid, c in self.agents.iter_client_settings().items()
@@ -323,6 +327,7 @@ class ChatMonitorService:
         return {
             "enabled": cfg.enabled,
             "channels": sorted(cfg.channels),
+            "ui_language": cfg.ui_language,
             "use_local_agy": self.use_local_agy,
             "llm_backend": cfg.llm.backend,
             "llm_effective_mode": cfg.llm.effective_mode,
@@ -814,6 +819,7 @@ class ChatMonitorService:
                 channel,
                 event_fact,
                 is_remote_bpsr=cfg.llm.is_remote_agent,
+                lang=cfg.ui_language,
             )
             raw, timed_out = await self._invoke_llm_guarded(
                 agent,
@@ -821,7 +827,7 @@ class ChatMonitorService:
                 cfg.llm,
                 ep.synth_trig,
                 ep.game_context,
-                "(최근 이전 대화 없음)",
+                i18n_t("no_recent_chat", cfg.ui_language),
                 ep.system_prompt,
                 ep.user_prompt,
                 "",
@@ -840,7 +846,8 @@ class ChatMonitorService:
 
     async def _handle_task_event(self, conn_id: str | None, ev_name: str, data: dict[str, Any]) -> None:
         """Announces completion/failure of long-running behaviors (follow, monster seek, fishing, gimmick) in the chat that requested them."""
-        kind, fact = format_task_event_fact(ev_name, data)
+        cfg = self._get_cfg(conn_id)
+        kind, fact = format_task_event_fact(ev_name, data, lang=cfg.ui_language)
         max_age = 60 * 60 if kind == "fish" else 15 * 60
         agent = self.agents.get_by_conn_id(conn_id)
         if agent is not None and agent.char_id > 0:
@@ -1153,7 +1160,7 @@ class ChatMonitorService:
             return {"ok": True, "deferred": True}
 
         step = goal.current_step
-        pol = check_action_admin_lock(agent.settings.feature_modes, step.action_type)
+        pol = check_action_admin_lock(agent.settings.feature_modes, step.action_type, lang=agent.settings.ui_language)
         if not pol.allowed:
             agent.goals.fail_or_abort_active_goal(pol.error_message, abort=True)
             return {"ok": False, "error": pol.error_message, "admin_locked": True}
@@ -1285,7 +1292,7 @@ class ChatMonitorService:
                 return rec, "목표에 실행할 단계가 지정되지 않았어요.", None
 
             for st_item in goal.steps:
-                pol = check_action_admin_lock(cfg.feature_modes, st_item.action_type)
+                pol = check_action_admin_lock(cfg.feature_modes, st_item.action_type, lang=cfg.ui_language)
                 if not pol.allowed:
                     rec = {
                         "action": atype,
@@ -1392,6 +1399,7 @@ class ChatMonitorService:
         count: int = 1,
         count_mode: str = "additional",
         allow_monster_farm: bool = False,
+        lang: str = "ko",
     ) -> CraftPlanResult:
         cache_res = await self.ensure_recipe_cache(conn_id)
         recipes = self.memory.load_all_cached_recipes()
@@ -1412,6 +1420,7 @@ class ChatMonitorService:
                 recipe_id=recipe_id,
                 query=query,
                 requested_count=count,
+                lang=lang,
             )
 
         cand_ids = collect_candidate_item_ids(recipes, root_rec)
@@ -1455,6 +1464,7 @@ class ChatMonitorService:
             available_focus=available_focus,
             unlock_map=unlock_map or None,
             unequipped_base_equip_counts=unequipped_counts or None,
+            lang=lang,
         )
 
     async def _handle_craft_goal_action(
@@ -1465,7 +1475,7 @@ class ChatMonitorService:
         act: dict[str, Any],
         trig: dict[str, Any],
     ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
-        pol = check_action_admin_lock(cfg.feature_modes, "craft_goal")
+        pol = check_action_admin_lock(cfg.feature_modes, "craft_goal", lang=cfg.ui_language)
         if not pol.allowed:
             return {"action": "craft_goal", "blocked_by_admin_lock": True, "policy_key": pol.policy_key}, pol.error_message, None
 
@@ -1502,6 +1512,7 @@ class ChatMonitorService:
             count=count,
             count_mode=count_mode,
             allow_monster_farm=allow_monster,
+            lang=cfg.ui_language,
         )
         rec: dict[str, Any] = {"action": "craft_goal", "plan": plan.to_dict()}
 
@@ -1528,7 +1539,7 @@ class ChatMonitorService:
             }
 
         for st_item in plan.steps:
-            st_pol = check_action_admin_lock(cfg.feature_modes, st_item.action_type)
+            st_pol = check_action_admin_lock(cfg.feature_modes, st_item.action_type, lang=cfg.ui_language)
             if not st_pol.allowed:
                 return {"action": "craft_goal", "blocked_by_admin_lock": True, "policy_key": st_pol.policy_key}, st_pol.error_message, None
             if st_item.action_type == "farm_monster_item" and cfg.feature_modes.get("auto_combat") == 2:
@@ -1596,6 +1607,7 @@ class ChatMonitorService:
     ) -> dict[str, Any]:
         agent = self._resolve_agent(conn_id, char_id)
         target_conn = (agent.conn_id if agent and agent.conn_id else conn_id)
+        cfg = self._get_cfg(target_conn)
         plan = await self._prepare_craft_plan(
             target_conn,
             recipe_id=recipe_id,
@@ -1603,6 +1615,7 @@ class ChatMonitorService:
             count=count,
             count_mode=count_mode,
             allow_monster_farm=allow_monster_farm,
+            lang=cfg.ui_language,
         )
         return {"ok": plan.status != "not_found", **plan.to_dict()}
 
@@ -1679,15 +1692,17 @@ class ChatMonitorService:
                 )
             return
 
+        ui_lang = agent.settings.ui_language
         cp = build_consult_prompts(
             agent.settings.llm.persona,
             goal.to_dict(),
             ev_name,
             directive.fact,
             directive.failure_signature,
-            get_locked_labels(agent.settings.feature_modes),
+            get_locked_labels(agent.settings.feature_modes, lang=ui_lang),
             agent.settings.unavailable_capabilities,
             is_remote_bpsr=agent.settings.llm.is_remote_agent,
+            lang=ui_lang,
         )
         raw, timed_out = await self._invoke_llm_guarded(
             agent,
@@ -1695,7 +1710,7 @@ class ChatMonitorService:
             agent.settings.llm,
             cp.synth_trig,
             cp.game_context,
-            "(최근 이전 대화 없음)",
+            i18n_t("no_recent_chat", ui_lang),
             cp.system_prompt,
             cp.user_prompt,
             cp.user_prompt,
@@ -1727,7 +1742,7 @@ class ChatMonitorService:
                 agent,
                 goal,
                 decision,
-                check_admin_lock_fn=check_action_admin_lock,
+                check_admin_lock_fn=lambda fm, at: check_action_admin_lock(fm, at, lang=ui_lang),
             )
 
         await self._execute_route_directive(
@@ -1914,9 +1929,10 @@ class ChatMonitorService:
                     chats_res.get("messages") or [],
                     trig["channel"],
                     exclude_msg_id=trig.get("msg_id"),
+                    lang=cfg.ui_language,
                 )
 
-                locked_labels = get_locked_labels(cfg.feature_modes)
+                locked_labels = get_locked_labels(cfg.feature_modes, lang=cfg.ui_language)
 
                 cap_missing = (st.get("capabilities") or {}).get("missing_labels") if isinstance(st, dict) else None
                 if isinstance(cap_missing, list):
@@ -1945,7 +1961,7 @@ class ChatMonitorService:
                         live_behavior=st.get("behavior") if isinstance(st, dict) else None
                     )
                     if agent is not None
-                    else "(활성 목표 없음)"
+                    else i18n_t("no_active_goals", cfg.ui_language)
                 )
                 memory_context = (
                     self.memory.build_prompt_context(
@@ -1955,7 +1971,7 @@ class ChatMonitorService:
                         trigger_text=str(trig.get("text") or ""),
                     ).to_prompt_text()
                     if bot_cid > 0
-                    else "(저장된 기억 없음)"
+                    else i18n_t("no_memories", cfg.ui_language)
                 )
                 prompts = build_llm_prompts(
                     cfg,

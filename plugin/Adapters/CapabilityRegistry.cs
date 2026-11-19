@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Services;
 
@@ -56,6 +57,7 @@ public sealed class CapabilityRegistry
 
     private readonly IPluginLog _log;
     private readonly WorldAccessGuard _guard;
+    private readonly ILocalization? _loc;
     private readonly object _lock = new();
     private readonly List<ICapabilityProbe> _probes = new();
     private readonly Dictionary<string, CapabilityEntry> _entries = new(StringComparer.OrdinalIgnoreCase);
@@ -65,10 +67,22 @@ public sealed class CapabilityRegistry
 
     public event Action? CapabilitiesUpdated;
 
-    public CapabilityRegistry(IPluginLog log, WorldAccessGuard guard)
+    public CapabilityRegistry(IPluginLog log, WorldAccessGuard guard, ILocalization? localization = null)
     {
         _log = log;
         _guard = guard;
+        _loc = localization;
+    }
+
+    private string LocFormat(string key, string fallbackTemplate, params object[] args)
+    {
+        if (_loc != null)
+        {
+            string val = _loc.TFormat(key, args);
+            if (!string.Equals(val, key, StringComparison.Ordinal))
+                return val;
+        }
+        return args.Length == 0 ? fallbackTemplate : string.Format(CultureInfo.InvariantCulture, fallbackTemplate, args);
     }
 
     public bool HasWorldProbed => _worldProbed;
@@ -157,13 +171,14 @@ public sealed class CapabilityRegistry
         if (entry.State != CapabilityState.Missing)
             return null;
 
+        string label = CapabilityKeys.GetLabel(entry.Key, _loc);
         return new JsonObject
         {
             ["ok"] = false,
             ["capability_missing"] = true,
             ["capability"] = entry.Key,
-            ["label"] = entry.Label,
-            ["error"] = $"패치로 사용 불가 ({entry.Label}): {entry.Detail}"
+            ["label"] = label,
+            ["error"] = LocFormat("cap.blocked_fmt", "패치로 사용 불가 ({0}): {1}", label, entry.Detail)
         };
     }
 
@@ -184,7 +199,7 @@ public sealed class CapabilityRegistry
                     case CapabilityState.Degraded: deg++; break;
                     case CapabilityState.Missing:
                         miss++;
-                        missingLabels.Add(e.Label);
+                        missingLabels.Add(CapabilityKeys.GetLabel(e.Key, _loc));
                         break;
                 }
             }
@@ -194,24 +209,24 @@ public sealed class CapabilityRegistry
         {
             worstState = CapabilityState.Missing;
             string preview = string.Join(", ", missingLabels.Count > 3 ? missingLabels.GetRange(0, 3) : missingLabels);
-            string suffix = missingLabels.Count > 3 ? $" 외 {missingLabels.Count - 3}건" : "";
-            return $"자가점검: 사용 불가 {miss}건 ({preview}{suffix}) · 정상 {avail}";
+            string suffix = missingLabels.Count > 3 ? LocFormat("cap.summary.more_fmt", " 외 {0}건", missingLabels.Count - 3) : "";
+            return LocFormat("cap.summary.missing_fmt", "자가점검: 사용 불가 {0}건 ({1}{2}) · 정상 {3}", miss, preview, suffix, avail);
         }
 
         if (!worldProbed)
         {
             worstState = CapabilityState.Unknown;
-            return $"자가점검: 월드 진입 후 Lua 점검 대기 (네이티브 {avail}건 확인)";
+            return LocFormat("cap.summary.waiting_fmt", "자가점검: 월드 진입 후 Lua 점검 대기 (네이티브 {0}건 확인)", avail);
         }
 
         if (deg > 0)
         {
             worstState = CapabilityState.Degraded;
-            return $"자가점검: 정상 {avail} · 일부저하 {deg} (사용 불가 0)";
+            return LocFormat("cap.summary.degraded_fmt", "자가점검: 정상 {0} · 일부저하 {1} (사용 불가 0)", avail, deg);
         }
 
         worstState = CapabilityState.Available;
-        return $"자가점검: 전체 기능 정상 ({avail}개 API 확인)";
+        return LocFormat("cap.summary.ok_fmt", "자가점검: 전체 기능 정상 ({0}개 API 확인)", avail);
     }
 
     public JsonObject BuildStatusJson()
@@ -231,18 +246,19 @@ public sealed class CapabilityRegistry
 
             foreach (var e in ordered)
             {
+                string label = CapabilityKeys.GetLabel(e.Key, _loc);
                 string stateStr = e.State.ToString().ToLowerInvariant();
                 switch (e.State)
                 {
                     case CapabilityState.Available: avail++; break;
                     case CapabilityState.Degraded:
                         deg++;
-                        degradedLabels.Add(e.Label);
+                        degradedLabels.Add(label);
                         break;
                     case CapabilityState.Missing:
                         miss++;
                         missingKeys.Add(e.Key);
-                        missingLabels.Add(e.Label);
+                        missingLabels.Add(label);
                         break;
                     default: unk++; break;
                 }
@@ -250,7 +266,7 @@ public sealed class CapabilityRegistry
                 itemsArr.Add(new JsonObject
                 {
                     ["key"] = e.Key,
-                    ["label"] = e.Label,
+                    ["label"] = label,
                     ["domain"] = e.Domain,
                     ["state"] = stateStr,
                     ["detail"] = e.Detail

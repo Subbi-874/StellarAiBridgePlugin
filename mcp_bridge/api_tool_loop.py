@@ -17,6 +17,7 @@ from llm_backends import (
     normalize_gemini_generate_url,
     normalize_openai_chat_url,
 )
+from i18n import t as i18n_t
 from policy import ClientChatSettings, check_action_admin_lock
 from prompt_builder import extract_decision_json
 
@@ -24,13 +25,7 @@ logger = logging.getLogger("agy-bridge.api-tools")
 
 MAX_LIST_ITEMS_IN_TOOL_RESULT = 30
 
-TOOL_CALLING_SYSTEM_ADDENDUM = (
-    "[Function Calling 도구 사용 규칙]\n"
-    "- 현재 연결은 표준 Function Calling(tools) 모드입니다.\n"
-    "- 상태·위치·레시피·기억 조회나 인게임 조작/목표/기억 변경이 필요하면 JSON의 actions 배열을 쓰는 대신 제공된 함수(tools)를 직접 호출하세요.\n"
-    "- 도구 호출 결과를 확인한 뒤, 설정된 페르소나와 말투로 사용자에게 보낼 자연스러운 한국어 답변을 작성하세요.\n"
-    "- 이미 도구로 실행 완료한 행동을 최종 JSON의 actions 배열에 중복 기재하지 마세요(단순 평문으로 답변해도 됩니다)."
-)
+TOOL_CALLING_SYSTEM_ADDENDUM = i18n_t("tool_calling_addendum", "ko")
 
 
 @dataclass(frozen=True)
@@ -462,7 +457,7 @@ class BotToolDispatcher:
             return ToolExecutionOutcome(ok=bool(res.get("ok", True)), result=_trim_tool_payload(res))
 
         if kind == "player_location":
-            pol = check_action_admin_lock(self._cfg.feature_modes, "query_player_location")
+            pol = check_action_admin_lock(self._cfg.feature_modes, "query_player_location", lang=self._cfg.ui_language)
             if not pol.allowed:
                 return ToolExecutionOutcome(
                     ok=False,
@@ -674,7 +669,8 @@ async def run_openai_tool_loop(
     calls_limit = max(1, int(max_calls if max_calls is not None else config.API_TOOL_LOOP_MAX_CALLS))
     post_fn = http_post or _default_json_post
 
-    sys_text = f"{system_prompt}\n\n{TOOL_CALLING_SYSTEM_ADDENDUM}" if system_prompt.strip() else TOOL_CALLING_SYSTEM_ADDENDUM
+    addendum = i18n_t("tool_calling_addendum", getattr(getattr(tool_runner, "_cfg", None), "ui_language", "ko"))
+    sys_text = f"{system_prompt}\n\n{addendum}" if system_prompt.strip() else addendum
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": sys_text},
         {"role": "user", "content": user_prompt},
@@ -804,7 +800,8 @@ async def run_gemini_tool_loop(
     calls_limit = max(1, int(max_calls if max_calls is not None else config.API_TOOL_LOOP_MAX_CALLS))
     post_fn = http_post or _default_json_post
 
-    sys_text = f"{system_prompt}\n\n{TOOL_CALLING_SYSTEM_ADDENDUM}" if system_prompt.strip() else TOOL_CALLING_SYSTEM_ADDENDUM
+    addendum = i18n_t("tool_calling_addendum", getattr(getattr(tool_runner, "_cfg", None), "ui_language", "ko"))
+    sys_text = f"{system_prompt}\n\n{addendum}" if system_prompt.strip() else addendum
     contents: list[dict[str, Any]] = [{"role": "user", "parts": [{"text": user_prompt}]}]
     gemini_tools = [{"functionDeclarations": to_gemini_tools()}]
     total_calls = 0

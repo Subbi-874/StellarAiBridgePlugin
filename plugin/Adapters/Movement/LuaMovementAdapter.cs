@@ -254,7 +254,11 @@ local houseVm = Z.VMMgr.GetVM('house')
 local function normText(s)
   s = tostring(s or ''):lower()
   s = s:gsub('아스테리즈', '아스텔리즈')
-  s = s:gsub('순간%s*이동%s*%-?%s*', '')
+  s = s:gsub('순간%s*이동%s*[-–:]?%s*', '')
+  s = s:gsub('teleport%s*[-–:]?%s*', '')
+  s = s:gsub('warp%s*[-–:]?%s*', '')
+  s = s:gsub('テレポート%s*[-–：:]?%s*', '')
+  s = s:gsub('転送%s*[-–：:]?%s*', '')
   s = s:gsub('[%s%-%_·・%(%)]+', '')
   return s
 end
@@ -861,7 +865,8 @@ end
 local leaveAliases = {
   ['나가기'] = true, ['퇴장'] = true, ['밖으로'] = true, ['나가'] = true,
   ['이벤트센터나가기'] = true, ['길드홈나가기'] = true, ['길드홀나가기'] = true,
-  ['leave'] = true, ['exit'] = true
+  ['leave'] = true, ['exit'] = true, ['leavehub'] = true,
+  ['退出'] = true, ['出る'] = true, ['離脱'] = true, ['外へ'] = true
 }
 if leaveAliases[q] then
   return leaveSpecialScene(curSceneId)
@@ -870,7 +875,9 @@ end
 local guildAliases = {
   ['길드'] = true, ['길드홈'] = true, ['길드홀'] = true, ['길드거점'] = true,
   ['길드베이스'] = true, ['길드이벤트센터'] = true, ['길드센터'] = true, ['유니온'] = true,
-  ['guild'] = true, ['guildhome'] = true, ['guildhall'] = true, ['union'] = true
+  ['guild'] = true, ['guildhome'] = true, ['guildhall'] = true, ['union'] = true,
+  ['guildcenter'] = true, ['guildbase'] = true,
+  ['ギルド'] = true, ['ギルドホーム'] = true, ['ギルドホール'] = true, ['ギルド拠点'] = true, ['ユニオン'] = true
 }
 if guildAliases[q] then
   local gScene = findPrimaryUnionSceneId()
@@ -880,7 +887,8 @@ end
 local homeAliases = {
   ['마이홈'] = true, ['내집'] = true, ['개인홈'] = true, ['하우징'] = true,
   ['집'] = true, ['가든주택'] = true, ['가든정원'] = true,
-  ['home'] = true, ['myhome'] = true, ['house'] = true
+  ['home'] = true, ['myhome'] = true, ['house'] = true, ['housing'] = true, ['garden'] = true,
+  ['マイホーム'] = true, ['自宅'] = true, ['家'] = true, ['ハウジング'] = true, ['ガーデン'] = true
 }
 if homeAliases[q] then
   return enterHomeHub(40001, curSceneId, 0)
@@ -1016,7 +1024,7 @@ if unionVm then
   local gScene = findPrimaryUnionSceneId()
   local gRow = getSceneRow(gScene)
   local gName = gRow and tostring(gRow.Name or '길드 이벤트 센터') or '길드 이벤트 센터'
-  if f == '' or normText(gName):find(f, 1, true) or ('길드홈길드홀guild'):find(f, 1, true) then
+  if f == '' or normText(gName):find(f, 1, true) or ('길드홈길드홀guildギルドユニオン'):find(f, 1, true) then
     hubs[#hubs + 1] = {
       kind = 'guild_home',
       sceneId = gScene,
@@ -1034,7 +1042,7 @@ if houseVm then
   local hName = hRow and tostring(hRow.Name or '가든 주택') or '가든 주택'
   local hdata = Z.DataMgr.Get('house_data')
   local hLv = hdata and tonumber(hdata.homeLevel_ or 0) or 0
-  if f == '' or normText(hName):find(f, 1, true) or ('마이홈내집하우징home'):find(f, 1, true) then
+  if f == '' or normText(hName):find(f, 1, true) or ('마이홈내집하우징homeマイホーム自宅ハウジング'):find(f, 1, true) then
     hubs[#hubs + 1] = {
       kind = 'personal_home',
       sceneId = 40001,
@@ -1233,10 +1241,13 @@ local function norm(s)
 end
 local qNorm = norm(qRaw)
 local allowUnlock = qNorm:find('활성', 1, true) or qNorm:find('지점', 1, true)
+  or qNorm:find('activat', 1, true) or qNorm:find('unlock', 1, true) or qNorm:find('waypoint', 1, true)
+  or qNorm:find('有効', 1, true) or qNorm:find('開放', 1, true) or qNorm:find('解放', 1, true)
 
 local function hasAny(txt, arr)
+  local low = tostring(txt or ''):lower()
   for _, pat in ipairs(arr) do
-    if txt:find(pat, 1, true) then return true end
+    if low:find(pat, 1, true) then return true end
   end
   return false
 end
@@ -1245,13 +1256,22 @@ local EXCLUDE_LABELS = {
   '나가기', '꿈 끝내기', '포기', '퇴장', '드림스톤', '상자', '상점', '교환',
   '길드 이벤트 센터', '아스텔리즈로', '유성도로', '퍼레이드', '변신', '획득',
   '줍기', '낚시', '대화', '열기', '엿듣기', '조사', '질문', '채집',
-  '도전', '시작', '보물', '순찰', '소환', '수리', '보기', '읽기', '대피', 'coll.name'
+  '도전', '시작', '보물', '순찰', '소환', '수리', '보기', '읽기', '대피', 'coll.name',
+  'exit', 'give up', 'abandon', 'chest', 'shop', 'store', 'exchange',
+  'talk', 'chat', 'speak', 'inspect', 'investigate', 'gather', 'collect',
+  'fish', 'challenge', 'start', 'summon', 'repair', 'read', 'open', 'pick up',
+  '取る', '拾う', '話す', '会話', '開く', '調べる', '採集', '釣り',
+  '挑戦', '開始', '召喚', '修理', '読む', 'ショップ', '交換', '宝箱', '退出', '諦め'
 }
 local INCLUDE_LABELS = {
   '바람의 통로', '바람 통로', '바람 장치', '기류', '비행하기', '활공',
   '순간 이동', '전송실', '전장으로 이동', '구역으로 이동', '중심으로 이동',
   '상단 이동', '하단 이동', '공간 균열 진입', '안전 구역', '돌아가기',
-  '산 정상', '섬으로', '동굴로'
+  '산 정상', '섬으로', '동굴로',
+  'wind tunnel', 'wind passage', 'wind current', 'air current', 'updraft', 'glide', 'fly',
+  'teleport', 'warp', 'portal', 'transfer', 'spatial rift', 'rift', 'safe zone', 'return',
+  '風の通路', '風脈', '気流', '上昇気流', '飛行', '滑空',
+  'テレポート', 'ワープ', '転送', '空間の裂け目', '安全地帯', '戻る'
 }
 
 local function inspectActionStage(node)
@@ -1297,7 +1317,11 @@ local function inspectActionStage(node)
 end
 
 local function labelToCat(effLbl)
-  if effLbl:find('바람', 1, true) or effLbl:find('비행', 1, true) or effLbl:find('활공', 1, true) then
+  local low = tostring(effLbl or ''):lower()
+  if low:find('바람', 1, true) or low:find('비행', 1, true) or low:find('활공', 1, true)
+     or low:find('wind', 1, true) or low:find('glide', 1, true) or low:find('fly', 1, true)
+     or low:find('updraft', 1, true) or low:find('air current', 1, true)
+     or low:find('風', 1, true) or low:find('気流', 1, true) or low:find('飛行', 1, true) or low:find('滑空', 1, true) then
     return 'wind_tunnel'
   end
   return 'portal_jump'
@@ -1321,7 +1345,8 @@ local function classifyCfg(cfgId, tplId, replaceBtnId, contentStr)
     end
     if not cat then return nil, '' end
     if bestLbl == '' then bestLbl = (cat == 'wind_tunnel') and '바람의 통로' or '이동 장치' end
-    if (cached.unlockOnly or bestLbl:find('활성화', 1, true)) and not allowUnlock then return nil, '' end
+    local bestLow = bestLbl:lower()
+    if (cached.unlockOnly or bestLbl:find('활성화', 1, true) or bestLow:find('activate', 1, true) or bestLow:find('unlock', 1, true) or bestLbl:find('有効化', 1, true) or bestLbl:find('開放', 1, true) or bestLbl:find('解放', 1, true)) and not allowUnlock then return nil, '' end
     return cat, bestLbl
   end
 

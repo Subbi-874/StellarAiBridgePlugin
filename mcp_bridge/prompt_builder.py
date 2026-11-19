@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from i18n import default_persona_for_lang, normalize_ui_language, t as i18n_t
 from llm_backends import DEFAULT_PERSONA
 from policy import ClientChatSettings, normalize_channel
 
@@ -82,6 +83,7 @@ def format_recent_chat_history(
     target_channel: str,
     exclude_msg_id: Any = None,
     max_lines: int = 100,
+    lang: str = "ko",
 ) -> str:
     history_lines: list[str] = []
     for cm in messages:
@@ -100,7 +102,7 @@ def format_recent_chat_history(
         hhmmss = raw_ts[11:19] if len(raw_ts) >= 19 else ""
         prefix = f"[{hhmmss}] " if hhmmss else ""
         history_lines.append(f"{prefix}{c_name}(UID:{c_sid}): {c_txt}")
-    return "\n".join(history_lines[-max_lines:]) if history_lines else "(최근 이전 대화 없음)"
+    return "\n".join(history_lines[-max_lines:]) if history_lines else i18n_t("no_recent_chat", lang)
 
 
 def build_llm_prompts_tuple(
@@ -119,38 +121,43 @@ def build_llm_prompts_tuple(
     memory_context: str = "",
 ) -> tuple[dict[str, Any], str, str, str, str, str]:
     """Builds `(game_context, persona_block, system_instructions_block, system_prompt, user_prompt, full_cli_prompt)`."""
+    lang = normalize_ui_language(getattr(cfg, "ui_language", "ko"))
     is_cmd = bool(trig.get("is_commander", False))
     commander_status = "있음" if is_cmd else "없음"
     time_display = f"{now_dt.strftime('%Y-%m-%d %H:%M:%S')} ({korean_time})"
     unavail_list = [str(x).strip() for x in (unavailable_labels or []) if str(x).strip()]
-    goals_text = (active_goals_summary or "").strip() or "(활성 목표 없음)"
-    mem_text = (memory_context or "").strip() or "(저장된 기억 없음)"
+    goals_text = (active_goals_summary or "").strip() or i18n_t("no_active_goals", lang)
+    mem_text = (memory_context or "").strip() or i18n_t("no_memories", lang)
+    none_item = i18n_t("none_item", lang)
+    not_queried = i18n_t("not_queried", lang)
     game_context = {
         "내 캐릭터명": str(trig["local_char_name"]),
         "현재 시각": time_display,
         "내 캐릭터 상태": state_summary,
         "진행 중 목표": goals_text,
         "기억된 사실 및 최근 사건": mem_text,
-        "어드민락 잠금 항목": locked_labels if locked_labels else ["(없음)"],
-        "현재 패치로 사용 불가 기능": unavail_list if unavail_list else ["(없음)"],
+        "어드민락 잠금 항목": locked_labels if locked_labels else [none_item],
+        "현재 패치로 사용 불가 기능": unavail_list if unavail_list else [none_item],
         "온라인 파티/친구/길드원 UID 목록": online_roster_labels,
         "보유 감정표현 목록": unlocked_emote_names,
         "수신 채팅 채널": str(trig["channel"]),
         "등록된 명령권자(UID)": commanders_str,
     }
-    persona_text = (cfg.llm.persona or "").strip() or DEFAULT_PERSONA
+    persona_text = (cfg.llm.persona or "").strip() or default_persona_for_lang(lang)
+    lang_rule = i18n_t("reply_language_rule", lang)
     persona_block = (
         "<persona>\n"
         f"아래 캐릭터 페르소나(말투·성격) 지침을 기본 말투 규칙보다 최우선으로 적용해 일관되게 답변하세요:\n"
         f"{persona_text}\n"
+        f"{lang_rule}\n"
         "</persona>"
     )
 
     state_json = json.dumps(state_summary, ensure_ascii=False)
-    locked_str = ", ".join(locked_labels) if locked_labels else "(없음)"
-    unavailable_str = ", ".join(unavail_list) if unavail_list else "(없음)"
-    roster_str = ", ".join(online_roster_labels) if online_roster_labels else "(조회 없음)"
-    emotes_str = ", ".join(unlocked_emote_names) if unlocked_emote_names else "(조회 없음)"
+    locked_str = ", ".join(locked_labels) if locked_labels else none_item
+    unavailable_str = ", ".join(unavail_list) if unavail_list else none_item
+    roster_str = ", ".join(online_roster_labels) if online_roster_labels else not_queried
+    emotes_str = ", ".join(unlocked_emote_names) if unlocked_emote_names else not_queried
 
     user_base = (
         "[실시간 인게임 컨텍스트]\n"
@@ -279,18 +286,22 @@ def build_event_persona_prompts(
     channel: str,
     event_fact: str,
     is_remote_bpsr: bool,
+    lang: str = "ko",
 ) -> EventPersonaPrompts:
+    lang_code = normalize_ui_language(lang)
     synth_trig = {
         "sender_name": "시스템",
         "sender_id": 0,
         "is_commander": True,
         "text": "[인게임 작업 상태 알림]",
     }
-    persona_text = (persona or "").strip() or DEFAULT_PERSONA
+    persona_text = (persona or "").strip() or default_persona_for_lang(lang_code)
+    lang_rule = i18n_t("reply_language_rule", lang_code)
     persona_block = (
         "<persona>\n"
         f"아래 캐릭터 페르소나(말투·성격) 지침을 기본 말투 규칙보다 최우선으로 적용해 일관되게 답변하세요:\n"
         f"{persona_text}\n"
+        f"{lang_rule}\n"
         "</persona>"
     )
     sys_prompt = (
@@ -324,7 +335,9 @@ def build_consult_prompts(
     locked_labels: list[str],
     unavailable_labels: list[str],
     is_remote_bpsr: bool,
+    lang: str = "ko",
 ) -> ConsultPrompts:
+    lang_code = normalize_ui_language(lang)
     channel = str(goal_dict.get("channel") or "party")
     synth_trig = {
         "sender_name": str(goal_dict.get("requester_name") or "시스템"),
@@ -332,11 +345,13 @@ def build_consult_prompts(
         "is_commander": True,
         "text": f"[목표 예외 판단 요청: {event_name}] {event_fact}",
     }
-    persona_text = (persona or "").strip() or DEFAULT_PERSONA
+    persona_text = (persona or "").strip() or default_persona_for_lang(lang_code)
+    lang_rule = i18n_t("reply_language_rule", lang_code)
     persona_block = (
         "<persona>\n"
         f"아래 캐릭터 페르소나(말투·성격) 지침에 맞춰 필요 시 reply_text를 작성하세요:\n"
         f"{persona_text}\n"
+        f"{lang_rule}\n"
         "</persona>"
     )
     sys_prompt = (

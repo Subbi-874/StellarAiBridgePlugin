@@ -149,23 +149,30 @@ return (st == 3 or st == 7 or st == 8)
         var res = _lua.Eval(@"
 if not rawget(_G, '__agyShareHookInstalled') and Z and Z.TipsVM then
   local mtm = Z.TableMgr and Z.TableMgr.GetTable('MessageTableMgr')
+  local SHARE_KWS = {
+    '분담', '[집합]', '합류하', '집결', '모여',
+    'share', 'stack', 'gather', 'group up', 'split damage', 'soak',
+    '頭割り', '集合', '分担', '集ま', '合流'
+  }
+  local function hasShareKw(raw)
+    local low = tostring(raw or ''):lower()
+    for _, kw in ipairs(SHARE_KWS) do
+      if low:find(kw, 1, true) then return true end
+    end
+    return false
+  end
   local function inspectMsg(a, b, c)
     local hit = false
     for _, arg in ipairs({a, b, c}) do
       if type(arg) == 'number' and arg > 0 and mtm and mtm.GetRow then
         local okR, row = pcall(function() return mtm.GetRow(arg, true) end)
-        if okR and row and row.Content then
-          local txt = tostring(row.Content)
-          if txt:find('분담', 1, true) or txt:find('[집합]', 1, true) or txt:find('합류하', 1, true) or txt:find('집결', 1, true) then
-            hit = true
-            break
-          end
-        end
-      elseif type(arg) == 'string' then
-        if arg:find('분담', 1, true) or arg:find('[집합]', 1, true) or arg:find('합류하', 1, true) then
+        if okR and row and row.Content and hasShareKw(row.Content) then
           hit = true
           break
         end
+      elseif type(arg) == 'string' and hasShareKw(arg) then
+        hit = true
+        break
       end
     end
     if hit then

@@ -34,6 +34,7 @@ jobs:
         run: |
           python -m py_compile \
             mcp_bridge/config.py \
+            mcp_bridge/i18n.py \
             mcp_bridge/hub.py \
             mcp_bridge/llm_backends.py \
             mcp_bridge/api_tool_loop.py \

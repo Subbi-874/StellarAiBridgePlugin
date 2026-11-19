@@ -66,6 +66,7 @@ public sealed class Plugin : IStellarPlugin
     private readonly TraversalGimmickService _traversal;
     private readonly CombatEvadeService _combatEvade;
     private readonly AutoCameraGuardService _cameraGuard;
+    private readonly EcoModeService _ecoMode;
     private readonly BehaviorRunner _behaviors;
     private readonly CommandRegistry _commands;
     private readonly BridgeWebSocketClient _wsClient;
@@ -83,7 +84,7 @@ public sealed class Plugin : IStellarPlugin
     public Plugin(IPluginServices services)
     {
         _services = services;
-        _config = new BridgeConfig(_services.Config);
+        _config = new BridgeConfig(_services.Config, _services.Localization);
         _dispatcher = new MainThreadDispatcher(_services.Log);
         _lua = new LuaBridge(_services);
         _worldGuard = new WorldAccessGuard(_services, _lua);
@@ -94,7 +95,7 @@ public sealed class Plugin : IStellarPlugin
         _externalPluginAdapter = new ExternalPluginAdapter(_services, _lua, _worldGuard);
         _itemAdapter = new LuaItemAdapter(_services, _lua, _worldGuard);
         _movementAdapter = new LuaMovementAdapter(_services, _lua, _worldGuard);
-        _capabilities = new CapabilityRegistry(_services.Log, _worldGuard);
+        _capabilities = new CapabilityRegistry(_services.Log, _worldGuard, _services.Localization);
         _capabilities.RegisterProbe(_combatAdapter);
         _capabilities.RegisterProbe(_characterAdapter);
         _capabilities.RegisterProbe(_dungeonAdapter);
@@ -143,6 +144,7 @@ public sealed class Plugin : IStellarPlugin
             new ZPhysicsSensor(_services),
             () => _behaviors.Current);
         _cameraGuard = new AutoCameraGuardService(_services, _config, _world, _autoCombat, _behaviors);
+        _ecoMode = new EcoModeService(_services, _config);
 
         _wsClient = new BridgeWebSocketClient(_services.Log, _config, _dispatcher, _commands, _capabilities.BuildStatusJson, BuildIdentitySnapshotJson);
         _uiWindow = new AgyBridgeUiWindow(
@@ -158,7 +160,8 @@ public sealed class Plugin : IStellarPlugin
             _autoGather,
             _traversal,
             _wsClient,
-            _capabilities);
+            _capabilities,
+            _ecoMode);
 
         CoreCommands.RegisterAll(
             _commands,
@@ -180,6 +183,7 @@ public sealed class Plugin : IStellarPlugin
             _traversal,
             _cameraGuard,
             _capabilities,
+            _ecoMode,
             _uiWindow.MarkDirty);
 
         ExtendedCommands.RegisterAll(
@@ -213,6 +217,7 @@ public sealed class Plugin : IStellarPlugin
         _behaviors.BehaviorFinished += OnBehaviorFinished;
         _capabilities.CapabilitiesUpdated += OnCapabilitiesUpdated;
         _config.ChatSettingsChanged += OnUiChatSettingsChanged;
+        _services.Localization.LanguageChanged += OnUiChatSettingsChanged;
         _config.FeatureModeChanged += OnFeatureModeChanged;
 
         EnforceRunInBackground();
@@ -222,7 +227,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v0.9.22. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v1.0.0. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeatureModeChanged(string key, FeatureGateMode mode)
@@ -305,6 +310,8 @@ public sealed class Plugin : IStellarPlugin
         _revive.Tick(deltaTime);
         _interaction.Tick(deltaTime);
         _autoReady.Tick(deltaTime);
+        bool ecoActivityActive = _behaviors.Current != null || _moveDriver.IsDriving || _autoCombat.LastKnownInGameEnabled;
+        _ecoMode.Tick(deltaTime, ecoActivityActive, _identity.InWorld);
         _uiWindow.TickPendingEdits();
     }
 
@@ -417,12 +424,14 @@ public sealed class Plugin : IStellarPlugin
     {
         _services.Framework.Update -= OnUpdate;
         _config.FeatureModeChanged -= OnFeatureModeChanged;
+        _services.Localization.LanguageChanged -= OnUiChatSettingsChanged;
         _config.ChatSettingsChanged -= OnUiChatSettingsChanged;
         _capabilities.CapabilitiesUpdated -= OnCapabilitiesUpdated;
         _behaviors.BehaviorFinished -= OnBehaviorFinished;
         _world.UnsubscribeEvents(_wsClient.PushEvent);
         _autoReady.Dispose();
         _uiWindow.Dispose();
+        _ecoMode.Dispose();
         _wsClient.Dispose();
         _cameraGuard.Dispose();
         _combatEvade.Dispose();

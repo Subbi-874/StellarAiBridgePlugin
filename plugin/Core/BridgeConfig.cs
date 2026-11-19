@@ -42,6 +42,7 @@ public sealed record CommanderRecord(long Uid, string Name)
 public sealed class BridgeConfig
 {
     private readonly IConfigSection _cfg;
+    private readonly ILocalization? _loc;
 
     public string BridgeUrl { get; private set; }
     public string AuthToken { get; private set; }
@@ -123,7 +124,8 @@ public sealed class BridgeConfig
     public IReadOnlyList<string> AuthorizedCommanders => CommanderEntries.Select(c => c.ToConfigToken()).ToList();
 
     // Per-client LLM backend, local CLI flavor, API endpoint/key & editable character persona
-    public const string DefaultLlmPersona = "존댓말을 써서 과하지 않은 젊은 영애 아가씨처럼 친절하고 자연스럽게 대화하세요. 반말과 존댓말을 섞어 쓰지 마세요.";
+    public const string DefaultLlmPersona = "당신은 블루 프로토콜 스타 레조넌스를 플레이 하는 유저입니다.";
+    public string ActiveUiLanguage => _loc?.Language ?? "en";
     public string LlmBackend { get; set; } // "local_agent" | "openai_api" | "gemini_api"
     public string LlmCliFlavor { get; set; } // "agy" | "claude" | "codex" | "gemini" | "custom"
     public string LlmEndpointUrl { get; set; }
@@ -135,13 +137,16 @@ public sealed class BridgeConfig
     public bool LlmSendSystemPrompt { get; set; }
     public float UiFrameOpacity { get; set; }
     public bool UiV2LayoutMigrated { get; set; }
+    public string EcoMode { get; set; } // "off" | "standard" | "ultra"
+    public bool EcoAutoPauseOnFocus { get; set; }
 
     public event Action? ChatSettingsChanged;
     public event Action<string, FeatureGateMode>? FeatureModeChanged;
 
-    public BridgeConfig(IPluginConfig config)
+    public BridgeConfig(IPluginConfig config, ILocalization? localization = null)
     {
         _cfg = config.GetSection("bridge");
+        _loc = localization;
         BridgeUrl = _cfg.Get<string>("bridge_url", "ws://127.0.0.1:18765/ws") ?? "ws://127.0.0.1:18765/ws";
         AuthToken = _cfg.Get<string>("auth_token", "") ?? "";
         ReconnectDelayMs = _cfg.Get<int>("reconnect_delay_ms", 2000);
@@ -273,12 +278,22 @@ public sealed class BridgeConfig
         LlmCliCommand = (_cfg.Get<string>("llm_cli_command", "") ?? "").Trim();
         string rawEffort = (_cfg.Get<string>("llm_cli_effort", "low") ?? "low").Trim().ToLowerInvariant();
         LlmCliEffort = rawEffort is "low" or "medium" or "high" ? rawEffort : "low";
-        string rawPersona = _cfg.Get<string>("llm_persona", DefaultLlmPersona) ?? DefaultLlmPersona;
-        LlmPersona = string.IsNullOrWhiteSpace(rawPersona) ? DefaultLlmPersona : rawPersona.Trim();
+        string fallbackPersona = DefaultLlmPersona;
+        if (_loc != null)
+        {
+            string locPersona = _loc.T("ai.default_persona");
+            if (!string.Equals(locPersona, "ai.default_persona", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(locPersona))
+                fallbackPersona = locPersona.Trim();
+        }
+        string rawPersona = _cfg.Get<string>("llm_persona", fallbackPersona) ?? fallbackPersona;
+        LlmPersona = string.IsNullOrWhiteSpace(rawPersona) ? fallbackPersona : rawPersona.Trim();
         LlmSendSystemPrompt = _cfg.Get<bool>("llm_send_system_prompt", true);
         float rawOpacity = _cfg.Get<float>("ui_frame_opacity", 0.96f);
         UiFrameOpacity = float.IsNaN(rawOpacity) ? 0.96f : Math.Clamp(rawOpacity, 0.55f, 1.0f);
         UiV2LayoutMigrated = _cfg.Get<bool>("ui_v2_layout_migrated", false);
+        string rawEco = (_cfg.Get<string>("eco_mode", "off") ?? "off").Trim().ToLowerInvariant();
+        EcoMode = rawEco is "off" or "standard" or "ultra" ? rawEco : "off";
+        EcoAutoPauseOnFocus = _cfg.Get<bool>("eco_auto_pause_on_focus", true);
 
         Save();
     }
@@ -293,6 +308,17 @@ public sealed class BridgeConfig
     public bool IsFeatureEnabled(string key) => GetFeatureMode(key) == FeatureGateMode.Enabled;
     public bool IsAdminLocked(string key) => GetFeatureMode(key) == FeatureGateMode.AdminLock;
 
+    private string LocFormat(string key, string fallbackTemplate, params object[] args)
+    {
+        if (_loc != null)
+        {
+            string val = _loc.TFormat(key, args);
+            if (!string.Equals(val, key, StringComparison.Ordinal))
+                return val;
+        }
+        return args.Length == 0 ? fallbackTemplate : string.Format(CultureInfo.InvariantCulture, fallbackTemplate, args);
+    }
+
     public bool CheckFeatureExecution(string key, out string error)
     {
         var mode = GetFeatureMode(key);
@@ -301,10 +327,10 @@ public sealed class BridgeConfig
             error = "";
             return true;
         }
-        string label = FeaturePolicyCatalog.Find(key)?.Label ?? key;
+        string label = FeaturePolicyCatalog.GetLocalizedLabel(key, _loc);
         error = mode == FeatureGateMode.AdminLock
-            ? $"'{label}' 기능은 어드민락(2) 잠금 상태이므로 실행할 수 없습니다."
-            : $"'{label}' 기능이 비활성(0) 상태입니다.";
+            ? LocFormat("policy.err.admin_locked_fmt", "'{0}' 기능은 어드민락(2) 잠금 상태이므로 실행할 수 없습니다.", label)
+            : LocFormat("policy.err.disabled_fmt", "'{0}' 기능이 비활성(0) 상태입니다.", label);
         return false;
     }
 
@@ -313,19 +339,20 @@ public sealed class BridgeConfig
         var desc = FeaturePolicyCatalog.Find(key);
         if (desc == null)
         {
-            error = $"알 수 없는 기능 키: {key}";
+            error = LocFormat("policy.err.unknown_key_fmt", "알 수 없는 기능 키: {0}", key);
             return false;
         }
 
+        string label = FeaturePolicyCatalog.GetLocalizedLabel(desc.Key, _loc);
         var cur = GetFeatureMode(desc.Key);
         if (cur == FeatureGateMode.AdminLock && origin != CommandOrigin.AdminLayoutUi)
         {
-            error = $"'{desc.Label}' 기능은 어드민락(2)으로 잠겨 있어 변경할 수 없습니다. (스텔라 어드민락/레이아웃 설정창에서만 해제 가능)";
+            error = LocFormat("policy.err.locked_change_fmt", "'{0}' 기능은 어드민락(2)으로 잠겨 있어 변경할 수 없습니다. (스텔라 어드민락/레이아웃 설정창에서만 해제 가능)", label);
             return false;
         }
         if (nextMode == FeatureGateMode.AdminLock && origin != CommandOrigin.AdminLayoutUi)
         {
-            error = "어드민락(2) 지정은 인게임 스텔라 어드민락/레이아웃 설정창에서만 가능합니다.";
+            error = LocFormat("policy.err.lock_only_admin", "어드민락(2) 지정은 인게임 스텔라 어드민락/레이아웃 설정창에서만 가능합니다.");
             return false;
         }
 
@@ -594,6 +621,7 @@ public sealed class BridgeConfig
 
         return new JsonObject
         {
+            ["ui_language"] = ActiveUiLanguage,
             ["enabled"] = ChatMonitorEnabled,
             ["channels"] = chArr,
             ["permission_mode"] = CommandPermissionMode,
@@ -828,6 +856,8 @@ public sealed class BridgeConfig
         _cfg.Set("llm_send_system_prompt", LlmSendSystemPrompt);
         _cfg.Set("ui_frame_opacity", UiFrameOpacity);
         _cfg.Set("ui_v2_layout_migrated", UiV2LayoutMigrated);
+        _cfg.Set("eco_mode", EcoMode);
+        _cfg.Set("eco_auto_pause_on_focus", EcoAutoPauseOnFocus);
 
         foreach (var desc in FeaturePolicyCatalog.All)
         {

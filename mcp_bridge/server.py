@@ -136,8 +136,8 @@ def _try_stage_latest_dll() -> None:
                     aside = slot_dir / f"Stellar.AgyBridge.old_{int(time.time() * 1000)}"
                     dest.rename(aside)
                     shutil.copy2(built, dest)
-                (slot_dir / ".plugin-version").write_text("0.9.26", encoding="utf-8")
-                logger.info("Auto-deployed latest Stellar.AgyBridge.dll (v0.9.26) to %s", dest)
+                (slot_dir / ".plugin-version").write_text("1.0.0", encoding="utf-8")
+                logger.info("Auto-deployed latest Stellar.AgyBridge.dll (v1.0.0) to %s", dest)
         except OSError as exc:
             logger.debug("Auto-deploy DLL skipped for %s: %s", slot_dir, exc)
 
@@ -1274,6 +1274,30 @@ async def list_gimmicks(query: str = "", radius: float = 45.0) -> str:
 async def use_gimmick(query: str = "") -> str:
     """Approaches and activates a nearby traversal field/dungeon gimmick (e.g. '바람의 통로', '순간 이동', or nearest available if query is empty)."""
     res = await invoke_game("use_gimmick", {"gimmick": query})
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def set_eco_mode(
+    mode: str = "standard",
+    auto_pause_on_focus: bool | None = None,
+    persist: bool = True,
+) -> str:
+    """Switches in-game resource saving mode ('off' | 'standard' | 'ultra' black-screen + texture mipmap + OnDemandRendering throttle)."""
+    params: dict[str, Any] = {"mode": mode, "persist": persist}
+    if auto_pause_on_focus is not None:
+        params["auto_pause_on_focus"] = auto_pause_on_focus
+    res = await invoke_game("set_eco_mode", params)
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def trim_memory(empty_working_set: bool = True, unload_assets: bool = True) -> str:
+    """Runs Unity Resources.UnloadUnusedAssets and Win32 EmptyWorkingSet inside the active game client."""
+    res = await invoke_game(
+        "trim_memory",
+        {"empty_working_set": empty_working_set, "unload_assets": unload_assets},
+    )
     return json.dumps(res, ensure_ascii=False, indent=2)
 
 

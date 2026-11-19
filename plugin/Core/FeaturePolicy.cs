@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Stellar.Abstractions.Services;
 
 namespace Stellar.AgyBridge.Core;
 
@@ -78,11 +79,11 @@ public static class FeaturePolicyKeys
     {
         return (rawChannel ?? "").Trim().ToLowerInvariant() switch
         {
-            "world" or "월드" or "전체" => SendWorld,
-            "say" or "local" or "current" or "일반" or "주변" => SendSay,
-            "guild" or "union" or "길드" => SendGuild,
-            "party" or "team" or "파티" => SendParty,
-            "whisper" or "private" or "귓속말" => SendWhisper,
+            "world" or "월드" or "전체" or "ワールド" or "全体" => SendWorld,
+            "say" or "local" or "current" or "일반" or "주변" or "通常" or "周囲" => SendSay,
+            "guild" or "union" or "길드" or "ギルド" or "ユニオン" => SendGuild,
+            "party" or "team" or "파티" or "パーティ" or "pt" => SendParty,
+            "whisper" or "private" or "귓속말" or "ささやき" or "密談" => SendWhisper,
             _ => SendParty
         };
     }
@@ -139,4 +140,13 @@ public static class FeaturePolicyCatalog
 
     public static FeaturePolicyDescriptor? Find(string key)
         => ByKey.TryGetValue(key ?? "", out var desc) ? desc : null;
+
+    public static string GetLocalizedLabel(string key, ILocalization? loc)
+    {
+        string fallback = Find(key)?.Label ?? key;
+        if (loc == null) return fallback;
+        string locKey = $"policy.{key}";
+        string val = loc.T(locKey);
+        return string.Equals(val, locKey, StringComparison.Ordinal) ? fallback : val;
+    }
 }

@@ -31,3 +31,8 @@ _backup_pre_v080/
 # Local planning notes
 /TODO.md
 /개선점.md
+
+# Portable embedded Python runtime & packaged release bundles
+runtime/
+mcp_bridge/runtime/
+dist/

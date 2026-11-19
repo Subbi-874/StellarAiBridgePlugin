@@ -100,6 +100,12 @@ _FOCUS_OR_EARLY_KEYWORDS: tuple[str, ...] = (
     "집중",
     "stamina",
     "스태미나",
+    "vigor",
+    "energy",
+    "集中",
+    "集中力",
+    "スタミナ",
+    "活力",
 )
 
 
