@@ -7,10 +7,16 @@ namespace Stellar.AgyBridge.Commands;
 public sealed class CommandRegistry
 {
     private readonly Dictionary<string, IBridgeCommand> _commands = new(StringComparer.OrdinalIgnoreCase);
+    private Func<string, JsonObject?>? _preDispatchGuard;
 
     public void Register(IBridgeCommand command)
     {
         _commands[command.Method] = command;
+    }
+
+    public void SetPreDispatchGuard(Func<string, JsonObject?>? guard)
+    {
+        _preDispatchGuard = guard;
     }
 
     public IReadOnlyCollection<string> RegisteredMethods => _commands.Keys;
@@ -32,6 +38,11 @@ public sealed class CommandRegistry
                 ["ok"] = false,
                 ["error"] = $"Unknown command '{method}'"
             };
+        }
+
+        if (_preDispatchGuard?.Invoke(method) is JsonObject blocked)
+        {
+            return Detach(blocked);
         }
 
         try

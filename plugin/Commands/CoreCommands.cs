@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Adapters;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Core;
 using Stellar.AgyBridge.Fishing;
@@ -50,6 +51,7 @@ public static class CoreCommands
         CombatEvadeService combatEvade,
         TraversalGimmickService traversal,
         AutoCameraGuardService cameraGuard,
+        CapabilityRegistry capabilities,
         Action? onUiStateChanged = null)
     {
         registry.Register(new DelegateBridgeCommand("ping", _ => new JsonObject
@@ -80,9 +82,18 @@ public static class CoreCommands
             ["feature_modes"] = config.ToFeaturePoliciesJson(),
             ["autogather_available"] = autoGather.IsAvailable,
             ["autofishing_available"] = autoFishing.IsAvailable,
+            ["capabilities"] = capabilities.BuildStatusJson(),
             ["smart_pathfinding"] = config.EnableSmartPathfinding,
             ["nav_mode"] = boost.PathNavigator.ActiveNavMode,
             ["move_inject_path"] = moveDriver.InjectPath
+        }));
+
+        registry.Register(new DelegateBridgeCommand("get_capabilities", p =>
+        {
+            bool refresh = p?["refresh"]?.GetValue<bool>() ?? false;
+            var cap = refresh ? capabilities.ForceReprobeInWorld() : capabilities.BuildStatusJson();
+            cap["ok"] = true;
+            return cap;
         }));
 
         registry.Register(new DelegateBridgeCommand("get_feature_policies", _ => new JsonObject

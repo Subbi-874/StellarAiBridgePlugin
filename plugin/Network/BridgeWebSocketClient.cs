@@ -17,6 +17,7 @@ public sealed class BridgeWebSocketClient : IDisposable
     private readonly BridgeConfig _config;
     private readonly MainThreadDispatcher _dispatcher;
     private readonly CommandRegistry _commands;
+    private readonly Func<JsonObject>? _capabilitiesProvider;
 
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _sendLock = new(1, 1);
@@ -29,12 +30,14 @@ public sealed class BridgeWebSocketClient : IDisposable
         IPluginLog log,
         BridgeConfig config,
         MainThreadDispatcher dispatcher,
-        CommandRegistry commands)
+        CommandRegistry commands,
+        Func<JsonObject>? capabilitiesProvider = null)
     {
         _log = log;
         _config = config;
         _dispatcher = dispatcher;
         _commands = commands;
+        _capabilitiesProvider = capabilitiesProvider;
     }
 
     public void Start()
@@ -77,11 +80,12 @@ public sealed class BridgeWebSocketClient : IDisposable
                 {
                     ["type"] = "hello",
                     ["plugin"] = "Stellar.AgyBridge",
-                    ["version"] = "0.9.15",
+                    ["version"] = "0.9.16",
                     ["pid"] = Environment.ProcessId,
                     ["game_dir"] = Environment.CurrentDirectory,
                     ["methods"] = methodsArr,
-                    ["chat_settings"] = _config.ToChatSettingsJson()
+                    ["chat_settings"] = _config.ToChatSettingsJson(),
+                    ["capabilities"] = _capabilitiesProvider?.Invoke() ?? new JsonObject()
                 };
                 await SendTextSafeAsync(hello.ToJsonString()).ConfigureAwait(false);
 

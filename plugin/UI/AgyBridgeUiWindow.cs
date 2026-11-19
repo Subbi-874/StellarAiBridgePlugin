@@ -6,6 +6,7 @@ using System.IO.Compression;
 using System.Text;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Adapters;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Core;
 using Stellar.AgyBridge.Gathering;
@@ -87,6 +88,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private readonly AutoGatherIntegration _autoGather;
     private readonly TraversalGimmickService _traversal;
     private readonly BridgeWebSocketClient _wsClient;
+    private readonly CapabilityRegistry _capabilities;
 
     private IWindowControl? _window;
     private IWindowControl? _adminWindow;
@@ -141,7 +143,8 @@ public sealed class AgyBridgeUiWindow : IDisposable
         PartyManagerService party,
         AutoGatherIntegration autoGather,
         TraversalGimmickService traversal,
-        BridgeWebSocketClient wsClient)
+        BridgeWebSocketClient wsClient,
+        CapabilityRegistry capabilities)
     {
         _services = services;
         _config = config;
@@ -155,6 +158,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
         _autoGather = autoGather;
         _traversal = traversal;
         _wsClient = wsClient;
+        _capabilities = capabilities;
 
         RegisterUi();
     }
@@ -798,6 +802,24 @@ public sealed class AgyBridgeUiWindow : IDisposable
         var activeDetailText = new TextElement(
             GetActiveBehaviorSummary,
             () => accentColor,
+            false,
+            0f,
+            TextAlign.Left,
+            true);
+
+        var errorRedColor = new ColorRgba(0.98f, 0.45f, 0.36f, 1.0f);
+        var capabilityStatusText = new TextElement(
+            () => _capabilities.GetUiSummary(out _),
+            () =>
+            {
+                _capabilities.GetUiSummary(out var st);
+                return st switch
+                {
+                    CapabilityState.Available => greenColor,
+                    CapabilityState.Missing => errorRedColor,
+                    _ => amberColor
+                };
+            },
             false,
             0f,
             TextAlign.Left,
@@ -1736,6 +1758,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
         {
             statusRow,
             activeDetailText,
+            capabilityStatusText,
             new SeparatorElement(false),
             followHeader,
             currentFollowLabel,

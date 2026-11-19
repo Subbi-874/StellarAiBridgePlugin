@@ -175,6 +175,22 @@ class GameBridgeHub:
                             except Exception as cb_exc:
                                 logger.warning("Hello listener error: %s", cb_exc)
 
+                    if isinstance(msg.get("capabilities"), dict):
+                        cap_evt = {
+                            "type": "event",
+                            "conn_id": conn_id,
+                            "event": "capabilities_updated",
+                            "data": msg["capabilities"],
+                            "received_at": time.time(),
+                        }
+                        for listener in list(self._event_listeners):
+                            try:
+                                res = listener(cap_evt)
+                                if asyncio.iscoroutine(res):
+                                    asyncio.create_task(res)
+                            except Exception as cb_exc:
+                                logger.warning("Hello capabilities listener error: %s", cb_exc)
+
                 elif msg_type == "response":
                     req_id = str(msg.get("id", ""))
                     entry = self._pending.pop(req_id, None)

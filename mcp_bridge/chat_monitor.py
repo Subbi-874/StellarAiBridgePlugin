@@ -300,6 +300,7 @@ class ClientChatSettings:
     legacy_commander_names: set[str] = field(default_factory=set)
     feature_modes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FEATURE_MODES))
     llm: LlmClientConfig = field(default_factory=LlmClientConfig)
+    unavailable_capabilities: list[str] = field(default_factory=list)
 
     def set_commanders_from_tokens(
         self,
@@ -551,6 +552,15 @@ class ChatMonitorService:
                 self.apply_ui_settings(conn_id, data)
             return
 
+        if ev_name == "capabilities_updated":
+            data = event_msg.get("data")
+            if isinstance(data, dict):
+                cfg = self._client_cfgs.setdefault(conn_id, ClientChatSettings()) if conn_id else self._default_cfg
+                raw_missing = data.get("missing_labels")
+                if isinstance(raw_missing, list):
+                    cfg.unavailable_capabilities = [str(x).strip() for x in raw_missing if str(x).strip()]
+            return
+
         if ev_name in (
             "follow_cancelled",
             "monster_seek_arrived",
@@ -688,16 +698,19 @@ class ChatMonitorService:
         recent_chat_block: str,
         now_dt: datetime,
         korean_time: str,
+        unavailable_labels: list[str] | None = None,
     ) -> tuple[dict[str, Any], str, str, str, str, str]:
         """Builds `(game_context, persona_block, system_instructions_block, system_prompt, user_prompt, full_cli_prompt)`."""
         is_cmd = bool(trig.get("is_commander", False))
         commander_status = "있음" if is_cmd else "없음"
         time_display = f"{now_dt.strftime('%Y-%m-%d %H:%M:%S')} ({korean_time})"
+        unavail_list = [str(x).strip() for x in (unavailable_labels or []) if str(x).strip()]
         game_context = {
             "내 캐릭터명": str(trig["local_char_name"]),
             "현재 시각": time_display,
             "내 캐릭터 상태": state_summary,
             "어드민락 잠금 항목": locked_labels if locked_labels else ["(없음)"],
+            "현재 패치로 사용 불가 기능": unavail_list if unavail_list else ["(없음)"],
             "온라인 파티/친구/길드원 UID 목록": online_roster_labels,
             "보유 감정표현 목록": unlocked_emote_names,
             "수신 채팅 채널": str(trig["channel"]),
@@ -713,6 +726,7 @@ class ChatMonitorService:
 
         state_json = json.dumps(state_summary, ensure_ascii=False)
         locked_str = ", ".join(locked_labels) if locked_labels else "(없음)"
+        unavailable_str = ", ".join(unavail_list) if unavail_list else "(없음)"
         roster_str = ", ".join(online_roster_labels) if online_roster_labels else "(조회 없음)"
         emotes_str = ", ".join(unlocked_emote_names) if unlocked_emote_names else "(조회 없음)"
 
@@ -722,6 +736,7 @@ class ChatMonitorService:
             f"- 현재 시각: {time_display}\n"
             f"- 내 캐릭터 상태: {state_json}\n"
             f"- 어드민락(🔒) 잠금 항목: {locked_str}\n"
+            f"- 현재 패치로 사용 불가 기능: {unavailable_str}\n"
             f"- 온라인 파티/친구/길드원 UID 목록: {roster_str}\n"
             f"- 보유 감정표현 목록: {emotes_str}\n"
             f"- 수신 채팅 채널: {trig['channel']}\n"
@@ -765,6 +780,7 @@ class ChatMonitorService:
                     "korean_time": korean_time,
                     "state_summary_json": state_json,
                     "locked_labels": locked_str,
+                    "unavailable_labels": unavailable_str,
                     "online_roster": roster_str,
                     "unlocked_emotes": emotes_str,
                     "channel": str(trig["channel"]),
@@ -1211,6 +1227,10 @@ class ChatMonitorService:
                     if v == 2
                 ]
 
+                cap_missing = (st.get("capabilities") or {}).get("missing_labels") if isinstance(st, dict) else None
+                if isinstance(cap_missing, list):
+                    cfg.unavailable_capabilities = [str(x).strip() for x in cap_missing if str(x).strip()]
+
                 state_summary = {
                     "scene_name": (st.get("state") or {}).get("scene_name"),
                     "line_id": (st.get("state") or {}).get("line_id"),
@@ -1240,6 +1260,7 @@ class ChatMonitorService:
                     recent_chat_block,
                     now_dt,
                     korean_time,
+                    unavailable_labels=cfg.unavailable_capabilities,
                 )
                 raw_out, timed_out = await self._invoke_llm(
                     cfg.llm,

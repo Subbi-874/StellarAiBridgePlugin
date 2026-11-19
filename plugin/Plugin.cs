@@ -2,6 +2,7 @@ using System;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Plugins;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Adapters;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Character;
 using Stellar.AgyBridge.Commands;
@@ -25,6 +26,8 @@ public sealed class Plugin : IStellarPlugin
     private readonly BridgeConfig _config;
     private readonly MainThreadDispatcher _dispatcher;
     private readonly LuaBridge _lua;
+    private readonly WorldAccessGuard _worldGuard;
+    private readonly CapabilityRegistry _capabilities;
     private readonly PlayerMoveDriver _moveDriver;
     private readonly LocomotionBoostController _boost;
     private readonly WorldStateService _world;
@@ -61,6 +64,10 @@ public sealed class Plugin : IStellarPlugin
         _config = new BridgeConfig(_services.Config);
         _dispatcher = new MainThreadDispatcher(_services.Log);
         _lua = new LuaBridge(_services);
+        _worldGuard = new WorldAccessGuard(_services, _lua);
+        _capabilities = new CapabilityRegistry(_services.Log, _worldGuard);
+        _capabilities.RegisterProbe(new BaselineCapabilityProbe(_services, _lua, _worldGuard));
+        _capabilities.RunLoadTimeProbes();
         _moveDriver = new PlayerMoveDriver(_services);
         _boost = new LocomotionBoostController(_services, _config, _lua);
         _world = new WorldStateService(_services, _config, _lua);
@@ -75,6 +82,7 @@ public sealed class Plugin : IStellarPlugin
         _autoGather = new AutoGatherIntegration(_services, _lua);
         _behaviors = new BehaviorRunner(_services, _moveDriver);
         _commands = new CommandRegistry();
+        _commands.SetPreDispatchGuard(_capabilities.CheckCommandCapability);
 
         _asyncTasks = new AsyncTaskRegistry();
         _revive = new ReviveService(_services, _config, _lua, _world);
@@ -101,7 +109,7 @@ public sealed class Plugin : IStellarPlugin
             () => _behaviors.Current);
         _cameraGuard = new AutoCameraGuardService(_services, _config, _world, _autoCombat, _behaviors);
 
-        _wsClient = new BridgeWebSocketClient(_services.Log, _config, _dispatcher, _commands);
+        _wsClient = new BridgeWebSocketClient(_services.Log, _config, _dispatcher, _commands, _capabilities.BuildStatusJson);
         _uiWindow = new AgyBridgeUiWindow(
             _services,
             _config,
@@ -114,7 +122,8 @@ public sealed class Plugin : IStellarPlugin
             _party,
             _autoGather,
             _traversal,
-            _wsClient);
+            _wsClient,
+            _capabilities);
 
         CoreCommands.RegisterAll(
             _commands,
@@ -135,6 +144,7 @@ public sealed class Plugin : IStellarPlugin
             _combatEvade,
             _traversal,
             _cameraGuard,
+            _capabilities,
             _uiWindow.MarkDirty);
 
         ExtendedCommands.RegisterAll(
@@ -163,6 +173,7 @@ public sealed class Plugin : IStellarPlugin
             _uiWindow.MarkDirty);
 
         _world.SubscribeEvents(_wsClient.PushEvent);
+        _capabilities.CapabilitiesUpdated += OnCapabilitiesUpdated;
         _config.ChatSettingsChanged += OnUiChatSettingsChanged;
         _config.FeatureModeChanged += OnFeatureModeChanged;
 
@@ -173,7 +184,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v0.9.15. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v0.9.16. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeatureModeChanged(string key, FeatureGateMode mode)
@@ -207,6 +218,17 @@ public sealed class Plugin : IStellarPlugin
         _uiWindow.MarkDirty();
     }
 
+    private void OnCapabilitiesUpdated()
+    {
+        _wsClient.PushEvent(new JsonObject
+        {
+            ["type"] = "event",
+            ["event"] = "capabilities_updated",
+            ["data"] = _capabilities.BuildStatusJson()
+        });
+        _uiWindow.MarkDirty();
+    }
+
     private void OnUiChatSettingsChanged()
     {
         _wsClient.PushEvent(new JsonObject
@@ -227,6 +249,7 @@ public sealed class Plugin : IStellarPlugin
         }
 
         _dispatcher.Drain();
+        _capabilities.Tick(deltaTime);
         _behaviors.Tick(deltaTime);
         _combatEvade.Tick(deltaTime);
         _boost.TickReleasesOnly(deltaTime);
@@ -257,6 +280,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update -= OnUpdate;
         _config.FeatureModeChanged -= OnFeatureModeChanged;
         _config.ChatSettingsChanged -= OnUiChatSettingsChanged;
+        _capabilities.CapabilitiesUpdated -= OnCapabilitiesUpdated;
         _world.UnsubscribeEvents(_wsClient.PushEvent);
         _autoReady.Dispose();
         _uiWindow.Dispose();
