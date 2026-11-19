@@ -40,6 +40,8 @@ def infer_behavior_kind(action_type: str) -> str:
         "fish": "fish_at_spot",
         "seek_monster": "seek_monster",
         "use_gimmick": "use_gimmick",
+        "craft_item": "craft_item",
+        "farm_monster_item": "farm_monster_item",
     }
     return mapping.get(action_type, action_type)
 
@@ -370,6 +372,7 @@ class GoalManager:
         self.pending_preemption: tuple[Goal, Goal] | None = None
         self.waiting_for_behavior_stop: bool = False
         self.pending_start_goal_id: str | None = None
+        self.pending_craft_confirm: dict[str, Any] | None = None
         self.recent_finished: deque[Goal] = deque(maxlen=25)
         self.autonomous = AutonomousConfig()
 
@@ -724,6 +727,7 @@ class GoalManager:
                 else None
             ),
             "waiting_for_behavior_stop": self.waiting_for_behavior_stop,
+            "pending_craft_confirm": dict(self.pending_craft_confirm) if self.pending_craft_confirm else None,
             "autonomous": self.autonomous.to_dict(),
             "recent_finished": [g.to_dict() for g in list(self.recent_finished)[-5:]],
         }

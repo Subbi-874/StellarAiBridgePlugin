@@ -45,6 +45,7 @@
               "set_goal",
               "cancel_goal",
               "list_goals",
+              "craft_goal",
               "remember",
               "forget"
             ]
@@ -234,6 +235,18 @@
           },
           "memory_id": {
             "type": "integer"
+          },
+          "item": {
+            "type": "string"
+          },
+          "recipe_id": {
+            "type": "integer"
+          },
+          "allow_monster_farm": {
+            "type": "boolean"
+          },
+          "confirm_monster_farm": {
+            "type": "boolean"
           }
         },
         "required": [

@@ -324,6 +324,65 @@ def main() -> None:
     p_pe = add_cmd("emote", help="Play or stop an emote")
     p_pe.add_argument("name")
 
+    p_goals = add_cmd("goals", help="Show active, paused, and queued GoalManager state for the bot")
+    p_goals.add_argument("--char-id", type=int, default=0)
+
+    p_cg = add_cmd("cancel-goal", help="Cancel a specific goal or all goals")
+    p_cg.add_argument("--goal-id", default="")
+    p_cg.add_argument("--all", dest="cancel_all", action="store_true")
+    p_cg.add_argument("--char-id", type=int, default=0)
+
+    p_auto = add_cmd("autonomous", help="Enable or disable per-bot autonomous idle mode")
+    p_auto.add_argument("state", choices=["on", "off", "true", "false", "1", "0"])
+    p_auto.add_argument("--grace", type=float, default=None)
+    p_auto.add_argument("--char-id", type=int, default=0)
+
+    p_mem = add_cmd("memories", help="Query stored memories and recent events for the bot")
+    p_mem.add_argument("--query", default="")
+    p_mem.add_argument("--category", default="")
+    p_mem.add_argument("--no-events", action="store_true")
+    p_mem.add_argument("--limit", type=int, default=30)
+    p_mem.add_argument("--char-id", type=int, default=0)
+
+    p_rem = add_cmd("remember", help="Save a memory entry for the bot")
+    p_rem.add_argument("category", choices=["preference", "relationship", "nickname_alias", "habit", "note"])
+    p_rem.add_argument("mem_key")
+    p_rem.add_argument("content")
+    p_rem.add_argument("--subject-uid", type=int, default=0)
+    p_rem.add_argument("--char-id", type=int, default=0)
+
+    p_fgt = add_cmd("forget", help="Delete stored bot memories by id or key")
+    p_fgt.add_argument("--id", dest="memory_id", type=int, default=0)
+    p_fgt.add_argument("--key", dest="mem_key", default="")
+    p_fgt.add_argument("--category", default="")
+    p_fgt.add_argument("--char-id", type=int, default=0)
+
+    p_usr = add_cmd("users", help="List shared player UID and nickname change history")
+    p_usr.add_argument("--query", default="")
+    p_usr.add_argument("--limit", type=int, default=50)
+
+    p_ic = add_cmd("item-count", help="Query live bag inventory counts by Korean item name or numeric item_id")
+    p_ic.add_argument("target")
+
+    p_rec = add_cmd("recipe", help="Query live recipe details across life craft, cooking, alchemy, housing, equip")
+    p_rec.add_argument("target")
+
+    p_pc = add_cmd("plan-craft", help="Preview deterministic crafting dependency plan without starting")
+    p_pc.add_argument("item")
+    p_pc.add_argument("--count", type=int, default=1)
+    p_pc.add_argument("--allow-monster-farm", action="store_true")
+    p_pc.add_argument("--count-mode", default="additional", choices=["additional", "total_target"])
+    p_pc.add_argument("--char-id", type=int, default=0)
+
+    p_cr = add_cmd("craft", help="Plan and enqueue/start a multi-stage crafting Goal")
+    p_cr.add_argument("item")
+    p_cr.add_argument("--count", type=int, default=1)
+    p_cr.add_argument("--allow-monster-farm", action="store_true")
+    p_cr.add_argument("--count-mode", default="additional", choices=["additional", "total_target"])
+    p_cr.add_argument("--priority", default="command", choices=["urgent", "command", "background"])
+    p_cr.add_argument("--preempt", action="store_true")
+    p_cr.add_argument("--char-id", type=int, default=0)
+
     p_raw = add_cmd("call", help="Raw RPC call")
     p_raw.add_argument("method")
     p_raw.add_argument("params_json", nargs="?", default="{}")
@@ -473,6 +532,91 @@ def main() -> None:
             res = bridge_call("play_emote", {"stop": True})
         else:
             res = bridge_call("play_emote", {"emote": args.name})
+    elif c == "goals":
+        res = bridge_call("get_bot_goals", {"char_id": args.char_id})
+    elif c == "cancel-goal":
+        res = bridge_call(
+            "cancel_bot_goal",
+            {"goal_id": args.goal_id, "cancel_all": args.cancel_all, "char_id": args.char_id},
+        )
+    elif c == "autonomous":
+        ap_auto: dict[str, Any] = {
+            "enabled": args.state in ("on", "true", "1"),
+            "char_id": args.char_id,
+        }
+        if args.grace is not None:
+            ap_auto["manual_input_grace_sec"] = args.grace
+        res = bridge_call("set_autonomous_mode", ap_auto)
+    elif c == "memories":
+        res = bridge_call(
+            "get_bot_memories",
+            {
+                "query": args.query,
+                "category": args.category,
+                "include_events": not args.no_events,
+                "limit": args.limit,
+                "char_id": args.char_id,
+            },
+        )
+    elif c == "remember":
+        res = bridge_call(
+            "save_bot_memory",
+            {
+                "category": args.category,
+                "mem_key": args.mem_key,
+                "content": args.content,
+                "subject_uid": args.subject_uid,
+                "char_id": args.char_id,
+            },
+        )
+    elif c == "forget":
+        res = bridge_call(
+            "delete_bot_memory",
+            {
+                "memory_id": args.memory_id,
+                "mem_key": args.mem_key,
+                "category": args.category,
+                "char_id": args.char_id,
+            },
+        )
+    elif c == "users":
+        res = bridge_call("get_known_users", {"query": args.query, "limit": args.limit})
+    elif c == "item-count":
+        t = args.target.strip()
+        icp = {"item_id": int(t)} if t.isdigit() else {"query": t}
+        res = bridge_call("get_item_count", icp)
+    elif c == "recipe":
+        t = args.target.strip()
+        rp = {"recipe_id": int(t)} if t.isdigit() else {"query": t}
+        res = bridge_call("get_recipe", rp)
+    elif c == "plan-craft":
+        t = args.item.strip()
+        pcp: dict[str, Any] = {
+            "count": args.count,
+            "allow_monster_farm": args.allow_monster_farm,
+            "count_mode": args.count_mode,
+            "char_id": args.char_id,
+        }
+        if t.isdigit():
+            pcp["recipe_id"] = int(t)
+        else:
+            pcp["item"] = t
+        res = bridge_call("plan_craft", pcp, timeout=30.0)
+    elif c == "craft":
+        t = args.item.strip()
+        crp: dict[str, Any] = {
+            "count": args.count,
+            "allow_monster_farm": args.allow_monster_farm,
+            "count_mode": args.count_mode,
+            "priority": args.priority,
+            "preempt": args.preempt,
+            "char_id": args.char_id,
+        }
+        if t.isdigit():
+            crp["recipe_id"] = int(t)
+        else:
+            crp["item"] = t
+        res = bridge_call("start_craft_goal", crp, timeout=30.0)
     elif c == "call":
         try:
             parsed_p = json.loads(args.params_json)

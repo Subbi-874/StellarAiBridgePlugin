@@ -15,6 +15,7 @@ if str(BRIDGE_DIR) not in sys.path:
 from chat_monitor import ChatMonitorService  # noqa: E402
 from memory_store import (  # noqa: E402
     MAX_MEM_CONTENT_LEN,
+    SCHEMA_VERSION,
     SqliteMemoryStore,
     validate_memory_input,
 )
@@ -273,7 +274,7 @@ class SqliteMemoryStoreUnitTests(unittest.TestCase):
                 raw_conn = sqlite3.connect(str(db_path))
                 try:
                     ver = raw_conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
-                    self.assertEqual(ver, "1")
+                    self.assertEqual(ver, str(SCHEMA_VERSION))
                 finally:
                     raw_conn.close()
 

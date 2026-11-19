@@ -35,6 +35,7 @@ DEFAULT_FEATURE_MODES: dict[str, int] = {
     "auto_ready": 0,
     "dungeon_enter": 1,
     "auto_fish": 1,
+    "auto_craft": 1,
 }
 
 
@@ -67,6 +68,7 @@ POLICY_LABELS: dict[str, str] = {
     "auto_ready": "던전·레이드·월드보스 자동 준비",
     "dungeon_enter": "던전·레이드·불안정공간 입장 시작",
     "auto_fish": "자동 낚시 제어",
+    "auto_craft": "아이템·요리·가구·장비 제작",
 }
 
 
@@ -93,6 +95,9 @@ ACTION_POLICY_MAP: dict[str, str] = {
     "fish": "auto_fish",
     "leave_dungeon": "dungeon_enter",
     "use_gimmick": "follow_move",
+    "craft_item": "auto_craft",
+    "craft_goal": "auto_craft",
+    "farm_monster_item": "follow_move",
 }
 
 

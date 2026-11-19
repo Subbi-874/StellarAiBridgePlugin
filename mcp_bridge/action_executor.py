@@ -9,7 +9,7 @@ from policy import ClientChatSettings, check_action_admin_lock
 
 INFO_ACTIONS: frozenset[str] = frozenset({"query_player_location"})
 
-GOAL_ACTION_TYPES: frozenset[str] = frozenset({"set_goal", "cancel_goal", "list_goals"})
+GOAL_ACTION_TYPES: frozenset[str] = frozenset({"set_goal", "cancel_goal", "list_goals", "craft_goal"})
 
 MEMORY_ACTION_TYPES: frozenset[str] = frozenset({"remember", "forget"})
 
@@ -30,6 +30,8 @@ EXTENDED_ACTION_TYPES: frozenset[str] = frozenset({
     "fish",
     "leave_dungeon",
     "use_gimmick",
+    "craft_item",
+    "farm_monster_item",
 })
 
 
@@ -104,6 +106,12 @@ def format_task_event_fact(ev_name: str, data: dict[str, Any]) -> tuple[str, str
         return "fish", fact
     if ev_name == "gimmick_failed":
         return "gimmick", str(data.get("detail") or "이동 기믹 사용 실패")
+    if ev_name in ("craft_completed", "craft_failed"):
+        fallback = "제작 완료" if ev_name == "craft_completed" else "제작 실패"
+        return "craft", str(data.get("detail") or fallback)
+    if ev_name in ("monster_farm_completed", "monster_farm_failed"):
+        fallback = "몬스터 드랍 재료 확보 완료" if ev_name == "monster_farm_completed" else "몬스터 재료 파밍 실패"
+        return "monster_farm", str(data.get("detail") or fallback)
     if ev_name == "monster_seek_arrived":
         return "monster", str(data.get("detail") or "목표 몬스터 출현 위치 도착 완료")
     return "monster", str(data.get("detail") or "목표 몬스터 위치 이동 실패")
@@ -262,6 +270,24 @@ class ActionExecutor:
             method, default_err = "use_gimmick", "주변에서 사용할 수 있는 이동 기믹을 찾지 못했어요"
             params = {
                 "gimmick": str(act.get("gimmick") or act.get("destination") or act.get("name") or "").strip(),
+            }
+            if on_clear_kinds:
+                on_clear_kinds(("follow", "fish"))
+        elif atype == "craft_item":
+            method, default_err = "craft_item", "제작을 시작하지 못했어요"
+            params = {
+                "recipe_id": int(act.get("recipe_id") or 0),
+                "query": str(act.get("query") or act.get("item") or act.get("recipe") or "").strip(),
+                "count": max(1, int(act.get("count") or 1)),
+            }
+            if on_clear_kinds:
+                on_clear_kinds(("follow", "fish"))
+        elif atype == "farm_monster_item":
+            method, default_err = "farm_monster_item", "몬스터 재료 파밍을 시작하지 못했어요"
+            params = {
+                "monster": str(act.get("monster") or act.get("query") or "").strip(),
+                "item_id": int(act.get("item_id") or 0),
+                "target_count": max(1, int(act.get("target_count") or act.get("count") or 1)),
             }
             if on_clear_kinds:
                 on_clear_kinds(("follow", "fish"))

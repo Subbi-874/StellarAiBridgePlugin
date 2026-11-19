@@ -8,6 +8,7 @@ using Stellar.AgyBridge.Adapters.Character;
 using Stellar.AgyBridge.Adapters.Combat;
 using Stellar.AgyBridge.Adapters.Dungeon;
 using Stellar.AgyBridge.Adapters.External;
+using Stellar.AgyBridge.Adapters.Items;
 using Stellar.AgyBridge.Adapters.Movement;
 using Stellar.AgyBridge.Adapters.Social;
 using Stellar.AgyBridge.Behaviors;
@@ -40,6 +41,7 @@ public sealed class Plugin : IStellarPlugin
     private readonly IDungeonAdapter _dungeonAdapter;
     private readonly ISocialAdapter _socialAdapter;
     private readonly IExternalPluginAdapter _externalPluginAdapter;
+    private readonly IItemAdapter _itemAdapter;
     private readonly IMovementAdapter _movementAdapter;
     private readonly PlayerMoveDriver _moveDriver;
     private readonly LocomotionBoostController _boost;
@@ -90,6 +92,7 @@ public sealed class Plugin : IStellarPlugin
         _dungeonAdapter = new LuaDungeonAdapter(_services, _lua, _worldGuard);
         _socialAdapter = new LuaSocialAdapter(_services, _lua, _worldGuard);
         _externalPluginAdapter = new ExternalPluginAdapter(_services, _lua, _worldGuard);
+        _itemAdapter = new LuaItemAdapter(_services, _lua, _worldGuard);
         _movementAdapter = new LuaMovementAdapter(_services, _lua, _worldGuard);
         _capabilities = new CapabilityRegistry(_services.Log, _worldGuard);
         _capabilities.RegisterProbe(_combatAdapter);
@@ -97,6 +100,7 @@ public sealed class Plugin : IStellarPlugin
         _capabilities.RegisterProbe(_dungeonAdapter);
         _capabilities.RegisterProbe(_socialAdapter);
         _capabilities.RegisterProbe(_externalPluginAdapter);
+        _capabilities.RegisterProbe(_itemAdapter);
         _capabilities.RegisterProbe(_movementAdapter);
         _capabilities.RunLoadTimeProbes();
         _moveDriver = new PlayerMoveDriver(_services);
@@ -201,6 +205,8 @@ public sealed class Plugin : IStellarPlugin
             _stickers,
             _autoFishing,
             _traversal,
+            _itemAdapter,
+            _lua,
             _uiWindow.MarkDirty);
 
         _world.SubscribeEvents(_wsClient.PushEvent);
@@ -216,7 +222,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v0.9.21. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v0.9.22. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeatureModeChanged(string key, FeatureGateMode mode)
@@ -224,10 +230,17 @@ public sealed class Plugin : IStellarPlugin
         if (key == FeaturePolicyKeys.AutoCombat)
         {
             _autoCombat.SetDesired(mode == FeatureGateMode.Enabled);
+            if (mode == FeatureGateMode.AdminLock && _behaviors.Current is FarmMonsterItemBehavior)
+                _behaviors.StopCurrent("policy_disabled_or_locked");
         }
         else if (key == FeaturePolicyKeys.FollowMove && mode != FeatureGateMode.Enabled)
         {
-            if (_behaviors.Current is FollowPartyBehavior or MoveToBehavior)
+            if (_behaviors.Current is FollowPartyBehavior or MoveToBehavior or FarmMonsterItemBehavior)
+                _behaviors.StopCurrent("policy_disabled_or_locked");
+        }
+        else if (key == FeaturePolicyKeys.AutoCraft && mode != FeatureGateMode.Enabled)
+        {
+            if (_behaviors.Current is CraftItemBehavior)
                 _behaviors.StopCurrent("policy_disabled_or_locked");
         }
         else if (key == FeaturePolicyKeys.AutoGather && mode != FeatureGateMode.Enabled)

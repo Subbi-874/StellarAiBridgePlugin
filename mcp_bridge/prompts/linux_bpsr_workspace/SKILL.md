@@ -2,7 +2,7 @@
 name: stellar-bridge
 description: >-
   블루 프로토콜: 스타 레조넌스(Blue Protocol: Star Resonance) 인게임 캐릭터 제어·조회 통합 매뉴얼.
-  명령권자(UID) 권한 규칙, 어드민락 보안 정책, 채널 이동·자동 낚시(Stellar.AutoFishing 연동)·자동 부활·자동 준비·던전/레이드/불안정공간/월드보스 입장·퇴장·자동 장판회피·이동형 필드기믹·파티 위임·프리셋·감정표현·내장 이모티콘 규칙,
+  명령권자(UID) 권한 규칙, 어드민락 보안 정책, 채널 이동·자동 낚시(Stellar.AutoFishing 연동)·자동 부활·자동 준비·던전/레이드/불안정공간/월드보스 입장·퇴장·자동 장판회피·이동형 필드기믹·파티 위임·프리셋·감정표현·내장 이모티콘·목표 스케줄러·기억 저장·전체 아이템/요리/가구/장비 제작 규칙,
   인게임 채팅 응답용 JSON actions 스키마(<current_trigger_message> + 명령권한=있음 제어 요청 시 열람) 및
   조회·제어용 bridge_cli.py 사용법(외부 직접 제어 및 명령권한=있음 채팅 사전 조회/다단계 실행 시 사용)을 모두 담고 있다.
 ---
@@ -107,6 +107,13 @@ description: >-
      - 보스 눈이 붉게 빛나는 강타 전조(**붉은 섬광**, `ZUISkillWarning` 및 붉은 섬광 이펙트) 감지 시 강타 타이밍에 맞춰 회피키(`Rush`)로 회피합니다.
      - 아군 회복/버프용 녹색 장판과 파티 **분담/집합 장판(`"분담"`, `"[집합]"`, 아군 화살표 추적)** 은 회피 대상에서 자동 제외해 뭉침을 유지합니다.
    - **이동형 필드/던전 기믹 (`use_gimmick` / `list_gimmicks`)**: 바람의 통로·기류·활공 발판·맵 내 순간 이동 장치 등 이동 기믹을 찾아 접근·작동합니다(던전 출구, 상자, 상점, 의자 앉기, 낚시터는 자동 제외).
+10. **봇별 목표 스케줄러 · 우선순위 선점 (`set_goal` / `cancel_goal` / `list_goals`)**:
+    - 다단계 작업(예: 채집 후 이동)은 `set_goal`로 등록하며, 유저가 `"이거 먼저/우선 해"`라고 지시하면 `priority: "urgent", preempt: true`로 현재 진행 중이던 복귀 가능 목표를 잔여 수량까지 보존해 일시 정지한 뒤 새 목표를 먼저 실행하고 종료 후 자동 복귀합니다.
+11. **봇별 영구 기억 및 공통 유저 닉변 추적 (`remember` / `forget`)**:
+    - 브릿지는 내 캐릭터(`bot_char_id`)별로 기억과 최근 사건 로그를 분리 저장하고, 플레이어 UID별 닉변 이력만 전 봇이 공유합니다. **명령권자 요청만** `remember`/`forget`으로 저장·삭제하며, 비명령권자의 채팅으로는 절대 기억을 수정하지 않습니다.
+12. **전체 제작 목표 (`craft_goal`, 생활 제작·요리·연금술·홈 가구·장비 단조 전부 지원)**:
+    - 보유 재료와 집중력(`configId=20003`)·회당 산출량(`AwardTableMgr`)을 결정적으로 계산해 `채집 → 낚시 → 하위 제작 → 제작대 이동/최종 제작` 단계를 자동 생성·실행합니다.
+    - 부족한 하위 재료가 **몬스터 드랍 아이템**인 경우 임의로 사냥하지 않고 먼저 명령권자에게 사냥할지 질문(`needs_monster_confirm`)하며, 명령권자가 승인(`confirm_monster_farm: true`)하면 사냥 파밍 후 제작을 이어갑니다. 상점·거래소 전용 재료나 미해금 레시피·미착용 재료 장비 부족 시에는 막힘 사유와 획득처를 안내합니다.
 
 ---
 
@@ -178,6 +185,19 @@ description: >-
     - `{"type": "leave_dungeon"}` (일반/하드/마스터 던전, 불안정 공간, 20인 레이드, 시디문 유적, 월드 보스, 가상 레이어, 길드 홈, 마이홈에서 즉시 밖으로 퇴장)
 22. **이동형 필드·던전 기믹 사용 (`use_gimmick`)** *(기존 따라가기·낚시 자동 중지)*:
     - `{"type": "use_gimmick", "gimmick": "바람의 통로"}` (기믹명 미지정 시 `""`로 두면 주변에서 가장 가까운 바람의 통로·활공 발판·맵 내 순간 이동 장치 작동)
+23. **목표 등록·우선순위 선점 (`set_goal`)**:
+    - `{"type": "set_goal", "title": "<목표명>", "priority": "urgent | command | background", "preempt": true | false, "replace_active": false, "resumable": true | false, "steps": [{"type": "<액션>", ...}]}` (`"이거 먼저 해"` 시 `priority: "urgent", preempt: true`; 복귀 불가 목표 전환 확인 응답 시 `"confirm_preemption": true | false`)
+24. **목표 취소 (`cancel_goal`)**:
+    - `{"type": "cancel_goal", "goal_id": "<ID 또는 ''>", "cancel_all": false}`
+25. **진행 중 목표 조회 (`list_goals`)**:
+    - `{"type": "list_goals"}` (2차 결과 `<action_results>`로 현황 전달됨)
+26. **기억 저장·갱신 (`remember`)** *(명령권자 전용)*:
+    - `{"type": "remember", "category": "preference | relationship | nickname_alias | habit | note", "mem_key": "<짧은 키>", "content": "<내용>", "subject_uid": 0}`
+27. **기억 삭제 (`forget`)** *(명령권자 전용)*:
+    - `{"type": "forget", "mem_key": "<키>", "memory_id": 0, "category": ""}`
+28. **아이템·요리·가구·장비 제작 목표 (`craft_goal`)**:
+    - `{"type": "craft_goal", "item": "<아이템/레시피명>", "count": 10}` (선택 `"recipe_id": N`, `"priority": "urgent | command | background"`, `"preempt": true`, `"allow_monster_farm": false`)
+    - 부족한 몬스터 드랍 재료 사냥 승인 응답: `{"type": "craft_goal", "confirm_monster_farm": true}` (취소 시 `false`)
 
 ---
 
@@ -305,4 +325,24 @@ python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py cha
 python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py send-chat party "준비 완료"
 python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py stickers
 python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py send-sticker party greet
+```
+
+### E. 목표 스케줄러 · 기억 DB · 가방 재료 · 제작 목표 CLI
+```bash
+# 봇 목표 조회 / 취소 / 자율 idle 모드 전환
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py goals
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py cancel-goal --all
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py autonomous off
+
+# 봇별 기억 조회·저장·삭제 및 공통 유저 닉변 이력 조회
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py memories --query 취향
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py remember note 선호 "아이스 레몬차" --subject-uid 15977376
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py forget --key 선호
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py users --query 패랭이
+
+# 가방 수량·레시피 조회 · 제작 의존성 미리보기 · 다단계 제작 목표 시작
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py item-count "목탄"
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py recipe "속연 탄소 분말"
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py plan-craft "속연 탄소 분말" --count 30
+python3 /home/subbi/bpsr/.agents/skills/stellar-bridge/scripts/bridge_cli.py craft "생고기 가공" --count 10 --allow-monster-farm
 ```

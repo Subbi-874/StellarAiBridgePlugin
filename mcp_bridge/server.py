@@ -107,7 +107,7 @@ def _try_stage_latest_dll() -> None:
         return
     built_stat = built.stat()
     slot_dirs = [
-        Path(r"E:\StarLauncher\game\release_3.7\game_mini\stellar\plugins\agybridge"),
+        *sorted(Path(r"E:\StarLauncher\game").glob(r"release_*\game_mini\stellar\plugins\agybridge")),
         Path(r"G:\SteamLibrary\steamapps\common\星痕\stellar\plugins\agybridge"),
     ]
     for slot_dir in slot_dirs:
@@ -136,8 +136,8 @@ def _try_stage_latest_dll() -> None:
                     aside = slot_dir / f"Stellar.AgyBridge.old_{int(time.time() * 1000)}"
                     dest.rename(aside)
                     shutil.copy2(built, dest)
-                (slot_dir / ".plugin-version").write_text("0.9.14", encoding="utf-8")
-                logger.info("Auto-deployed latest Stellar.AgyBridge.dll (v0.9.14) to %s", dest)
+                (slot_dir / ".plugin-version").write_text("0.9.22", encoding="utf-8")
+                logger.info("Auto-deployed latest Stellar.AgyBridge.dll (v0.9.22) to %s", dest)
         except OSError as exc:
             logger.debug("Auto-deploy DLL skipped for %s: %s", slot_dir, exc)
 
@@ -269,6 +269,30 @@ async def dispatch_game_rpc(
         return chat_monitor.get_known_users(
             query=str(params.get("query") or ""),
             limit=int(params.get("limit") or 50),
+        )
+
+    if method == "plan_craft" and chat_monitor is not None:
+        return await chat_monitor.plan_bot_craft(
+            conn_id=active_cid,
+            char_id=int(params.get("char_id") or 0),
+            recipe_id=int(params.get("recipe_id") or 0),
+            query=str(params.get("query") or params.get("item") or ""),
+            count=max(1, int(params.get("count") or 1)),
+            count_mode=str(params.get("count_mode") or "additional"),
+            allow_monster_farm=bool(params.get("allow_monster_farm", False)),
+        )
+
+    if method == "start_craft_goal" and chat_monitor is not None:
+        return await chat_monitor.start_bot_craft_goal(
+            conn_id=active_cid,
+            char_id=int(params.get("char_id") or 0),
+            recipe_id=int(params.get("recipe_id") or 0),
+            query=str(params.get("query") or params.get("item") or ""),
+            count=max(1, int(params.get("count") or 1)),
+            count_mode=str(params.get("count_mode") or "additional"),
+            allow_monster_farm=bool(params.get("allow_monster_farm", False)),
+            priority=str(params.get("priority") or "command"),
+            preempt=bool(params.get("preempt", False)),
         )
 
     if method == "wait_for_chat_trigger" and chat_monitor is not None:
@@ -1055,6 +1079,72 @@ async def delete_bot_memory(
 async def get_known_users(query: str = "", limit: int = 50) -> str:
     """Lists shared player UID records and observed nickname change history across all bots."""
     res = await invoke_game("get_known_users", {"query": query, "limit": limit})
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def get_item_count(query: str = "", item_id: int = 0) -> str:
+    """Queries live bag inventory counts (materials, consumables, currency, vitality) by Korean item name or item_id."""
+    res = await invoke_game("get_item_count", {"query": query, "item_id": item_id})
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def get_recipe(query: str = "", recipe_id: int = 0) -> str:
+    """Queries live recipe details across life crafting, cooking, alchemy, housing furniture, and equip forge."""
+    res = await invoke_game("get_recipe", {"query": query, "recipe_id": recipe_id})
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def plan_craft(
+    item: str = "",
+    count: int = 1,
+    recipe_id: int = 0,
+    allow_monster_farm: bool = False,
+    count_mode: str = "additional",
+    char_id: int = 0,
+) -> str:
+    """Deterministically expands a crafting dependency tree against live inventory and SQLite cached recipes without executing."""
+    res = await invoke_game(
+        "plan_craft",
+        {
+            "item": item,
+            "count": count,
+            "recipe_id": recipe_id,
+            "allow_monster_farm": allow_monster_farm,
+            "count_mode": count_mode,
+            "char_id": char_id,
+        },
+    )
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def start_craft_goal(
+    item: str = "",
+    count: int = 1,
+    recipe_id: int = 0,
+    allow_monster_farm: bool = False,
+    count_mode: str = "additional",
+    priority: str = "command",
+    preempt: bool = False,
+    char_id: int = 0,
+) -> str:
+    """Plans and enqueues/starts a multi-stage crafting Goal (gather -> fish -> sub-craft -> final craft; asks before monster hunting unless allow_monster_farm=True)."""
+    res = await invoke_game(
+        "start_craft_goal",
+        {
+            "item": item,
+            "count": count,
+            "recipe_id": recipe_id,
+            "allow_monster_farm": allow_monster_farm,
+            "count_mode": count_mode,
+            "priority": priority,
+            "preempt": preempt,
+            "char_id": char_id,
+        },
+    )
     return json.dumps(res, ensure_ascii=False, indent=2)
 
 

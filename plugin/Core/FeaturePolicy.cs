@@ -72,6 +72,7 @@ public static class FeaturePolicyKeys
     public const string AutoReady = "auto_ready";
     public const string DungeonEnter = "dungeon_enter";
     public const string AutoFish = "auto_fish";
+    public const string AutoCraft = "auto_craft";
 
     public static string? FromSendChannel(string rawChannel)
     {
@@ -124,6 +125,7 @@ public static class FeaturePolicyCatalog
         new FeaturePolicyDescriptor(FeaturePolicyKeys.AutoReady, FeatureCategory.Behavior, "던전·레이드·월드보스 자동 준비", FeatureGateMode.Disabled),
         new FeaturePolicyDescriptor(FeaturePolicyKeys.DungeonEnter, FeatureCategory.Behavior, "던전·레이드·불안정공간 입장 시작", FeatureGateMode.Enabled),
         new FeaturePolicyDescriptor(FeaturePolicyKeys.AutoFish, FeatureCategory.Behavior, "자동 낚시 제어", FeatureGateMode.Enabled),
+        new FeaturePolicyDescriptor(FeaturePolicyKeys.AutoCraft, FeatureCategory.Behavior, "아이템·요리·가구·장비 제작", FeatureGateMode.Enabled),
     };
 
     private static readonly Dictionary<string, FeaturePolicyDescriptor> ByKey = BuildLookup();

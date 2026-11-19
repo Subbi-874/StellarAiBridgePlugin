@@ -62,6 +62,7 @@ public static class CapabilityKeys
     public const string PhysicsNav = "physics_nav";
     public const string AutoGather = "auto_gather";
     public const string AutoFish = "auto_fish";
+    public const string Craft = "craft";
 
     private static readonly Dictionary<string, string> Labels = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -84,7 +85,8 @@ public static class CapabilityKeys
         [CameraGuard] = "시점 자동 복구",
         [PhysicsNav] = "실내 물리 길찾기(ZPhysics)",
         [AutoGather] = "자동 채집(AutoGather 연동)",
-        [AutoFish] = "자동 낚시(AutoFishing 연동)"
+        [AutoFish] = "자동 낚시(AutoFishing 연동)",
+        [Craft] = "아이템·요리·가구·장비 제작"
     };
 
     public static string GetLabel(string key) => Labels.TryGetValue(key, out var label) ? label : key;

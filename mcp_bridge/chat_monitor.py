@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 import time
 from typing import Any, Awaitable, Callable
+import uuid
 
 import config
 from action_executor import (  # noqa: F401
@@ -22,6 +23,12 @@ from chat_output import (  # noqa: F401
     ChatOutputSender,
     EchoGuard,
     split_chat_chunks,
+)
+from craft_planner import (  # noqa: F401
+    CraftPlanResult,
+    CraftPlanner,
+    collect_candidate_item_ids,
+    select_target_recipe,
 )
 from event_router import (  # noqa: F401
     CONSULT_ALLOWED_ACTIONS,
@@ -122,6 +129,7 @@ class ChatMonitorService:
         self._behavior_finished_listeners: list[Any] = []
         self.event_router = GoalEventRouter()
         self.promotion_tracker = RulePromotionTracker(threshold=3)
+        self.craft_planner = CraftPlanner()
         self._retry_tasks: set[asyncio.Task[None]] = set()
         self._last_gather_trigger_ch: dict[str, tuple[str, int]] = {}
         # Legacy fallback when conn_id has not bound to a BotAgent(char_id) yet.
@@ -1213,7 +1221,324 @@ class ChatMonitorService:
 
             return rec, None, None
 
+        if atype == "craft_goal":
+            return await self._handle_craft_goal_action(agent, conn_id, cfg, act, trig)
+
         return {"action": atype, "res": {"ok": False}}, None, None
+
+    async def ensure_recipe_cache(self, conn_id: str | None, *, force_refresh: bool = False) -> dict[str, Any]:
+        cached_ver = self.memory.get_cached_recipe_version()
+        cached_recipes = self.memory.load_all_cached_recipes() if cached_ver else []
+
+        first = await self._dispatch(
+            "export_recipes",
+            {"offset": 0, "limit": 200 if (force_refresh or not cached_recipes) else 20, "refresh": force_refresh},
+            conn_id=conn_id,
+        )
+        if not isinstance(first, dict) or not first.get("ok"):
+            if cached_recipes:
+                return {"ok": True, "game_version": cached_ver, "cache_hit": True, "recipes_cached": len(cached_recipes)}
+            return {
+                "ok": False,
+                "error": str((first or {}).get("error") or "게임에서 레시피 카탈로그를 내보내지 못했어요."),
+            }
+
+        live_ver = str(first.get("game_version") or "unknown").strip()
+        if not force_refresh and cached_ver == live_ver and cached_recipes:
+            return {"ok": True, "game_version": live_ver, "cache_hit": True, "recipes_cached": len(cached_recipes)}
+
+        # Ensure full page size (200) if initial probe used limit=20 and version changed
+        if first.get("has_more") and len(first.get("recipes") or []) < 200 and not force_refresh and cached_recipes:
+            first = await self._dispatch("export_recipes", {"offset": 0, "limit": 200}, conn_id=conn_id)
+            if not isinstance(first, dict) or not first.get("ok"):
+                return {"ok": False, "error": str((first or {}).get("error") or "레시피 동기화 실패")}
+
+        all_recipes: list[dict[str, Any]] = list(first.get("recipes") or [])
+        items_by_id: dict[int, dict[str, Any]] = {
+            int(it["item_id"]): it
+            for it in (first.get("items") or [])
+            if isinstance(it, dict) and int(it.get("item_id") or 0) > 0
+        }
+        cur = first
+        while cur.get("has_more"):
+            next_off = int(cur.get("next_offset") or len(all_recipes))
+            cur = await self._dispatch("export_recipes", {"offset": next_off, "limit": 200}, conn_id=conn_id)
+            if not isinstance(cur, dict) or not cur.get("ok"):
+                return {"ok": False, "error": str((cur or {}).get("error") or "레시피 페이지 조회 실패")}
+            all_recipes.extend(cur.get("recipes") or [])
+            for it in cur.get("items") or []:
+                if isinstance(it, dict) and int(it.get("item_id") or 0) > 0:
+                    items_by_id[int(it["item_id"])] = it
+
+        summary = self.memory.replace_recipe_catalog(live_ver, all_recipes, list(items_by_id.values()))
+        return {"ok": True, "cache_hit": False, **summary}
+
+    async def _prepare_craft_plan(
+        self,
+        conn_id: str | None,
+        *,
+        recipe_id: int = 0,
+        query: str = "",
+        count: int = 1,
+        count_mode: str = "additional",
+        allow_monster_farm: bool = False,
+    ) -> CraftPlanResult:
+        cache_res = await self.ensure_recipe_cache(conn_id)
+        recipes = self.memory.load_all_cached_recipes()
+        obtain_ways = self.memory.load_all_cached_obtain_ways()
+        if not recipes:
+            return CraftPlanResult(
+                status="not_found",
+                requested_count=max(1, int(count or 1)),
+                message=str(cache_res.get("error") or "캐시된 레시피가 아직 없어요."),
+            )
+
+        root_rec = select_target_recipe(recipes, recipe_id=recipe_id, query=query)
+        if root_rec is None:
+            return self.craft_planner.plan_craft(
+                recipes,
+                obtain_ways,
+                {},
+                recipe_id=recipe_id,
+                query=query,
+                requested_count=count,
+            )
+
+        cand_ids = collect_candidate_item_ids(recipes, root_rec)
+        bag_counts: dict[int, int] = {}
+        available_focus = -1
+        if cand_ids:
+            bag_res = await self._dispatch("get_item_count", {"item_ids": cand_ids}, conn_id=conn_id)
+            if isinstance(bag_res, dict) and bag_res.get("ok"):
+                if bag_res.get("vitality") is not None:
+                    available_focus = int(bag_res["vitality"])
+                for it in bag_res.get("items") or []:
+                    if isinstance(it, dict) and it.get("item_id"):
+                        bag_counts[int(it["item_id"])] = int(it.get("count") or 0)
+
+        unlock_map: dict[int, bool] = {}
+        unequipped_counts: dict[int, int] = {}
+        by_out_rid = {
+            int(r["recipe_id"]): r
+            for r in recipes
+            if int(r.get("output_item_id") or 0) in set(cand_ids) or int(r["recipe_id"]) == int(root_rec["recipe_id"])
+        }
+        for chk_rid in list(by_out_rid.keys())[:8]:
+            rec_res = await self._dispatch("get_recipe", {"recipe_id": chk_rid}, conn_id=conn_id)
+            matches = (rec_res.get("matches") or []) if isinstance(rec_res, dict) and rec_res.get("ok") else []
+            if matches and isinstance(matches[0], dict):
+                m0 = matches[0]
+                if "unlocked" in m0:
+                    unlock_map[chk_rid] = bool(m0["unlocked"])
+                if "equip_unequipped_base_count" in m0:
+                    unequipped_counts[chk_rid] = int(m0.get("equip_unequipped_base_count") or 0)
+
+        return self.craft_planner.plan_craft(
+            recipes,
+            obtain_ways,
+            bag_counts,
+            recipe_id=recipe_id,
+            query=query,
+            requested_count=count,
+            count_mode=count_mode,
+            allow_monster_farm=allow_monster_farm,
+            available_focus=available_focus,
+            unlock_map=unlock_map or None,
+            unequipped_base_equip_counts=unequipped_counts or None,
+        )
+
+    async def _handle_craft_goal_action(
+        self,
+        agent: BotAgent,
+        conn_id: str | None,
+        cfg: ClientChatSettings,
+        act: dict[str, Any],
+        trig: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
+        pol = check_action_admin_lock(cfg.feature_modes, "craft_goal")
+        if not pol.allowed:
+            return {"action": "craft_goal", "blocked_by_admin_lock": True, "policy_key": pol.policy_key}, pol.error_message, None
+
+        confirm_val = act.get("confirm_monster_farm")
+        pending = agent.goals.pending_craft_confirm
+        if confirm_val is not None:
+            agent.goals.pending_craft_confirm = None
+            if not bool(confirm_val):
+                rec = {"action": "craft_goal", "res": {"ok": True, "cancelled": True}}
+                info = {
+                    "action": "craft_goal",
+                    "target": (pending or {}).get("query") or "",
+                    "result": {"cancelled": True, "message": "몬스터 사냥을 취소해 제작 목표를 보류했어요."},
+                }
+                return rec, None, info
+            if pending:
+                act = {**pending, **act, "allow_monster_farm": True}
+            else:
+                act = {**act, "allow_monster_farm": True}
+
+        recipe_id = int(act.get("recipe_id") or 0)
+        query = str(act.get("item") or act.get("query") or act.get("recipe") or "").strip()
+        count = max(1, int(act.get("count") or 1))
+        count_mode = str(act.get("count_mode") or "additional").strip().lower() or "additional"
+        allow_monster = bool(act.get("allow_monster_farm", False))
+
+        if recipe_id <= 0 and not query:
+            return {"action": "craft_goal", "res": {"ok": False, "error": "missing_target"}}, "만들 아이템이나 레시피 이름을 알려주세요.", None
+
+        plan = await self._prepare_craft_plan(
+            conn_id,
+            recipe_id=recipe_id,
+            query=query,
+            count=count,
+            count_mode=count_mode,
+            allow_monster_farm=allow_monster,
+        )
+        rec: dict[str, Any] = {"action": "craft_goal", "plan": plan.to_dict()}
+
+        if plan.status == "needs_monster_confirm":
+            agent.goals.pending_craft_confirm = {
+                "recipe_id": int((plan.target_recipe or {}).get("recipe_id") or recipe_id),
+                "item": query or str((plan.target_recipe or {}).get("name") or ""),
+                "count": count,
+                "count_mode": count_mode,
+                "priority": act.get("priority"),
+                "preempt": bool(act.get("preempt", False)),
+            }
+            return rec, None, {
+                "action": "craft_goal",
+                "target": query or f"#{recipe_id}",
+                "result": {"needs_monster_confirm": True, **plan.to_dict()},
+            }
+
+        if plan.status != "ready":
+            return rec, None, {
+                "action": "craft_goal",
+                "target": query or f"#{recipe_id}",
+                "result": plan.to_dict(),
+            }
+
+        for st_item in plan.steps:
+            st_pol = check_action_admin_lock(cfg.feature_modes, st_item.action_type)
+            if not st_pol.allowed:
+                return {"action": "craft_goal", "blocked_by_admin_lock": True, "policy_key": st_pol.policy_key}, st_pol.error_message, None
+            if st_item.action_type == "farm_monster_item" and cfg.feature_modes.get("auto_combat") == 2:
+                return {"action": "craft_goal", "blocked_by_admin_lock": True, "policy_key": "auto_combat"}, "'자동전투 지속 유지' 기능이 어드민락으로 잠겨 있어 사냥 파밍을 진행할 수 없어요.", None
+
+        r_name = str((plan.target_recipe or {}).get("name") or query or f"#{recipe_id}")
+        now_ts = time.monotonic()
+        goal = Goal(
+            goal_id=f"craft-{int((plan.target_recipe or {}).get('recipe_id') or 0)}-{uuid.uuid4().hex[:6]}",
+            title=f"{r_name} {plan.requested_count}개 제작",
+            kind="craft_goal",
+            steps=list(plan.steps),
+            priority=parse_priority(act.get("priority"), GoalPriority.COMMAND),
+            resumable=True,
+            requester_uid=int(trig.get("sender_id") or 0),
+            requester_name=str(trig.get("sender_name") or ""),
+            channel=str(trig.get("channel") or "party"),
+            created_at=now_ts,
+            updated_at=now_ts,
+            metadata={"craft_plan": plan.to_dict()},
+        )
+        dec = agent.goals.submit_goal(
+            goal,
+            preempt=bool(act.get("preempt", False)),
+            replace_active=bool(act.get("replace_active", False)),
+            force_abort_non_resumable=bool(act.get("force_abort", False)),
+        )
+        rec["decision"] = dec.to_dict()
+
+        if dec.action == "needs_confirm":
+            return rec, None, {
+                "action": "craft_goal",
+                "target": r_name,
+                "result": {
+                    "needs_confirm": True,
+                    "message": dec.message,
+                    "current_goal": dec.active_goal.to_dict() if dec.active_goal else None,
+                    "proposed_goal": dec.affected_goal.to_dict() if dec.affected_goal else None,
+                },
+            }
+
+        if dec.action == "started":
+            dres = await self._dispatch_active_goal_step(agent, conn_id)
+            rec["dispatch"] = dres
+            if dres.get("ok") is False and dres.get("error"):
+                return rec, str(dres["error"]), None
+        elif dec.action == "preempted_and_started":
+            dres = await self._stop_behavior_then_start_goal(agent, conn_id, dec.stop_reason or "preempted")
+            rec["dispatch"] = dres
+            if dres.get("ok") is False and dres.get("error"):
+                return rec, str(dres["error"]), None
+
+        return rec, None, None
+
+    async def plan_bot_craft(
+        self,
+        *,
+        conn_id: str | None = None,
+        char_id: int = 0,
+        recipe_id: int = 0,
+        query: str = "",
+        count: int = 1,
+        count_mode: str = "additional",
+        allow_monster_farm: bool = False,
+    ) -> dict[str, Any]:
+        agent = self._resolve_agent(conn_id, char_id)
+        target_conn = (agent.conn_id if agent and agent.conn_id else conn_id)
+        plan = await self._prepare_craft_plan(
+            target_conn,
+            recipe_id=recipe_id,
+            query=query,
+            count=count,
+            count_mode=count_mode,
+            allow_monster_farm=allow_monster_farm,
+        )
+        return {"ok": plan.status != "not_found", **plan.to_dict()}
+
+    async def start_bot_craft_goal(
+        self,
+        *,
+        conn_id: str | None = None,
+        char_id: int = 0,
+        recipe_id: int = 0,
+        query: str = "",
+        count: int = 1,
+        count_mode: str = "additional",
+        allow_monster_farm: bool = False,
+        priority: str = "command",
+        preempt: bool = False,
+    ) -> dict[str, Any]:
+        agent = self._resolve_agent(conn_id, char_id)
+        if agent is None:
+            return {"ok": False, "error": "봇 에이전트가 아직 월드에 바인딩되지 않았습니다."}
+        target_conn = agent.conn_id or conn_id
+        cfg = self._get_cfg(target_conn)
+        synth_trig = {
+            "conn_id": target_conn,
+            "local_char_id": agent.char_id,
+            "local_char_name": agent.char_name,
+            "channel": "party",
+            "sender_id": 0,
+            "sender_name": "시스템",
+        }
+        act = {
+            "type": "craft_goal",
+            "recipe_id": recipe_id,
+            "item": query,
+            "count": count,
+            "count_mode": count_mode,
+            "allow_monster_farm": allow_monster_farm,
+            "priority": priority,
+            "preempt": preempt,
+        }
+        async with agent.lock:
+            rec, err, info = await self._handle_craft_goal_action(agent, target_conn, cfg, act, synth_trig)
+        if err:
+            return {"ok": False, "error": err, **rec}
+        if info is not None:
+            return {"ok": True, "needs_input": True, **info["result"], **rec}
+        return {"ok": True, **rec}
 
     def get_rule_promotion_candidates(self) -> list[dict[str, Any]]:
         return self.promotion_tracker.list_candidates()

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -9,7 +10,7 @@ import threading
 from typing import Any, Callable, Protocol
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 AUTHORITY_TIERS: frozenset[str] = frozenset({"system", "commander", "non_commander"})
 WRITABLE_AUTHORITY_TIERS: frozenset[str] = frozenset({"system", "commander"})
@@ -316,6 +317,31 @@ class MemoryStore(Protocol):
         max_events: int = 5,
     ) -> MemoryContextBundle: ...
 
+    def get_cached_recipe_version(self) -> str: ...
+
+    def replace_recipe_catalog(
+        self,
+        game_version: str,
+        recipes: list[dict[str, Any]],
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    def find_cached_recipes(
+        self,
+        *,
+        query: str = "",
+        output_item_id: int = 0,
+        recipe_id: int = 0,
+        recipe_kind: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_cached_item_obtain_way(self, item_id: int) -> dict[str, Any] | None: ...
+
+    def load_all_cached_recipes(self) -> list[dict[str, Any]]: ...
+
+    def load_all_cached_obtain_ways(self) -> dict[int, dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 
@@ -436,6 +462,36 @@ class SqliteMemoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_bot_events_scope
                     ON bot_events (bot_char_id, id DESC);
+
+                CREATE TABLE IF NOT EXISTS recipe_cache_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS recipes_cache (
+                    recipe_id INTEGER PRIMARY KEY,
+                    game_version TEXT NOT NULL,
+                    recipe_kind TEXT NOT NULL,
+                    output_item_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    output_name TEXT NOT NULL,
+                    yield_per_craft INTEGER NOT NULL,
+                    focus_cost INTEGER NOT NULL,
+                    data_json TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_recipes_cache_output
+                    ON recipes_cache (output_item_id);
+
+                CREATE INDEX IF NOT EXISTS idx_recipes_cache_name
+                    ON recipes_cache (name, output_name);
+
+                CREATE TABLE IF NOT EXISTS item_obtain_ways_cache (
+                    item_id INTEGER PRIMARY KEY,
+                    game_version TEXT NOT NULL,
+                    item_name TEXT NOT NULL,
+                    data_json TEXT NOT NULL
+                );
                 """
             )
             cur.execute(
@@ -924,3 +980,185 @@ class SqliteMemoryStore:
             memories=tuple(picked[:max_memories]),
             recent_events=recent_events,
         )
+
+    # ─────────────────────── Versioned Recipe Cache ───────────────────────
+
+    def get_cached_recipe_version(self) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM recipe_cache_meta WHERE key = 'game_version'"
+            ).fetchone()
+            return str(row["value"]) if row is not None else ""
+
+    def replace_recipe_catalog(
+        self,
+        game_version: str,
+        recipes: list[dict[str, Any]],
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ver = sanitize_text(game_version, 64) or "unknown"
+        now_ts = self._clock()
+        with self._lock:
+            self._conn.execute("DELETE FROM recipes_cache")
+            self._conn.execute("DELETE FROM item_obtain_ways_cache")
+            recipe_rows: list[tuple[Any, ...]] = []
+            for rec in recipes:
+                if not isinstance(rec, dict):
+                    continue
+                rid = int(rec.get("recipe_id") or 0)
+                if rid <= 0:
+                    continue
+                recipe_rows.append(
+                    (
+                        rid,
+                        ver,
+                        str(rec.get("recipe_kind") or "life_build"),
+                        int(rec.get("output_item_id") or 0),
+                        str(rec.get("name") or f"Recipe#{rid}"),
+                        str(rec.get("output_name") or rec.get("name") or ""),
+                        max(1, int(rec.get("yield_per_craft") or 1)),
+                        max(0, int(rec.get("focus_cost") or 0)),
+                        json.dumps(rec, ensure_ascii=False),
+                    )
+                )
+            if recipe_rows:
+                self._conn.executemany(
+                    """
+                    INSERT INTO recipes_cache (
+                        recipe_id, game_version, recipe_kind, output_item_id,
+                        name, output_name, yield_per_craft, focus_cost, data_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    recipe_rows,
+                )
+
+            item_rows: list[tuple[Any, ...]] = []
+            seen_items: set[int] = set()
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                iid = int(it.get("item_id") or 0)
+                if iid <= 0 or iid in seen_items:
+                    continue
+                seen_items.add(iid)
+                item_rows.append(
+                    (
+                        iid,
+                        ver,
+                        str(it.get("item_name") or f"Item#{iid}"),
+                        json.dumps(it, ensure_ascii=False),
+                    )
+                )
+            if item_rows:
+                self._conn.executemany(
+                    """
+                    INSERT INTO item_obtain_ways_cache (
+                        item_id, game_version, item_name, data_json
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    item_rows,
+                )
+
+            self._conn.execute(
+                "INSERT INTO recipe_cache_meta(key, value) VALUES('game_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (ver,),
+            )
+            self._conn.execute(
+                "INSERT INTO recipe_cache_meta(key, value) VALUES('updated_at', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (now_ts,),
+            )
+            self._conn.commit()
+            return {
+                "game_version": ver,
+                "recipes_cached": len(recipe_rows),
+                "items_cached": len(item_rows),
+                "updated_at": now_ts,
+            }
+
+    def find_cached_recipes(
+        self,
+        *,
+        query: str = "",
+        output_item_id: int = 0,
+        recipe_id: int = 0,
+        recipe_kind: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        lim = max(1, min(200, int(limit or 20)))
+        clauses: list[str] = ["1=1"]
+        params: list[Any] = []
+        if recipe_id > 0:
+            clauses.append("recipe_id = ?")
+            params.append(int(recipe_id))
+        if output_item_id > 0:
+            clauses.append("output_item_id = ?")
+            params.append(int(output_item_id))
+        if recipe_kind and recipe_kind.strip():
+            clauses.append("recipe_kind = ?")
+            params.append(recipe_kind.strip())
+        q_clean = sanitize_text(query, 64)
+        if q_clean:
+            pat = f"%{escape_like_pattern(q_clean)}%"
+            clauses.append("(name LIKE ? ESCAPE '\\' OR output_name LIKE ? ESCAPE '\\')")
+            params.extend([pat, pat])
+
+        sql = (
+            f"SELECT data_json FROM recipes_cache WHERE {' AND '.join(clauses)} "
+            "ORDER BY LENGTH(name) ASC, recipe_id ASC LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, [*params, lim]).fetchall()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                try:
+                    parsed = json.loads(str(r["data_json"]))
+                    if isinstance(parsed, dict):
+                        out.append(parsed)
+                except json.JSONDecodeError:
+                    pass
+            return out
+
+    def get_cached_item_obtain_way(self, item_id: int) -> dict[str, Any] | None:
+        iid = int(item_id or 0)
+        if iid <= 0:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data_json FROM item_obtain_ways_cache WHERE item_id = ?",
+                (iid,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                parsed = json.loads(str(row["data_json"]))
+                return parsed if isinstance(parsed, dict) else None
+            except json.JSONDecodeError:
+                return None
+
+    def load_all_cached_recipes(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT data_json FROM recipes_cache ORDER BY recipe_id ASC").fetchall()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                try:
+                    parsed = json.loads(str(r["data_json"]))
+                    if isinstance(parsed, dict):
+                        out.append(parsed)
+                except json.JSONDecodeError:
+                    pass
+            return out
+
+    def load_all_cached_obtain_ways(self) -> dict[int, dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT item_id, data_json FROM item_obtain_ways_cache").fetchall()
+            out: dict[int, dict[str, Any]] = {}
+            for r in rows:
+                try:
+                    parsed = json.loads(str(r["data_json"]))
+                    if isinstance(parsed, dict):
+                        out[int(r["item_id"])] = parsed
+                except json.JSONDecodeError:
+                    pass
+            return out

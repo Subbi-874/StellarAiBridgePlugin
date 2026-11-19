@@ -46,6 +46,11 @@ public sealed class CapabilityRegistry
         ["list_gatherables"] = CapabilityKeys.AutoGather,
         ["fish"] = CapabilityKeys.AutoFish,
         ["list_fishing_spots"] = CapabilityKeys.AutoFish,
+        ["get_item_count"] = CapabilityKeys.Craft,
+        ["get_recipe"] = CapabilityKeys.Craft,
+        ["export_recipes"] = CapabilityKeys.Craft,
+        ["craft_item"] = CapabilityKeys.Craft,
+        ["farm_monster_item"] = CapabilityKeys.MonsterSeek,
         ["reset_camera"] = CapabilityKeys.CameraGuard
     };
 

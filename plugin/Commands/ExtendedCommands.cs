@@ -1,12 +1,15 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
+using Stellar.AgyBridge.Adapters.Items;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Character;
 using Stellar.AgyBridge.Core;
 using Stellar.AgyBridge.Fishing;
 using Stellar.AgyBridge.Locomotion;
+using Stellar.AgyBridge.Lua;
 using Stellar.AgyBridge.World;
 using Stellar.Abstractions.Services;
 
@@ -38,6 +41,8 @@ public static class ExtendedCommands
         StickerService stickers,
         AutoFishingIntegration autoFishing,
         TraversalGimmickService traversal,
+        IItemAdapter items,
+        LuaBridge lua,
         Action? onUiStateChanged = null)
     {
         static JsonObject Blocked(BridgeConfig cfg, string key, string err) => new()
@@ -225,6 +230,112 @@ public static class ExtendedCommands
 
             string phase = snap["phase"]?.GetValue<string>() ?? "";
             bool failedAtStart = phase is "gimmick_not_found" or "gimmick_trigger_failed";
+            var res = new JsonObject { ["ok"] = !failedAtStart, ["behavior"] = snap };
+            if (failedAtStart) res["error"] = snap["detail"]?.GetValue<string>() ?? phase;
+            return res;
+        });
+
+        // 15. Inventory counting, multi-domain recipe lookup/export, crafting, and monster-drop farming
+        Open("get_item_count", p =>
+        {
+            int itemId = p?["item_id"]?.GetValue<int>() ?? 0;
+            string? query = p?["query"]?.GetValue<string>() ?? p?["item"]?.GetValue<string>();
+            List<int>? idList = null;
+            if (p?["item_ids"] is JsonArray arr)
+            {
+                idList = new List<int>(arr.Count);
+                foreach (var n in arr)
+                {
+                    if (n is JsonValue jv && jv.TryGetValue<int>(out int idVal) && idVal > 0)
+                        idList.Add(idVal);
+                }
+            }
+            return items.GetItemCount(itemId, query, idList);
+        });
+
+        Open("get_recipe", p =>
+        {
+            int recipeId = p?["recipe_id"]?.GetValue<int>() ?? 0;
+            string? query = p?["query"]?.GetValue<string>() ?? p?["item"]?.GetValue<string>();
+            return items.GetRecipe(recipeId, query);
+        });
+
+        Open("export_recipes", p =>
+        {
+            int offset = p?["offset"]?.GetValue<int>() ?? 0;
+            int limit = p?["limit"]?.GetValue<int>() ?? 200;
+            bool refresh = p?["refresh"]?.GetValue<bool>() ?? false;
+            return items.ExportRecipeCatalog(offset, limit, refresh);
+        });
+
+        Gated("craft_item", FeaturePolicyKeys.AutoCraft, p =>
+        {
+            int recipeId = p?["recipe_id"]?.GetValue<int>() ?? 0;
+            string query = (p?["query"]?.GetValue<string>()
+                            ?? p?["recipe"]?.GetValue<string>()
+                            ?? p?["item"]?.GetValue<string>()
+                            ?? "").Trim();
+            int count = p?["count"]?.GetValue<int>() ?? 1;
+            if (recipeId <= 0 && string.IsNullOrEmpty(query))
+                return new JsonObject { ["ok"] = false, ["error"] = "Missing 'recipe_id' or 'query'" };
+
+            var behavior = new CraftItemBehavior(
+                services,
+                config,
+                world,
+                navigator,
+                autoCombat,
+                moveDriver,
+                boost,
+                items,
+                lua,
+                recipeId,
+                query,
+                count);
+
+            var snap = behaviors.StartBehavior(behavior);
+            onUiStateChanged?.Invoke();
+
+            string phase = snap["phase"]?.GetValue<string>() ?? "";
+            bool failedAtStart = phase is "recipe_query_failed" or "recipe_not_found" or "recipe_locked"
+                or "insufficient_focus" or "insufficient_materials" or "missing_base_equip" or "craft_coro_start_failed";
+            var res = new JsonObject { ["ok"] = !failedAtStart, ["behavior"] = snap };
+            if (failedAtStart) res["error"] = snap["detail"]?.GetValue<string>() ?? phase;
+            return res;
+        });
+
+        Gated("farm_monster_item", FeaturePolicyKeys.FollowMove, p =>
+        {
+            if (config.IsAdminLocked(FeaturePolicyKeys.AutoCombat))
+                return Blocked(config, FeaturePolicyKeys.AutoCombat, "'자동전투 지속 유지' 기능이 어드민락(2)으로 잠겨 있습니다.");
+
+            string monster = (p?["monster"]?.GetValue<string>() ?? p?["query"]?.GetValue<string>() ?? "").Trim();
+            int itemId = p?["item_id"]?.GetValue<int>() ?? 0;
+            long targetCount = p?["target_count"]?.GetValue<long>() ?? p?["count"]?.GetValue<long>() ?? 1L;
+            float timeoutSec = p?["timeout_sec"]?.GetValue<float>() ?? 420f;
+            if (string.IsNullOrEmpty(monster) || itemId <= 0)
+                return new JsonObject { ["ok"] = false, ["error"] = "Missing 'monster' or 'item_id'" };
+
+            var behavior = new FarmMonsterItemBehavior(
+                services,
+                config,
+                world,
+                navigator,
+                autoCombat,
+                moveDriver,
+                boost,
+                monsters,
+                items,
+                monster,
+                itemId,
+                targetCount,
+                timeoutSec);
+
+            var snap = behaviors.StartBehavior(behavior);
+            onUiStateChanged?.Invoke();
+
+            string phase = snap["phase"]?.GetValue<string>() ?? "";
+            bool failedAtStart = phase is "invalid_item_id" or "monster_not_found" or "no_spawn_found";
             var res = new JsonObject { ["ok"] = !failedAtStart, ["behavior"] = snap };
             if (failedAtStart) res["error"] = snap["detail"]?.GetValue<string>() ?? phase;
             return res;

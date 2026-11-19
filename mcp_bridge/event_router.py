@@ -42,6 +42,10 @@ GOAL_FEEDBACK_EVENTS: frozenset[str] = frozenset({
     "revived",
     "revive_failed",
     "interaction_accepted",
+    "craft_completed",
+    "craft_failed",
+    "monster_farm_completed",
+    "monster_farm_failed",
 })
 
 _EVENT_TO_ACTION_KINDS: dict[str, tuple[str, ...]] = {
@@ -56,6 +60,10 @@ _EVENT_TO_ACTION_KINDS: dict[str, tuple[str, ...]] = {
     "gimmick_used": ("use_gimmick",),
     "gimmick_failed": ("use_gimmick",),
     "interaction_accepted": ("accept_interaction",),
+    "craft_completed": ("craft_item",),
+    "craft_failed": ("craft_item",),
+    "monster_farm_completed": ("farm_monster_item",),
+    "monster_farm_failed": ("farm_monster_item",),
 }
 
 _SUCCESS_EVENTS: frozenset[str] = frozenset({
@@ -64,6 +72,8 @@ _SUCCESS_EVENTS: frozenset[str] = frozenset({
     "monster_seek_arrived",
     "gimmick_used",
     "interaction_accepted",
+    "craft_completed",
+    "monster_farm_completed",
 })
 
 _SUCCESS_PHASES: frozenset[str] = frozenset({
@@ -323,6 +333,10 @@ class GoalEventRouter:
     @staticmethod
     def _build_completion_fact(goal: Goal, data: dict[str, Any]) -> str:
         cur_step = goal.steps[-1] if goal.steps else None
+        if goal.kind == "craft_goal" or (cur_step and cur_step.action_type == "craft_item"):
+            if data.get("build_queued"):
+                return f"'{goal.title}' 홈 가구 제작을 등록했어요."
+            return f"'{goal.title}' 완료!"
         if goal.kind == "gather_resource" or (cur_step and cur_step.action_type == "gather_resource"):
             rname = data.get("resource_name") or (cur_step.params.get("resource") if cur_step else "") or "채집"
             cnt = cur_step.target_count if (cur_step and cur_step.target_count > 0) else data.get("gathered_count") or 0
