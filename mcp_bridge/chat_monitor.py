@@ -15,6 +15,7 @@ from action_executor import (  # noqa: F401
     ActionExecutor,
     format_task_event_fact,
 )
+from bot_agent import BotAgent, BotAgentRegistry, LlmCallBudget  # noqa: F401
 from chat_output import (  # noqa: F401
     MAX_CHAT_CHUNK_CHARS,
     MAX_CHUNKS_PER_REPLY,
@@ -77,16 +78,23 @@ class ChatMonitorService:
         self.extra_triggers: list[str] = []
 
         self._default_cfg = ClientChatSettings()
-        self._client_cfgs: dict[str, ClientChatSettings] = {}
+        self.agents = BotAgentRegistry(
+            max_concurrent_llm=config.MAX_CONCURRENT_LLM_CALLS,
+            max_calls_per_minute=config.LLM_BUDGET_PER_MINUTE,
+            max_calls_per_goal=config.LLM_BUDGET_PER_GOAL,
+        )
 
         self._seen_msg_keys: deque[Any] = deque(maxlen=400)
         self._sender_cooldowns: dict[tuple[str, int], float] = {}
         self._trigger_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
         self._history: deque[dict[str, Any]] = deque(maxlen=50)
-        self._worker_lock = asyncio.Lock()
+        self._behavior_finished_listeners: list[Any] = []
         self._last_gather_trigger_ch: dict[str, tuple[str, int]] = {}
-        # (conn_id, kind) -> (channel, sender_id, monotonic_ts); kind in {"follow", "monster", "fish", "gimmick"}
+        # Legacy fallback when conn_id has not bound to a BotAgent(char_id) yet.
         self._last_action_trigger: dict[tuple[str, str], tuple[str, int, float]] = {}
+
+    def add_behavior_finished_listener(self, callback: Any) -> None:
+        self._behavior_finished_listeners.append(callback)
 
     def _record_bot_outbox(self, text: str) -> None:
         self._echo_guard.record(text)
@@ -95,9 +103,7 @@ class ChatMonitorService:
         return self._echo_guard.is_recent(text, ttl_sec=ttl_sec)
 
     def _get_cfg(self, conn_id: str | None) -> ClientChatSettings:
-        if conn_id and conn_id in self._client_cfgs:
-            return self._client_cfgs[conn_id]
-        return self._default_cfg
+        return self.agents.get_settings(conn_id, self._default_cfg)
 
     def configure(
         self,
@@ -110,7 +116,7 @@ class ChatMonitorService:
         authorized_commanders: list[str] | None = None,
         conn_id: str | None = None,
     ) -> dict[str, Any]:
-        target_cfg = self._client_cfgs.setdefault(conn_id, ClientChatSettings()) if conn_id else self._default_cfg
+        target_cfg = self.agents.ensure_settings(conn_id, self._default_cfg)
         if target_cfg.feature_modes.get("chat_monitor") != 2:
             target_cfg.enabled = enabled
             target_cfg.feature_modes["chat_monitor"] = 1 if enabled else 0
@@ -141,7 +147,7 @@ class ChatMonitorService:
     def apply_ui_settings(self, conn_id: str | None, data: dict[str, Any]) -> None:
         if not isinstance(data, dict):
             return
-        cfg = self._client_cfgs.setdefault(conn_id, ClientChatSettings()) if conn_id else self._default_cfg
+        cfg = self.agents.ensure_settings(conn_id, self._default_cfg)
         if isinstance(data.get("feature_modes"), dict):
             for k, v in data["feature_modes"].items():
                 try:
@@ -182,7 +188,7 @@ class ChatMonitorService:
                 "feature_modes": dict(c.feature_modes),
                 "llm_settings": c.llm.masked_dict(),
             }
-            for cid, c in self._client_cfgs.items()
+            for cid, c in self.agents.iter_client_settings().items()
         }
         return {
             "enabled": cfg.enabled,
@@ -198,6 +204,8 @@ class ChatMonitorService:
             "authorized_commander_uids": sorted(cfg.authorized_commander_uids),
             "feature_modes": dict(cfg.feature_modes),
             "per_client": per_client_summary,
+            "agents": self.agents.list_agents(),
+            "max_concurrent_llm_calls": self.agents.max_concurrent_llm,
             "agy_cli_path": config.AGY_CLI_PATH,
             "agy_cli_exists": Path(config.AGY_CLI_PATH).exists(),
             "agy_cli_model": config.AGY_CLI_MODEL,
@@ -221,9 +229,81 @@ class ChatMonitorService:
             party_member_ids = {int(m.get("char_id") or 0) for m in (party.get("members") or []) if m.get("char_id")}
         return is_sender_authorized_sync(cfg, sender_id, sender_name, party_member_ids=party_member_ids)
 
+    async def _notify_behavior_finished_listeners(
+        self,
+        conn_id: str | None,
+        agent: BotAgent | None,
+        data: dict[str, Any],
+    ) -> None:
+        for cb in list(self._behavior_finished_listeners):
+            try:
+                res = cb(conn_id, agent, data)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("behavior_finished listener error: %r", exc)
+
+    def _resolve_agent(self, conn_id: str | None, char_id: int = 0, char_name: str = "") -> BotAgent | None:
+        if conn_id and char_id > 0:
+            return self.agents.bind_connection(conn_id, char_id, char_name, in_world=True)
+        if char_id > 0:
+            return self.agents.get_by_char_id(char_id)
+        return self.agents.get_by_conn_id(conn_id)
+
     async def on_bridge_event(self, event_msg: dict[str, Any]) -> None:
         conn_id = event_msg.get("conn_id")
         ev_name = event_msg.get("event")
+
+        if ev_name == "client_hello":
+            data = event_msg.get("data") or {}
+            cid = int(data.get("local_char_id") or 0)
+            if conn_id and cid > 0:
+                self.agents.bind_connection(
+                    conn_id,
+                    cid,
+                    str(data.get("local_char_name") or ""),
+                    in_world=bool(data.get("in_world", True)),
+                )
+            return
+
+        if ev_name == "bot_identity_changed":
+            data = event_msg.get("data") or {}
+            if conn_id:
+                self.agents.bind_connection(
+                    conn_id,
+                    int(data.get("local_char_id") or 0),
+                    str(data.get("local_char_name") or ""),
+                    in_world=bool(data.get("in_world", False)),
+                )
+            return
+
+        if ev_name == "client_disconnected":
+            if conn_id:
+                self.agents.unbind_connection(conn_id)
+            return
+
+        if ev_name == "manual_input_detected":
+            data = event_msg.get("data") or {}
+            agent = self._resolve_agent(
+                conn_id,
+                int(data.get("local_char_id") or 0),
+                str(data.get("local_char_name") or ""),
+            )
+            if agent is not None:
+                agent.record_manual_input()
+            return
+
+        if ev_name == "behavior_finished":
+            data = event_msg.get("data") or {}
+            agent = self._resolve_agent(
+                conn_id,
+                int(data.get("local_char_id") or 0),
+                str(data.get("local_char_name") or ""),
+            )
+            if agent is not None:
+                agent.last_behavior_finished = dict(data)
+            await self._notify_behavior_finished_listeners(conn_id, agent, data)
+            return
 
         if ev_name == "ui_chat_settings_changed":
             data = event_msg.get("data")
@@ -234,7 +314,7 @@ class ChatMonitorService:
         if ev_name == "capabilities_updated":
             data = event_msg.get("data")
             if isinstance(data, dict):
-                cfg = self._client_cfgs.setdefault(conn_id, ClientChatSettings()) if conn_id else self._default_cfg
+                cfg = self.agents.ensure_settings(conn_id, self._default_cfg)
                 raw_missing = data.get("missing_labels")
                 if isinstance(raw_missing, list):
                     cfg.unavailable_capabilities = [str(x).strip() for x in raw_missing if str(x).strip()]
@@ -251,14 +331,22 @@ class ChatMonitorService:
             await self._handle_task_event(conn_id, str(ev_name), event_msg.get("data") or {})
             return
 
-        if ev_name == "gather_completed" and conn_id in self._last_gather_trigger_ch:
-            ch, target_cid = self._last_gather_trigger_ch.pop(conn_id)
-            gdata = event_msg.get("data") or {}
-            rname = gdata.get("resource_name") or gdata.get("resource_query") or "채집물"
-            gcnt = gdata.get("gathered_count") or gdata.get("target_count") or 0
-            fact = f"{rname} {gcnt}회 채집 완료"
-            done_txt = await self._render_event_in_persona(conn_id, ch, fact)
-            await self._output.send_notice(ch, done_txt, target_cid, conn_id=conn_id)
+        if ev_name == "gather_completed":
+            g_agent = self.agents.get_by_conn_id(conn_id)
+            gather_entry: tuple[str, int] | None = None
+            if g_agent is not None and g_agent.last_gather_trigger is not None:
+                gather_entry = g_agent.last_gather_trigger
+                g_agent.last_gather_trigger = None
+            elif conn_id and conn_id in self._last_gather_trigger_ch:
+                gather_entry = self._last_gather_trigger_ch.pop(conn_id)
+            if gather_entry is not None:
+                ch, target_cid = gather_entry
+                gdata = event_msg.get("data") or {}
+                rname = gdata.get("resource_name") or gdata.get("resource_query") or "채집물"
+                gcnt = gdata.get("gathered_count") or gdata.get("target_count") or 0
+                fact = f"{rname} {gcnt}회 채집 완료"
+                done_txt = await self._render_event_in_persona(conn_id, ch, fact)
+                await self._output.send_notice(ch, done_txt, target_cid, conn_id=conn_id)
             return
 
         cfg = self._get_cfg(conn_id)
@@ -312,6 +400,10 @@ class ChatMonitorService:
             local_cid = int(player.get("char_id") or local_cid)
             local_name = str(player.get("name") or local_name).strip()
 
+        if conn_id and local_cid > 0:
+            self.agents.bind_connection(conn_id, local_cid, local_name, in_world=True)
+            cfg = self._get_cfg(conn_id)
+
         if (local_cid > 0 and sender_id == local_cid) or (local_name and sender_name == local_name):
             return
 
@@ -335,6 +427,7 @@ class ChatMonitorService:
         now_dt = datetime.now().astimezone()
         trigger_payload = {
             "conn_id": conn_id,
+            "local_char_id": local_cid,
             "msg_id": msg_id,
             "channel": norm_ch,
             "sender_id": sender_id,
@@ -422,9 +515,49 @@ class ChatMonitorService:
         prompt_cli = f"{full_cli_prompt}\n\n{extra_block}" if extra_block else full_cli_prompt
         return await call_local_cli(llm, prompt_cli, RESPONSE_SCHEMA)
 
-    def _remember_trigger(self, conn_id: str, kind: str, trig: dict[str, Any]) -> None:
+    async def _invoke_llm_guarded(
+        self,
+        agent: BotAgent | None,
+        goal_id: str | None,
+        llm: LlmClientConfig,
+        trig: dict[str, Any],
+        game_context: dict[str, Any] | None,
+        recent_chat_block: str,
+        system_prompt: str,
+        user_prompt: str,
+        full_cli_prompt: str,
+        persona_block: str = "",
+        system_instructions_block: str = "",
+        extra_block: str = "",
+    ) -> tuple[str, bool]:
+        if agent is not None:
+            allowed, reason = agent.budget.can_call(goal_id)
+            if not allowed:
+                logger.warning("LLM call skipped for bot %s (%s): %s", agent.char_id, agent.conn_id, reason)
+                return "", False
+            agent.budget.record_call(goal_id)
+
+        async with self.agents.llm_semaphore:
+            return await self._invoke_llm(
+                llm,
+                trig,
+                game_context,
+                recent_chat_block,
+                system_prompt,
+                user_prompt,
+                full_cli_prompt,
+                persona_block=persona_block,
+                system_instructions_block=system_instructions_block,
+                extra_block=extra_block,
+            )
+
+    def _remember_trigger(self, conn_id: str | None, kind: str, trig: dict[str, Any], agent: BotAgent | None = None) -> None:
         """Remembers which chat channel/sender started a long-running behavior so its completion can be announced there."""
-        self._last_action_trigger[(conn_id, kind)] = (str(trig["channel"]), int(trig["sender_id"] or 0), time.monotonic())
+        resolved = agent or self._resolve_agent(conn_id, int(trig.get("local_char_id") or 0))
+        if resolved is not None:
+            resolved.remember_action_trigger(kind, str(trig["channel"]), int(trig["sender_id"] or 0))
+        elif conn_id is not None:
+            self._last_action_trigger[(conn_id, kind)] = (str(trig["channel"]), int(trig["sender_id"] or 0), time.monotonic())
 
     async def _second_pass_reply(
         self,
@@ -438,6 +571,7 @@ class ChatMonitorService:
         system_prompt: str,
         user_prompt: str,
         full_cli_prompt: str,
+        agent: BotAgent | None = None,
     ) -> tuple[str, str]:
         """
         Feeds execution/query/refusal/error outcomes back to the LLM so EVERY reply (including refusals & errors)
@@ -446,7 +580,9 @@ class ChatMonitorService:
         """
         extra = build_second_pass_extra(outcome_items)
         try:
-            raw, timed_out = await self._invoke_llm(
+            raw, timed_out = await self._invoke_llm_guarded(
+                agent,
+                None,
                 llm,
                 trig,
                 game_context,
@@ -473,6 +609,7 @@ class ChatMonitorService:
         cfg = self._get_cfg(conn_id)
         if cfg.llm.backend == "local_cli":
             return event_fact
+        agent = self.agents.get_by_conn_id(conn_id)
         try:
             ep = build_event_persona_prompts(
                 cfg.llm.persona,
@@ -480,7 +617,9 @@ class ChatMonitorService:
                 event_fact,
                 is_remote_bpsr=(cfg.llm.backend == "remote_bpsr"),
             )
-            raw, timed_out = await self._invoke_llm(
+            raw, timed_out = await self._invoke_llm_guarded(
+                agent,
+                None,
                 cfg.llm,
                 ep.synth_trig,
                 ep.game_context,
@@ -504,21 +643,27 @@ class ChatMonitorService:
     async def _handle_task_event(self, conn_id: str | None, ev_name: str, data: dict[str, Any]) -> None:
         """Announces completion/failure of long-running behaviors (follow, monster seek, fishing, gimmick) in the chat that requested them."""
         kind, fact = format_task_event_fact(ev_name, data)
-        entry = self._last_action_trigger.get((conn_id or "", kind))
+        max_age = 60 * 60 if kind == "fish" else 15 * 60
+        agent = self.agents.get_by_conn_id(conn_id)
+        entry: tuple[str, int, float] | None = None
+        if agent is not None:
+            entry = agent.pop_action_trigger(kind, max_age)
+        if entry is None:
+            legacy_entry = self._last_action_trigger.pop((conn_id or "", kind), None)
+            if legacy_entry is not None and time.monotonic() - legacy_entry[2] <= max_age:
+                entry = legacy_entry
         if not entry:
             return
-        channel, sender_id, ts = entry
-        if time.monotonic() - ts > (60 * 60 if kind == "fish" else 15 * 60):
-            self._last_action_trigger.pop((conn_id or "", kind), None)
-            return
-
-        self._last_action_trigger.pop((conn_id or "", kind), None)
+        channel, sender_id, _ = entry
         text = await self._render_event_in_persona(conn_id, channel, fact)
         await self._output.send_notice(channel, text, sender_id, conn_id=conn_id)
 
     async def _process_with_llm(self, trig: dict[str, Any], cfg: ClientChatSettings) -> None:
         conn_id = trig.get("conn_id")
-        async with self._worker_lock:
+        local_cid = int(trig.get("local_char_id") or 0)
+        bot_lock = self.agents.get_or_create_lock(conn_id, local_cid)
+        agent = self._resolve_agent(conn_id, local_cid, str(trig.get("local_char_name") or ""))
+        async with bot_lock:
             try:
                 st = await self._dispatch("get_status", {}, conn_id=conn_id)
                 em_res = await self._dispatch("list_emotes", {}, conn_id=conn_id)
@@ -591,7 +736,9 @@ class ChatMonitorService:
                     korean_time,
                     unavailable_labels=cfg.unavailable_capabilities,
                 )
-                raw_out, timed_out = await self._invoke_llm(
+                raw_out, timed_out = await self._invoke_llm_guarded(
+                    agent,
+                    None,
                     cfg.llm,
                     trig,
                     prompts.game_context,
@@ -627,17 +774,21 @@ class ChatMonitorService:
                     decision["actions"] = []
 
                 def _remember_kind(kind: str) -> None:
-                    if conn_id:
-                        self._remember_trigger(conn_id, kind, trig)
+                    self._remember_trigger(conn_id, kind, trig, agent=agent)
 
                 def _clear_kinds(kinds: tuple[str, ...]) -> None:
+                    if agent is not None:
+                        agent.clear_action_triggers(kinds)
                     if conn_id:
                         for k in kinds:
                             self._last_action_trigger.pop((conn_id, k), None)
 
                 def _remember_gather() -> None:
+                    entry = (trig["channel"], int(trig["sender_id"] or 0))
+                    if agent is not None:
+                        agent.last_gather_trigger = entry
                     if conn_id:
-                        self._last_gather_trigger_ch[conn_id] = (trig["channel"], int(trig["sender_id"] or 0))
+                        self._last_gather_trigger_ch[conn_id] = entry
 
                 batch = await self._executor.execute_batch(
                     actions_to_run,
@@ -664,6 +815,7 @@ class ChatMonitorService:
                         prompts.system_prompt,
                         prompts.user_prompt,
                         prompts.full_cli_prompt,
+                        agent=agent,
                     )
                     if followup_txt:
                         reply_text = followup_txt
@@ -705,6 +857,8 @@ class ChatMonitorService:
                     "decision": decision,
                     "executed": batch.executed,
                 }
+                if agent is not None:
+                    agent.history.append(record)
                 self._history.append(record)
                 logger.info("Handled chat trigger via %s [%s]: %s", cfg.llm.backend, conn_id, record)
             except Exception as exc:

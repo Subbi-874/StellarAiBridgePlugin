@@ -18,6 +18,7 @@ public sealed class BridgeWebSocketClient : IDisposable
     private readonly MainThreadDispatcher _dispatcher;
     private readonly CommandRegistry _commands;
     private readonly Func<JsonObject>? _capabilitiesProvider;
+    private readonly Func<JsonObject>? _identityProvider;
 
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _sendLock = new(1, 1);
@@ -31,13 +32,15 @@ public sealed class BridgeWebSocketClient : IDisposable
         BridgeConfig config,
         MainThreadDispatcher dispatcher,
         CommandRegistry commands,
-        Func<JsonObject>? capabilitiesProvider = null)
+        Func<JsonObject>? capabilitiesProvider = null,
+        Func<JsonObject>? identityProvider = null)
     {
         _log = log;
         _config = config;
         _dispatcher = dispatcher;
         _commands = commands;
         _capabilitiesProvider = capabilitiesProvider;
+        _identityProvider = identityProvider;
     }
 
     public void Start()
@@ -76,13 +79,17 @@ public sealed class BridgeWebSocketClient : IDisposable
                 // Send hello handshake with supported methods
                 var methodsArr = new JsonArray();
                 foreach (var m in _commands.RegisteredMethods) methodsArr.Add(m);
+                var idObj = _identityProvider?.Invoke();
                 var hello = new JsonObject
                 {
                     ["type"] = "hello",
                     ["plugin"] = "Stellar.AgyBridge",
-                    ["version"] = "0.9.20",
+                    ["version"] = "0.9.21",
                     ["pid"] = Environment.ProcessId,
                     ["game_dir"] = Environment.CurrentDirectory,
+                    ["local_char_id"] = idObj?["local_char_id"]?.GetValue<long>() ?? 0L,
+                    ["local_char_name"] = idObj?["local_char_name"]?.GetValue<string>() ?? "",
+                    ["in_world"] = idObj?["in_world"]?.GetValue<bool>() ?? false,
                     ["methods"] = methodsArr,
                     ["chat_settings"] = _config.ToChatSettingsJson(),
                     ["capabilities"] = _capabilitiesProvider?.Invoke() ?? new JsonObject()

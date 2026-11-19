@@ -19,13 +19,29 @@ public sealed class BehaviorRunner : IDisposable
     }
 
     public IBehavior? Current => _current;
+    public event Action<string, string, JsonObject>? BehaviorFinished;
+
+    private void RaiseFinished(string kind, string reason, JsonObject snap)
+    {
+        try
+        {
+            BehaviorFinished?.Invoke(kind, reason, snap);
+        }
+        catch (Exception ex)
+        {
+            _services.Log.Warning($"[AgyBridge][Behavior] BehaviorFinished listener error: {ex.Message}");
+        }
+    }
 
     public JsonObject StartBehavior(IBehavior behavior)
     {
         if (_current != null)
         {
-            try { _current.Stop("replaced"); } catch { }
+            var prev = _current;
             _current = null;
+            try { prev.Stop("replaced"); } catch { }
+            var prevSnap = prev.GetSnapshot();
+            RaiseFinished(prev.Kind, "replaced", prevSnap);
         }
 
         _current = behavior;
@@ -53,7 +69,9 @@ public sealed class BehaviorRunner : IDisposable
         _moveDriver.ForceStopAll();
         _lastFinishedSummary = $"{prev.Kind}:{reason}";
         _services.Log.Info($"[AgyBridge][Behavior] Stopped {prev.Kind} ({reason})");
-        return prev.GetSnapshot();
+        var snap = prev.GetSnapshot();
+        RaiseFinished(prev.Kind, reason, snap);
+        return snap;
     }
 
     public void Tick(float deltaTime)
@@ -65,9 +83,12 @@ public sealed class BehaviorRunner : IDisposable
             _current.Tick(deltaTime);
             if (_current != null && _current.IsFinished)
             {
-                var snap = _current.GetSnapshot();
-                _lastFinishedSummary = $"{_current.Kind}:{snap["phase"]?.GetValue<string>() ?? "done"}";
+                var prev = _current;
                 _current = null;
+                var snap = prev.GetSnapshot();
+                string phase = snap["phase"]?.GetValue<string>() ?? "done";
+                _lastFinishedSummary = $"{prev.Kind}:{phase}";
+                RaiseFinished(prev.Kind, phase, snap);
             }
         }
         catch (Exception ex)

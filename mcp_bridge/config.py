@@ -25,3 +25,7 @@ AGY_CLI_PATH = (
 AGY_CLI_MODEL = os.getenv("AGY_CLI_MODEL", "gemini-4-hydrogen-low")
 AGY_CLI_EFFORT = os.getenv("AGY_CLI_EFFORT", "low")
 AGY_CLI_TIMEOUT = float(os.getenv("AGY_CLI_TIMEOUT", "75.0"))
+
+MAX_CONCURRENT_LLM_CALLS = max(1, int(os.getenv("MAX_CONCURRENT_LLM_CALLS", "3")))
+LLM_BUDGET_PER_MINUTE = max(1, int(os.getenv("LLM_BUDGET_PER_MINUTE", "20")))
+LLM_BUDGET_PER_GOAL = max(1, int(os.getenv("LLM_BUDGET_PER_GOAL", "8")))

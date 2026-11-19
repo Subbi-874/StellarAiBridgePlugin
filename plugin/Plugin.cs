@@ -1,5 +1,6 @@
 using System;
 using System.Text.Json.Nodes;
+using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Plugins;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters;
@@ -67,8 +68,15 @@ public sealed class Plugin : IStellarPlugin
     private readonly CommandRegistry _commands;
     private readonly BridgeWebSocketClient _wsClient;
     private readonly AgyBridgeUiWindow _uiWindow;
+    private sealed record IdentitySnapshot(long CharId, string CharName, bool InWorld);
+
     private readonly IUpdateRateScope _rateScope;
+    private volatile IdentitySnapshot _identity = new(0L, "", false);
     private float _bgCheckTimer;
+    private float _identityCheckTimer;
+    private float _manualInputPollTimer;
+    private float _manualInputEventCooldown;
+    private bool _wasWsConnected;
 
     public Plugin(IPluginServices services)
     {
@@ -132,7 +140,7 @@ public sealed class Plugin : IStellarPlugin
             () => _behaviors.Current);
         _cameraGuard = new AutoCameraGuardService(_services, _config, _world, _autoCombat, _behaviors);
 
-        _wsClient = new BridgeWebSocketClient(_services.Log, _config, _dispatcher, _commands, _capabilities.BuildStatusJson);
+        _wsClient = new BridgeWebSocketClient(_services.Log, _config, _dispatcher, _commands, _capabilities.BuildStatusJson, BuildIdentitySnapshotJson);
         _uiWindow = new AgyBridgeUiWindow(
             _services,
             _config,
@@ -196,6 +204,7 @@ public sealed class Plugin : IStellarPlugin
             _uiWindow.MarkDirty);
 
         _world.SubscribeEvents(_wsClient.PushEvent);
+        _behaviors.BehaviorFinished += OnBehaviorFinished;
         _capabilities.CapabilitiesUpdated += OnCapabilitiesUpdated;
         _config.ChatSettingsChanged += OnUiChatSettingsChanged;
         _config.FeatureModeChanged += OnFeatureModeChanged;
@@ -207,7 +216,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v0.9.19. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v0.9.21. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeatureModeChanged(string key, FeatureGateMode mode)
@@ -274,6 +283,8 @@ public sealed class Plugin : IStellarPlugin
         _dispatcher.Drain();
         _capabilities.Tick(deltaTime);
         _behaviors.Tick(deltaTime);
+        TickIdentitySync(deltaTime);
+        TickManualInputDetection(deltaTime);
         _combatEvade.Tick(deltaTime);
         _boost.TickReleasesOnly(deltaTime);
         _autoCombat.Tick(deltaTime, _world.GetLocalSceneId());
@@ -282,6 +293,97 @@ public sealed class Plugin : IStellarPlugin
         _interaction.Tick(deltaTime);
         _autoReady.Tick(deltaTime);
         _uiWindow.TickPendingEdits();
+    }
+
+    private JsonObject BuildIdentitySnapshotJson()
+    {
+        var id = _identity;
+        return new JsonObject
+        {
+            ["local_char_id"] = id.CharId,
+            ["local_char_name"] = id.CharName,
+            ["in_world"] = id.InWorld
+        };
+    }
+
+    private void OnBehaviorFinished(string kind, string reason, JsonObject snap)
+    {
+        var id = _identity;
+        var clonedSnap = JsonNode.Parse(snap.ToJsonString()) ?? new JsonObject();
+        _world.EmitBridgeEvent("behavior_finished", new JsonObject
+        {
+            ["kind"] = kind,
+            ["reason"] = reason,
+            ["phase"] = snap["phase"]?.GetValue<string>() ?? reason,
+            ["local_char_id"] = id.CharId,
+            ["local_char_name"] = id.CharName,
+            ["snapshot"] = clonedSnap
+        });
+    }
+
+    private void TickIdentitySync(float deltaTime)
+    {
+        bool wsConnected = _wsClient.IsConnected;
+        bool reconnectEdge = wsConnected && !_wasWsConnected;
+        _wasWsConnected = wsConnected;
+
+        _identityCheckTimer -= deltaTime;
+        if (!reconnectEdge && _identityCheckTimer > 0f)
+            return;
+        _identityCheckTimer = 0.25f;
+
+        bool inWorld = _services.ClientState.Phase == GamePhase.World && _services.PlayerState.IsAvailable;
+        long cid = inWorld ? _services.PlayerState.CharId : 0L;
+        string cname = inWorld ? (_services.PlayerState.Name ?? "") : "";
+
+        var prev = _identity;
+        bool changed = cid != prev.CharId || (cid > 0 && cname != prev.CharName) || inWorld != prev.InWorld;
+        if (changed)
+            _identity = new IdentitySnapshot(cid, cname, inWorld);
+
+        if (wsConnected && (changed || (reconnectEdge && cid > 0)))
+        {
+            _wsClient.PushEvent(new JsonObject
+            {
+                ["type"] = "event",
+                ["event"] = "bot_identity_changed",
+                ["data"] = new JsonObject
+                {
+                    ["local_char_id"] = cid,
+                    ["local_char_name"] = cname,
+                    ["in_world"] = inWorld,
+                    ["previous_char_id"] = prev.CharId
+                }
+            });
+        }
+    }
+
+    private void TickManualInputDetection(float deltaTime)
+    {
+        if (_manualInputEventCooldown > 0f)
+            _manualInputEventCooldown = MathF.Max(0f, _manualInputEventCooldown - deltaTime);
+
+        var id = _identity;
+        if (!id.InWorld)
+            return;
+
+        _manualInputPollTimer -= deltaTime;
+        if (_manualInputPollTimer <= 0f)
+        {
+            _manualInputPollTimer = 0.15f;
+            _moveDriver.PollManualInputIfIdle();
+        }
+
+        if (_manualInputEventCooldown <= 0f && _moveDriver.IsManualInputRecent(0.4))
+        {
+            _manualInputEventCooldown = 3.0f;
+            _world.EmitBridgeEvent("manual_input_detected", new JsonObject
+            {
+                ["local_char_id"] = id.CharId,
+                ["local_char_name"] = id.CharName,
+                ["is_driving"] = _moveDriver.IsDriving
+            });
+        }
     }
 
     private void EnforceRunInBackground()
@@ -304,6 +406,7 @@ public sealed class Plugin : IStellarPlugin
         _config.FeatureModeChanged -= OnFeatureModeChanged;
         _config.ChatSettingsChanged -= OnUiChatSettingsChanged;
         _capabilities.CapabilitiesUpdated -= OnCapabilitiesUpdated;
+        _behaviors.BehaviorFinished -= OnBehaviorFinished;
         _world.UnsubscribeEvents(_wsClient.PushEvent);
         _autoReady.Dispose();
         _uiWindow.Dispose();

@@ -85,7 +85,11 @@ public static class CoreCommands
             ["capabilities"] = capabilities.BuildStatusJson(),
             ["smart_pathfinding"] = config.EnableSmartPathfinding,
             ["nav_mode"] = boost.PathNavigator.ActiveNavMode,
-            ["move_inject_path"] = moveDriver.InjectPath
+            ["move_inject_path"] = moveDriver.InjectPath,
+            ["manual_input_active"] = moveDriver.IsManualInputRecent(2.0),
+            ["seconds_since_manual_input"] = double.IsFinite(moveDriver.SecondsSinceManualInput)
+                ? Math.Round(moveDriver.SecondsSinceManualInput, 2)
+                : null
         }));
 
         registry.Register(new DelegateBridgeCommand("get_capabilities", p =>

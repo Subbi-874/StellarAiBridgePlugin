@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Threading;
 using HarmonyLib;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Core;
@@ -17,19 +18,26 @@ public sealed class PlayerMoveDriver : IDisposable
     private static Vector2 InjectStick;
     private static Vector3 InjectWorldDir;
     private static bool InjectActive;
+    private static long _lastManualInputTickMs;
 
     private static void PostfixPrimitive(ref Vector2 __result)
     {
+        if (__result.sqrMagnitude > 0.04f)
+            Volatile.Write(ref _lastManualInputTickMs, Environment.TickCount64);
         if (InjectActive) __result = InjectStick;
     }
 
     private static void PostfixInputDir(ref Vector2 __result)
     {
+        if (__result.sqrMagnitude > 0.04f)
+            Volatile.Write(ref _lastManualInputTickMs, Environment.TickCount64);
         if (InjectActive) __result = InjectStick;
     }
 
     private static void PostfixGetInputDir(ref Vector3 __result)
     {
+        if (__result.sqrMagnitude > 0.04f)
+            Volatile.Write(ref _lastManualInputTickMs, Environment.TickCount64);
         if (InjectActive) __result = InjectWorldDir;
     }
 
@@ -48,6 +56,9 @@ public sealed class PlayerMoveDriver : IDisposable
     private PropertyInfo? _piPicInstance;
     private MethodInfo? _miMove;
     private bool _loggedMoveErr;
+    private bool _inputReadResolved;
+    private PropertyInfo? _piReadPicInstance;
+    private MethodInfo? _miReadInputDir;
 
     public PlayerMoveDriver(IPluginServices services)
     {
@@ -56,6 +67,43 @@ public sealed class PlayerMoveDriver : IDisposable
 
     public string InjectPath => _injectPath;
     public bool IsDriving => InjectActive && _owner != null;
+
+    public double SecondsSinceManualInput
+    {
+        get
+        {
+            long ts = Volatile.Read(ref _lastManualInputTickMs);
+            return ts <= 0 ? double.PositiveInfinity : Math.Max(0.0, (Environment.TickCount64 - ts) * 0.001);
+        }
+    }
+
+    public bool IsManualInputRecent(double withinSeconds = 5.0) => SecondsSinceManualInput <= withinSeconds;
+
+    public bool PollManualInputIfIdle()
+    {
+        if (IsDriving)
+            return false;
+
+        try
+        {
+            if (!_inputReadResolved)
+            {
+                _inputReadResolved = true;
+                var picType = InteropResolver.FindType("Panda.ZInput.PlayerInputController");
+                _piReadPicInstance = picType?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
+                _miReadInputDir = picType?.GetMethod("get_InputDir", BindingFlags.Public | BindingFlags.Instance);
+            }
+
+            var inst = _piReadPicInstance?.GetValue(null);
+            if (inst != null && _miReadInputDir?.Invoke(inst, null) is Vector2 vec && vec.sqrMagnitude > 0.04f)
+            {
+                Volatile.Write(ref _lastManualInputTickMs, Environment.TickCount64);
+                return true;
+            }
+        }
+        catch { }
+        return false;
+    }
 
     public void Install(object owner)
     {

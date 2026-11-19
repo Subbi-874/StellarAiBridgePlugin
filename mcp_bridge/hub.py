@@ -38,6 +38,15 @@ class GameBridgeHub:
     def add_event_listener(self, callback: Any) -> None:
         self._event_listeners.append(callback)
 
+    def _dispatch_event_to_listeners(self, evt: dict[str, Any]) -> None:
+        for listener in list(self._event_listeners):
+            try:
+                res = listener(evt)
+                if asyncio.iscoroutine(res):
+                    asyncio.create_task(res)
+            except Exception as cb_exc:
+                logger.warning("Event listener error (%s): %s", evt.get("event"), cb_exc)
+
     @property
     def is_connected(self) -> bool:
         return len(self._clients) > 0
@@ -159,37 +168,42 @@ class GameBridgeHub:
                                     self._active_conn_id = conn_id
 
                     logger.info("Handshake received [%s]: %s", conn_id, msg)
-                    if isinstance(msg.get("chat_settings"), dict):
-                        synth_evt = {
+                    self._dispatch_event_to_listeners(
+                        {
                             "type": "event",
                             "conn_id": conn_id,
-                            "event": "ui_chat_settings_changed",
-                            "data": msg["chat_settings"],
+                            "event": "client_hello",
+                            "data": {
+                                "local_char_id": int(msg.get("local_char_id") or 0),
+                                "local_char_name": str(msg.get("local_char_name") or ""),
+                                "in_world": bool(msg.get("in_world", False)),
+                                "pid": msg.get("pid"),
+                                "version": msg.get("version"),
+                            },
                             "received_at": time.time(),
                         }
-                        for listener in list(self._event_listeners):
-                            try:
-                                res = listener(synth_evt)
-                                if asyncio.iscoroutine(res):
-                                    asyncio.create_task(res)
-                            except Exception as cb_exc:
-                                logger.warning("Hello listener error: %s", cb_exc)
+                    )
+                    if isinstance(msg.get("chat_settings"), dict):
+                        self._dispatch_event_to_listeners(
+                            {
+                                "type": "event",
+                                "conn_id": conn_id,
+                                "event": "ui_chat_settings_changed",
+                                "data": msg["chat_settings"],
+                                "received_at": time.time(),
+                            }
+                        )
 
                     if isinstance(msg.get("capabilities"), dict):
-                        cap_evt = {
-                            "type": "event",
-                            "conn_id": conn_id,
-                            "event": "capabilities_updated",
-                            "data": msg["capabilities"],
-                            "received_at": time.time(),
-                        }
-                        for listener in list(self._event_listeners):
-                            try:
-                                res = listener(cap_evt)
-                                if asyncio.iscoroutine(res):
-                                    asyncio.create_task(res)
-                            except Exception as cb_exc:
-                                logger.warning("Hello capabilities listener error: %s", cb_exc)
+                        self._dispatch_event_to_listeners(
+                            {
+                                "type": "event",
+                                "conn_id": conn_id,
+                                "event": "capabilities_updated",
+                                "data": msg["capabilities"],
+                                "received_at": time.time(),
+                            }
+                        )
 
                 elif msg_type == "response":
                     req_id = str(msg.get("id", ""))
@@ -203,13 +217,7 @@ class GameBridgeHub:
                     msg["conn_id"] = conn_id
                     msg["received_at"] = time.time()
                     self._events.append(msg)
-                    for listener in list(self._event_listeners):
-                        try:
-                            res = listener(msg)
-                            if asyncio.iscoroutine(res):
-                                asyncio.create_task(res)
-                        except Exception as cb_exc:
-                            logger.warning("Event listener error: %s", cb_exc)
+                    self._dispatch_event_to_listeners(msg)
         except WebSocketDisconnect:
             logger.info("In-game plugin disconnected [%s].", conn_id)
         except Exception as exc:
@@ -224,6 +232,15 @@ class GameBridgeHub:
                         if not fut.done():
                             fut.set_exception(ConnectionError(f"Game [{conn_id}] disconnected during RPC"))
                         self._pending.pop(rid, None)
+            self._dispatch_event_to_listeners(
+                {
+                    "type": "event",
+                    "conn_id": conn_id,
+                    "event": "client_disconnected",
+                    "data": {"conn_id": conn_id},
+                    "received_at": time.time(),
+                }
+            )
 
     async def call(
         self,
