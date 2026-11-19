@@ -6,9 +6,9 @@ using System.Text.Json.Nodes;
 using HarmonyLib;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Adapters.Combat;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Core;
-using Stellar.AgyBridge.Lua;
 using Stellar.AgyBridge.World;
 using UnityEngine;
 
@@ -61,7 +61,7 @@ public sealed class CombatEvadeService : IDisposable
 
     private readonly IPluginServices _services;
     private readonly BridgeConfig _config;
-    private readonly LuaBridge _lua;
+    private readonly ICombatAdapter _combat;
     private readonly AutoCombatKeeper _autoCombat;
     private readonly PlayerMoveDriver _moveDriver;
     private readonly LocomotionBoostController _boost;
@@ -144,7 +144,7 @@ public sealed class CombatEvadeService : IDisposable
     public CombatEvadeService(
         IPluginServices services,
         BridgeConfig config,
-        LuaBridge lua,
+        ICombatAdapter combat,
         AutoCombatKeeper autoCombat,
         PlayerMoveDriver moveDriver,
         LocomotionBoostController boost,
@@ -153,7 +153,7 @@ public sealed class CombatEvadeService : IDisposable
     {
         _services = services;
         _config = config;
-        _lua = lua;
+        _combat = combat;
         _autoCombat = autoCombat;
         _moveDriver = moveDriver;
         _boost = boost;
@@ -628,78 +628,15 @@ public sealed class CombatEvadeService : IDisposable
 
     private void PollShareAndRedFlashLua(double now, Vector3 localPos)
     {
-        if (!_lua.IsReady)
+        if (!_combat.IsLuaReady)
         {
             _shareSuppressed = false;
             return;
         }
-        var res = _lua.Eval(@"
-if not rawget(_G, '__agyShareHookInstalled') and Z and Z.TipsVM then
-  local mtm = Z.TableMgr and Z.TableMgr.GetTable('MessageTableMgr')
-  local function inspectMsg(a, b, c)
-    local hit = false
-    for _, arg in ipairs({a, b, c}) do
-      if type(arg) == 'number' and arg > 0 and mtm and mtm.GetRow then
-        local okR, row = pcall(function() return mtm.GetRow(arg, true) end)
-        if okR and row and row.Content then
-          local txt = tostring(row.Content)
-          if txt:find('분담', 1, true) or txt:find('[집합]', 1, true) or txt:find('합류하', 1, true) or txt:find('집결', 1, true) then
-            hit = true
-            break
-          end
-        end
-      elseif type(arg) == 'string' then
-        if arg:find('분담', 1, true) or arg:find('[집합]', 1, true) or arg:find('합류하', 1, true) then
-          hit = true
-          break
-        end
-      end
-    end
-    if hit then
-      rawset(_G, '__agyShareUntil', os.clock() + 7.0)
-    end
-  end
-
-  if type(Z.TipsVM.ShowTips) == 'function' then
-    local origShow = Z.TipsVM.ShowTips
-    Z.TipsVM.ShowTips = function(...)
-      pcall(inspectMsg, ...)
-      return origShow(...)
-    end
-  end
-  if type(Z.TipsVM.OpenGameBroadcast) == 'function' then
-    local origBc = Z.TipsVM.OpenGameBroadcast
-    Z.TipsVM.OpenGameBroadcast = function(...)
-      pcall(inspectMsg, ...)
-      return origBc(...)
-    end
-  end
-  rawset(_G, '__agyShareHookInstalled', true)
-end
-
-if not rawget(_G, '__agyFlashHookInstalled') and Z and Z.EventMgr and type(Z.EventMgr.Dispatch) == 'function' then
-  local warnEvt = Z.ConstValue and Z.ConstValue.Battle and Z.ConstValue.Battle.ShowSkillWarning
-  local origDisp = Z.EventMgr.Dispatch
-  Z.EventMgr.Dispatch = function(mgr, evName, ...)
-    pcall(function()
-      if (warnEvt and evName == warnEvt) or (type(evName) == 'string' and evName:find('SkillWarning', 1, true)) then
-        rawset(_G, '__agyRedFlashSeq', (tonumber(rawget(_G, '__agyRedFlashSeq')) or 0) + 1)
-      end
-    end)
-    return origDisp(mgr, evName, ...)
-  end
-  rawset(_G, '__agyFlashHookInstalled', true)
-end
-
-return {
-  share = os.clock() < (tonumber(rawget(_G, '__agyShareUntil') or 0) or 0),
-  flashSeq = tonumber(rawget(_G, '__agyRedFlashSeq') or 0) or 0
-}
-");
-        if (res["ok"]?.GetValue<bool>() == true && res["result"] is JsonObject obj)
+        var (shareSuppressed, seq) = _combat.PollShareAndRedFlash();
+        _shareSuppressed = shareSuppressed;
+        if (seq >= 0)
         {
-            _shareSuppressed = obj["share"]?.GetValue<bool>() == true;
-            int seq = obj["flashSeq"]?.GetValue<int>() ?? 0;
             if (_lastObservedLuaFlashSeq < 0)
             {
                 _lastObservedLuaFlashSeq = seq;

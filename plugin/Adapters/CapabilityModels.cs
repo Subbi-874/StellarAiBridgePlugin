@@ -1,5 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Text.Json.Nodes;
+using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Core;
+using Stellar.AgyBridge.Lua;
 
 namespace Stellar.AgyBridge.Adapters;
 
@@ -84,3 +89,139 @@ public static class CapabilityKeys
 
     public static string GetLabel(string key) => Labels.TryGetValue(key, out var label) ? label : key;
 }
+
+internal static class CapabilityProbeHelper
+{
+    public const string LuaProbePrelude = @"
+local function hasVm(name, fns)
+  if not (Z and Z.VMMgr and Z.VMMgr.GetVM) then return false, 'Z.VMMgr' end
+  local ok, vm = pcall(function() return Z.VMMgr.GetVM(name) end)
+  if not ok or vm == nil then return false, 'vm:' .. name end
+  if fns then
+    for _, fn in ipairs(fns) do
+      if type(vm[fn]) ~= 'function' then
+        return false, 'vm:' .. name .. '.' .. fn
+      end
+    end
+  end
+  return true, nil
+end
+
+local function hasData(name)
+  if not (Z and Z.DataMgr and Z.DataMgr.Get) then return false, 'Z.DataMgr' end
+  local ok, d = pcall(function() return Z.DataMgr.Get(name) end)
+  if not ok or d == nil then return false, 'data:' .. name end
+  return true, nil
+end
+
+local function hasTbl(name)
+  if not (Z and Z.TableMgr and Z.TableMgr.GetTable) then return false, 'Z.TableMgr' end
+  local ok, t = pcall(function() return Z.TableMgr.GetTable(name) end)
+  if not ok or t == nil then return false, 'tbl:' .. name end
+  return true, nil
+end
+
+local function evalSpec(items, criticalCount)
+  local missing = {}
+  local found = 0
+  local critMissing = false
+  for idx, checker in ipairs(items) do
+    local ok, err = checker()
+    if ok then
+      found = found + 1
+    else
+      missing[#missing + 1] = err
+      if idx <= (criticalCount or #items) then
+        critMissing = true
+      end
+    end
+  end
+  local status = 'ok'
+  if found == 0 or critMissing then
+    status = 'missing'
+  elseif #missing > 0 then
+    status = 'degraded'
+  end
+  return {
+    status = status,
+    found = found,
+    total = #items,
+    detail = (#missing > 0) and ('missing ' .. table.concat(missing, ', ')) or 'all symbols ok'
+  }
+end
+";
+
+    public static CapabilityEntry ProbeNativeType(
+        string key,
+        string domain,
+        string fullTypeName,
+        string[] requiredMethods)
+    {
+        string label = CapabilityKeys.GetLabel(key);
+        var type = InteropResolver.FindType(fullTypeName);
+        if (type == null)
+            return new CapabilityEntry(key, label, domain, CapabilityState.Missing, $"CLR type not found: {fullTypeName}");
+
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
+        var missing = new List<string>();
+        foreach (var m in requiredMethods)
+        {
+            if (type.GetMethod(m, flags) == null)
+                missing.Add(m);
+        }
+
+        return missing.Count == 0
+            ? new CapabilityEntry(key, label, domain, CapabilityState.Available, fullTypeName)
+            : new CapabilityEntry(key, label, domain, CapabilityState.Degraded, $"{fullTypeName} missing: {string.Join(", ", missing)}");
+    }
+
+    public static CapabilityEntry ProbeNativeMultiTypes(
+        string key,
+        string domain,
+        string[] fullTypeNames)
+    {
+        string label = CapabilityKeys.GetLabel(key);
+        var missing = new List<string>();
+        foreach (var name in fullTypeNames)
+        {
+            if (InteropResolver.FindType(name) == null)
+                missing.Add(name);
+        }
+
+        if (missing.Count == fullTypeNames.Length)
+            return new CapabilityEntry(key, label, domain, CapabilityState.Missing, $"missing: {string.Join(", ", missing)}");
+        if (missing.Count > 0)
+            return new CapabilityEntry(key, label, domain, CapabilityState.Degraded, $"missing: {string.Join(", ", missing)}");
+        return new CapabilityEntry(key, label, domain, CapabilityState.Available, "interop types present");
+    }
+
+    public static JsonObject? EvalLuaSpecs(LuaBridge lua, IPluginLog log, string domain, string specReturnLua)
+    {
+        var res = lua.Eval(LuaProbePrelude + "\n" + specReturnLua);
+        if (res["ok"]?.GetValue<bool>() != true)
+        {
+            log.Warning($"[AgyBridge][Capability] Lua probe ({domain}) failed: {res["error"]}");
+            return null;
+        }
+        return res["result"] as JsonObject;
+    }
+
+    public static CapabilityEntry ParseLuaCheck(JsonObject? luaChecks, string key, string domain)
+    {
+        string label = CapabilityKeys.GetLabel(key);
+        if (luaChecks == null || luaChecks[key] is not JsonObject obj)
+            return new CapabilityEntry(key, label, domain, CapabilityState.Unknown, "Lua 점검 결과 없음");
+
+        string status = obj["status"]?.GetValue<string>() ?? "unknown";
+        string detail = obj["detail"]?.GetValue<string>() ?? "";
+        var state = status switch
+        {
+            "ok" => CapabilityState.Available,
+            "degraded" => CapabilityState.Degraded,
+            "missing" => CapabilityState.Missing,
+            _ => CapabilityState.Unknown
+        };
+        return new CapabilityEntry(key, label, domain, state, detail);
+    }
+}
+

@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
-using Stellar.AgyBridge.Lua;
+using Stellar.AgyBridge.Adapters.Combat;
 
 namespace Stellar.AgyBridge.World;
 
@@ -12,7 +12,7 @@ namespace Stellar.AgyBridge.World;
 public sealed class AutoCombatKeeper
 {
     private readonly IPluginServices _services;
-    private readonly LuaBridge _lua;
+    private readonly ICombatAdapter _combat;
     private readonly CrossMapNavigator _navigator;
 
     private float _settleTimer;
@@ -70,10 +70,10 @@ public sealed class AutoCombatKeeper
         }
     }
 
-    public AutoCombatKeeper(IPluginServices services, LuaBridge lua, CrossMapNavigator navigator)
+    public AutoCombatKeeper(IPluginServices services, ICombatAdapter combat, CrossMapNavigator navigator)
     {
         _services = services;
-        _lua = lua;
+        _combat = combat;
         _navigator = navigator;
     }
 
@@ -181,18 +181,5 @@ public sealed class AutoCombatKeeper
         ["suppressed_for_evade"] = _suppressForEvade
     };
 
-    private bool IsNonCombatSafeScene(int sceneId)
-    {
-        if (sceneId <= 0 || !_lua.IsReady) return false;
-        if (sceneId == 12000) return true;
-        var res = _lua.Eval($@"
-local stm = Z.TableMgr and Z.TableMgr.GetTable('SceneTableMgr')
-if not stm or not stm.GetRow then return false end
-local ok, row = pcall(function() return stm.GetRow({sceneId}) end)
-if not ok or not row then return false end
-local st = row.SceneSubType
-return (st == 3 or st == 7 or st == 8)
-");
-        return res["ok"]?.GetValue<bool>() == true && res["result"]?.GetValue<bool>() == true;
-    }
+    private bool IsNonCombatSafeScene(int sceneId) => _combat.IsNonCombatSafeScene(sceneId);
 }

@@ -8,8 +8,8 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Adapters.Character;
 using Stellar.AgyBridge.Core;
-using Stellar.AgyBridge.Lua;
 
 namespace Stellar.AgyBridge.Character;
 
@@ -35,16 +35,16 @@ public sealed class OutfitPresetService
         int WeaponSkinId);
 
     private readonly IPluginServices _services;
-    private readonly LuaBridge _lua;
+    private readonly ICharacterAdapter _character;
     private readonly AsyncTaskRegistry _tasks;
     private readonly MainThreadDispatcher _dispatcher;
     private readonly Random _rng = new();
     private int _lastAppliedNumber;
 
-    public OutfitPresetService(IPluginServices services, LuaBridge lua, AsyncTaskRegistry tasks, MainThreadDispatcher dispatcher)
+    public OutfitPresetService(IPluginServices services, ICharacterAdapter character, AsyncTaskRegistry tasks, MainThreadDispatcher dispatcher)
     {
         _services = services;
-        _lua = lua;
+        _character = character;
         _tasks = tasks;
         _dispatcher = dispatcher;
     }
@@ -165,24 +165,8 @@ public sealed class OutfitPresetService
         }
     };
 
-    /// <summary>Same Lua sequence Stellar.WardrobeLoadout uses to apply per-region hide flags.</summary>
     private bool ApplyHidden(Dictionary<int, bool> hidden)
-    {
-        if (!_lua.IsReady) return false;
-        var sb = new StringBuilder("local hideTable = {");
-        foreach (var kv in hidden)
-            sb.Append(CultureInfo.InvariantCulture, $"[{kv.Key}]={(kv.Value ? "true" : "false")},");
-        sb.Append("}\n");
-        sb.Append(@"
-local vm = Z.VMMgr.GetVM('fashion_setting')
-local fd = Z.DataMgr.Get('fashion_data')
-for r, h in pairs(hideTable) do fd:SetFashionSetting(r, h) end
-Z.EventMgr:Dispatch(Z.ConstValue.FashionAttrChange, Z.LocalAttr.EWearSetting, vm.RegionDictToSettingStr(fd:GetFashionSettingDict()))
-Z.CoroUtil.create_coro_xpcall(function() vm.SetFashionAllRegionIsHide() end)()
-return true
-");
-        return _lua.Eval(sb.ToString())["ok"]?.GetValue<bool>() == true;
-    }
+        => _character.ApplyFashionHiddenRegions(hidden);
 
     private bool TryLoadSlots(out List<OutfitSlot> slots, out string error)
     {

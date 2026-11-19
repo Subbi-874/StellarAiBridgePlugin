@@ -3,6 +3,9 @@ using System.Text.Json.Nodes;
 using Stellar.Abstractions.Plugins;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters;
+using Stellar.AgyBridge.Adapters.Character;
+using Stellar.AgyBridge.Adapters.Combat;
+using Stellar.AgyBridge.Adapters.Dungeon;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Character;
 using Stellar.AgyBridge.Commands;
@@ -28,6 +31,9 @@ public sealed class Plugin : IStellarPlugin
     private readonly LuaBridge _lua;
     private readonly WorldAccessGuard _worldGuard;
     private readonly CapabilityRegistry _capabilities;
+    private readonly ICombatAdapter _combatAdapter;
+    private readonly ICharacterAdapter _characterAdapter;
+    private readonly IDungeonAdapter _dungeonAdapter;
     private readonly PlayerMoveDriver _moveDriver;
     private readonly LocomotionBoostController _boost;
     private readonly WorldStateService _world;
@@ -65,14 +71,20 @@ public sealed class Plugin : IStellarPlugin
         _dispatcher = new MainThreadDispatcher(_services.Log);
         _lua = new LuaBridge(_services);
         _worldGuard = new WorldAccessGuard(_services, _lua);
+        _combatAdapter = new LuaCombatAdapter(_services, _lua, _worldGuard);
+        _characterAdapter = new LuaCharacterAdapter(_services, _lua, _worldGuard);
+        _dungeonAdapter = new LuaDungeonAdapter(_services, _lua, _worldGuard);
         _capabilities = new CapabilityRegistry(_services.Log, _worldGuard);
+        _capabilities.RegisterProbe(_combatAdapter);
+        _capabilities.RegisterProbe(_characterAdapter);
+        _capabilities.RegisterProbe(_dungeonAdapter);
         _capabilities.RegisterProbe(new BaselineCapabilityProbe(_services, _lua, _worldGuard));
         _capabilities.RunLoadTimeProbes();
         _moveDriver = new PlayerMoveDriver(_services);
         _boost = new LocomotionBoostController(_services, _config, _lua);
         _world = new WorldStateService(_services, _config, _lua);
         _navigator = new CrossMapNavigator(_services, _lua);
-        _autoCombat = new AutoCombatKeeper(_services, _lua, _navigator);
+        _autoCombat = new AutoCombatKeeper(_services, _combatAdapter, _navigator);
         if (_config.IsFeatureEnabled(FeaturePolicyKeys.AutoCombat))
         {
             // Never touch game singletons from the constructor (see AutoCombatKeeper.RestoreDesiredFromConfig).
@@ -85,23 +97,23 @@ public sealed class Plugin : IStellarPlugin
         _commands.SetPreDispatchGuard(_capabilities.CheckCommandCapability);
 
         _asyncTasks = new AsyncTaskRegistry();
-        _revive = new ReviveService(_services, _config, _lua, _world);
-        _mount = new MountService(_services, _lua);
+        _revive = new ReviveService(_services, _config, _combatAdapter, _world);
+        _mount = new MountService(_services, _characterAdapter);
         _interaction = new InteractionInviteService(_services, _config, _lua, _world);
         _sender = new RequestSenderService(_services, _lua, _world);
         _locator = new PlayerLocatorService(_services, _lua, _world, _navigator);
-        _loadouts = new LoadoutPresetService(_services, _lua, _asyncTasks);
-        _outfits = new OutfitPresetService(_services, _lua, _asyncTasks, _dispatcher);
-        _monsters = new MonsterLocator(_lua, _world);
-        _autoReady = new AutoReadyService(_services, _config, _lua, _world);
-        _dungeonEntry = new DungeonEntryService(_services, _lua, _party);
+        _loadouts = new LoadoutPresetService(_services, _characterAdapter, _asyncTasks);
+        _outfits = new OutfitPresetService(_services, _characterAdapter, _asyncTasks, _dispatcher);
+        _monsters = new MonsterLocator(_characterAdapter, _world);
+        _autoReady = new AutoReadyService(_services, _config, _dungeonAdapter, _world);
+        _dungeonEntry = new DungeonEntryService(_services, _dungeonAdapter, _party);
         _stickers = new StickerService(_services, _lua, _world);
         _autoFishing = new AutoFishingIntegration(_services, _lua);
         _traversal = new TraversalGimmickService(_services, _lua, _mount);
         _combatEvade = new CombatEvadeService(
             _services,
             _config,
-            _lua,
+            _combatAdapter,
             _autoCombat,
             _moveDriver,
             _boost,
@@ -184,7 +196,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v0.9.16. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v0.9.17. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeatureModeChanged(string key, FeatureGateMode mode)

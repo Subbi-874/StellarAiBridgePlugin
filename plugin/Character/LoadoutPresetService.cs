@@ -6,8 +6,8 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using Stellar.Abstractions.Domain.Loadout;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Adapters.Character;
 using Stellar.AgyBridge.Core;
-using Stellar.AgyBridge.Lua;
 
 namespace Stellar.AgyBridge.Character;
 
@@ -19,14 +19,14 @@ namespace Stellar.AgyBridge.Character;
 public sealed class LoadoutPresetService
 {
     private readonly IPluginServices _services;
-    private readonly LuaBridge _lua;
+    private readonly ICharacterAdapter _character;
     private readonly AsyncTaskRegistry _tasks;
     private Dictionary<int, string>? _professionNames;
 
-    public LoadoutPresetService(IPluginServices services, LuaBridge lua, AsyncTaskRegistry tasks)
+    public LoadoutPresetService(IPluginServices services, ICharacterAdapter character, AsyncTaskRegistry tasks)
     {
         _services = services;
-        _lua = lua;
+        _character = character;
         _tasks = tasks;
     }
 
@@ -147,21 +147,9 @@ public sealed class LoadoutPresetService
     private void EnsureProfessionNames()
     {
         if (_professionNames is { Count: > 0 }) return;
-        _professionNames = new Dictionary<int, string>();
-        if (!_lua.IsReady) return;
-
-        var res = _lua.Eval(@"
-local out = {}
-local t = Z.TableMgr.GetTable('ProfessionSystemTableMgr')
-if t then for id, r in pairs(t.GetDatas()) do out[tostring(id)] = tostring(r.Name or '') end end
-return out
-");
-        if (res["ok"]?.GetValue<bool>() == true && res["result"] is JsonObject o)
-        {
-            foreach (var kv in o)
-                if (int.TryParse(kv.Key, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
-                    _professionNames[id] = kv.Value?.GetValue<string>() ?? "";
-        }
+        _professionNames = _character.IsLuaReady
+            ? _character.ReadProfessionNames()
+            : new Dictionary<int, string>();
     }
 
     private static string DescribeFailure(LoadoutResult r) => r switch
