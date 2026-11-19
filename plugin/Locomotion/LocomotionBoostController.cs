@@ -1,11 +1,10 @@
 using System;
 using System.Globalization;
 using System.Reflection;
-using System.Text;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Adapters.Movement;
 using Stellar.AgyBridge.Core;
-using Stellar.AgyBridge.Lua;
 using UnityEngine;
 
 namespace Stellar.AgyBridge.Locomotion;
@@ -26,7 +25,7 @@ public sealed class LocomotionBoostController
 
     private readonly IPluginServices _services;
     private readonly BridgeConfig _config;
-    private readonly LuaBridge _lua;
+    private readonly IMovementAdapter _movement;
 
     private bool _picResolved;
     private PropertyInfo? _piPicInstance;
@@ -41,15 +40,6 @@ public sealed class LocomotionBoostController
     private MethodInfo? _miResonance2Press;
     private MethodInfo? _miResonance2Release;
     private PropertyInfo? _piEmptyInputArgs;
-
-    private PropertyInfo? _piEntityMgrInstance;
-    private PropertyInfo? _piPlayerEnt;
-    private PropertyInfo? _piPlayerEntity;
-    private Type? _resolvedEntityType;
-    private MethodInfo? _miGetLuaOriginEnergy;
-    private MethodInfo? _miGetLuaMaxOriEnergy;
-    private MethodInfo? _miGetLuaLocalAttrState;
-    private MethodInfo? _miGetLuaAttrVirtualMoveType;
 
     private float _driveWarmupTimer;
     private float _rushReleaseTimer;
@@ -98,11 +88,11 @@ public sealed class LocomotionBoostController
     public float LastStaminaRatio => _lastStaminaRatio;
     public float SuggestedSteerYawOffset => (!_config.EnableSmartPathfinding && _rapidJumpActiveTimer > 0f && _stuckCounter >= 4) ? (38f * _sidestepSign) : 0f;
 
-    public LocomotionBoostController(IPluginServices services, BridgeConfig config, LuaBridge lua)
+    public LocomotionBoostController(IPluginServices services, BridgeConfig config, IMovementAdapter movement)
     {
         _services = services;
         _config = config;
-        _lua = lua;
+        _movement = movement;
         PathNavigator = new SmartPathNavigator(_services, _config, new ZPhysicsSensor(_services));
     }
 
@@ -563,93 +553,12 @@ public sealed class LocomotionBoostController
     {
         castSlot = 0;
         matchedSkill = "";
-        if (!_lua.IsReady) return false;
+        if (!_movement.IsLuaReady) return false;
 
-        string hintEsc = EscapeLua(_config.MobilitySkillNameHint ?? "환영");
-        string slotStr = _config.MobilitySkillSlot.ToString(CultureInfo.InvariantCulture);
-
-        var res = _lua.Eval($@"
-local explicitSlot = {slotStr}
-local hint = tostring({hintEsc}):lower()
-local ent = Z.EntityMgr and Z.EntityMgr.PlayerEnt
-if not ent then return {{ casted = false, reason = 'no_player_ent' }} end
-
-local pic = Panda and Panda.ZInput and Panda.ZInput.PlayerInputController and Panda.ZInput.PlayerInputController.Instance
-if not pic then return {{ casted = false, reason = 'no_pic' }} end
-
-local evm = Z.VMMgr.GetVM('env')
-local wvm = Z.VMMgr.GetVM('weapon_skill')
-local stm = Z.TableMgr and Z.TableMgr.GetTable('SkillTableMgr')
-
-local function getSlotSkillInfo(slotId)
-  local skillId = 0
-  local inCd = false
-
-  -- Environmental Resonance slots: 101 = Left ('Q'), 102 = Right ('E', e.g. 환영 돌진)
-  if evm and (slotId == 101 or slotId == 102) then
-    local idx = (slotId == 101) and 1 or 2
-    pcall(function()
-      local resId = evm.GetEquipResonance(idx)
-      if resId and resId > 0 then
-        skillId = evm.GetSkillIdByResonance(resId) or 0
-        local rem = tonumber(evm.GetSkillRemainTime(resId) or 0) or 0
-        inCd = (rem > 0.05)
-      end
-    end)
-  elseif wvm and wvm.GetSkillBySlot then
-    pcall(function()
-      skillId = tonumber(wvm:GetSkillBySlot(slotId) or 0) or 0
-    end)
-  end
-
-  if skillId <= 0 then return nil end
-
-  local name = ''
-  if stm and stm.GetRow then
-    pcall(function()
-      local r = stm.GetRow(skillId)
-      if r and r.Name then name = tostring(r.Name) end
-    end)
-  end
-  return {{ slotId = slotId, skillId = skillId, name = name, inCd = inCd }}
-end
-
--- Candidate slots: Environmental Resonance ('E'=102, 'Q'=101), Battle Imagine (7, 8), and hotbar slots (1..9)
-local candidates = explicitSlot > 0
-  and {{ explicitSlot }}
-  or {{ 102, 101, 8, 7, 1, 2, 3, 4, 5, 6, 9 }}
-
-local target = nil
-for _, s in ipairs(candidates) do
-  local info = getSlotSkillInfo(s)
-  if info then
-    if explicitSlot > 0 then
-      target = info
-      break
-    elseif hint ~= '' and info.name:lower():find(hint, 1, true) then
-      target = info
-      break
-    end
-  end
-end
-
-if not target then
-  return {{ casted = false, reason = 'slot_not_found' }}
-end
-
-if target.inCd then
-  return {{ casted = false, reason = 'in_cooldown', slotId = target.slotId, skillId = target.skillId, name = target.name }}
-end
-
-return {{
-  casted = true,
-  slotId = target.slotId,
-  skillId = target.skillId,
-  name = target.name
-}}
-");
-
-        if (res["ok"]?.GetValue<bool>() != true || res["result"] is not JsonObject rObj)
+        var rObj = _movement.QueryReadyMobilitySkillSlot(
+            _config.MobilitySkillSlot,
+            _config.MobilitySkillNameHint ?? "환영");
+        if (rObj == null)
             return false;
 
         bool ready = rObj["casted"]?.GetValue<bool>() == true;
@@ -669,45 +578,7 @@ return {{
     /// <summary>
     /// Diagnostic helper to inspect all active skill slots and cooldown states in-game.
     /// </summary>
-    public JsonObject InspectSkillSlots()
-    {
-        if (!_lua.IsReady)
-            return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
-
-        return _lua.Eval(@"
-local out = { slots = {} }
-local evm = Z.VMMgr.GetVM('env')
-local wvm = Z.VMMgr.GetVM('weapon_skill')
-local stm = Z.TableMgr and Z.TableMgr.GetTable('SkillTableMgr')
-
-for _, s in ipairs({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 101, 102 }) do
-  local sid = 0
-  local cd = false
-  if evm and (s == 101 or s == 102) then
-    local idx = (s == 101) and 1 or 2
-    pcall(function()
-      local resId = evm.GetEquipResonance(idx)
-      if resId and resId > 0 then
-        sid = evm.GetSkillIdByResonance(resId) or 0
-        cd = ((tonumber(evm.GetSkillRemainTime(resId) or 0) or 0) > 0.05)
-      end
-    end)
-  elseif wvm and wvm.GetSkillBySlot then
-    pcall(function() sid = tonumber(wvm:GetSkillBySlot(s) or 0) or 0 end)
-  end
-
-  if sid > 0 then
-    local nm = ''
-    pcall(function()
-      local r = stm and stm.GetRow(sid)
-      if r and r.Name then nm = tostring(r.Name) end
-    end)
-    out.slots[#out.slots + 1] = { slot = s, skillId = sid, name = nm, inCd = cd }
-  end
-end
-return out
-");
-    }
+    public JsonObject InspectSkillSlots() => _movement.InspectSkillSlots();
 
     private void EnsureResolved()
     {
@@ -734,14 +605,6 @@ return out
                 _piEmptyInputArgs = argsType?.GetProperty("Empty", BindingFlags.Public | BindingFlags.Static);
             }
 
-            var mgrType = InteropResolver.FindType("Panda.ZGame.ZEntityMgr");
-            if (mgrType != null)
-            {
-                _piEntityMgrInstance = mgrType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
-                _piPlayerEnt = mgrType.GetProperty("PlayerEnt", BindingFlags.Public | BindingFlags.Instance);
-                _piPlayerEntity = mgrType.GetProperty("PlayerEntity", BindingFlags.Public | BindingFlags.Instance);
-            }
-
             _services.Log.Info($"[AgyBridge][Boost] Resolved PlayerInputController actions (Rush={_miRush != null}, Jump={_miJump != null}, Attack={_miAttack != null}, SwimSprint={_miSwimSprint != null}, Glide={_miGlideBool != null}, Flow={_miFlowBool != null}, ResE={_miResonance2Press != null})");
         }
         catch (Exception ex)
@@ -757,7 +620,7 @@ return out
         if (_sprintBreakPauseTimer > 0f)
             _sprintBreakPauseTimer = MathF.Max(0f, _sprintBreakPauseTimer - dt);
 
-        ReadNativePlayerMetrics(out float curStam, out float maxStam, out int actorState, out int moveType);
+        _movement.ReadNativePlayerMetrics(out float curStam, out float maxStam, out int actorState, out int moveType);
         if (maxStam <= 0f)
         {
             curStam = _services.PlayerState.Stamina;
@@ -843,42 +706,6 @@ return out
         _hasProgressAnchor = false;
         _progressWindowTimer = 0f;
         _sidestepFlipTimer = 0f;
-    }
-
-    private void ReadNativePlayerMetrics(out float curStamina, out float maxStamina, out int actorState, out int moveType)
-    {
-        curStamina = 0f;
-        maxStamina = 0f;
-        actorState = 0;
-        moveType = 0;
-        try
-        {
-            var mgr = _piEntityMgrInstance?.GetValue(null);
-            if (mgr == null) return;
-            object? ent = _piPlayerEnt?.GetValue(mgr) ?? _piPlayerEntity?.GetValue(mgr);
-            if (ent == null) return;
-
-            var entType = ent.GetType();
-            if (_resolvedEntityType != entType)
-            {
-                _resolvedEntityType = entType;
-                _miGetLuaOriginEnergy = entType.GetMethod("GetLuaOriginEnergy", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null);
-                _miGetLuaMaxOriEnergy = entType.GetMethod("GetLuaMaxOriEnergy", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null);
-                _miGetLuaLocalAttrState = entType.GetMethod("GetLuaLocalAttrState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null)
-                    ?? entType.GetMethod("GetLuaAttrState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null);
-                _miGetLuaAttrVirtualMoveType = entType.GetMethod("GetLuaAttrVirtualMoveType", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null);
-            }
-
-            if (_miGetLuaOriginEnergy?.Invoke(ent, null) is object curObj)
-                curStamina = Convert.ToSingle(curObj, CultureInfo.InvariantCulture);
-            if (_miGetLuaMaxOriEnergy?.Invoke(ent, null) is object maxObj)
-                maxStamina = Convert.ToSingle(maxObj, CultureInfo.InvariantCulture);
-            if (_miGetLuaLocalAttrState?.Invoke(ent, null) is object stObj)
-                actorState = Convert.ToInt32(stObj, CultureInfo.InvariantCulture);
-            if (_miGetLuaAttrVirtualMoveType?.Invoke(ent, null) is object mvObj)
-                moveType = Convert.ToInt32(mvObj, CultureInfo.InvariantCulture);
-        }
-        catch { }
     }
 
     private bool InvokeSwimSprint(bool pressed)
@@ -994,23 +821,5 @@ return out
         {
             return false;
         }
-    }
-
-    private static string EscapeLua(string value)
-    {
-        var sb = new StringBuilder(value.Length + 8);
-        sb.Append('\'');
-        foreach (char c in value)
-        {
-            switch (c)
-            {
-                case '\\': sb.Append("\\\\"); break;
-                case '\'': sb.Append("\\'"); break;
-                case '\n': case '\r': case '\0': break;
-                default: sb.Append(c); break;
-            }
-        }
-        sb.Append('\'');
-        return sb.ToString();
     }
 }

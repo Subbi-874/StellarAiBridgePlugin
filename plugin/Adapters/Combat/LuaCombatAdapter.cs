@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Core;
 using Stellar.AgyBridge.Lua;
 
 namespace Stellar.AgyBridge.Adapters.Combat;
@@ -12,6 +14,17 @@ public sealed class LuaCombatAdapter : ICombatAdapter
     private readonly IPluginServices _services;
     private readonly LuaBridge _lua;
     private readonly WorldAccessGuard _guard;
+
+    private bool _autoCombatResolved;
+    private PropertyInfo? _piEntityMgrInstance;
+    private PropertyInfo? _piPlayerEnt;
+    private PropertyInfo? _piPlayerEntity;
+    private MethodInfo? _miGetIsAutoBattle;
+    private MethodInfo? _miSetIsAutoBattle;
+    private MethodInfo? _miStopPlayerAiBattle;
+    private PropertyInfo? _piPicInstance;
+    private MethodInfo? _miProcessAutoBattlePress;
+    private PropertyInfo? _piEmptyInputArgs;
 
     public string Domain => "combat";
     public bool IsLuaReady => _lua.IsReady;
@@ -203,5 +216,202 @@ return {
             return (share, seq);
         }
         return (false, -1);
+    }
+
+    /// <summary>
+    /// Reads live master Auto-Combat ('G' key) state from PlayerEnt's EAutoBattleSwitch attribute,
+    /// which reflects actual PlayerAIWatcher activation (unlike GetIsAutoBattle which only reflects UI slot badges).
+    /// </summary>
+    public bool GetAutoCombatState()
+    {
+        EnsureAutoCombatInterop();
+
+        if (_lua.IsReady)
+        {
+            var res = _lua.Eval(@"
+local e = Z.EntityMgr and Z.EntityMgr.PlayerEnt
+if not e or not e.GetLuaAttr or not Z.LocalAttr or not Z.LocalAttr.EAutoBattleSwitch then
+  return nil
+end
+local a = e:GetLuaAttr(Z.LocalAttr.EAutoBattleSwitch)
+if a ~= nil then
+  return a.Value == true
+end
+return false
+");
+            if (res["ok"]?.GetValue<bool>() == true && res["result"] != null)
+            {
+                try { return res["result"]!.GetValue<bool>(); } catch { }
+            }
+        }
+
+        var ent = ResolveLocalPlayerZEntity();
+        if (ent != null && _miGetIsAutoBattle != null)
+        {
+            try
+            {
+                if (_miGetIsAutoBattle.Invoke(null, new[] { ent }) is bool b)
+                    return b;
+            }
+            catch { }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Toggles or sets built-in Auto-Combat via the genuine 'G' shortcut handler
+    /// PlayerInputController.Instance.processAutoBattlePress(InputActionEventArgs.Empty),
+    /// activating both E.SettingID.AutoBattle(1012), EAutoBattleSwitch, and PlayerAIWatcher.
+    /// </summary>
+    public JsonObject SetAutoCombat(bool? enable = null)
+    {
+        EnsureAutoCombatInterop();
+        var ent = ResolveLocalPlayerZEntity();
+        if (ent == null)
+        {
+            return new JsonObject
+            {
+                ["ok"] = false,
+                ["error"] = "PlayerEnt is nil (character not in world yet)"
+            };
+        }
+
+        bool cur = GetAutoCombatState();
+        bool nextVal = enable ?? !cur;
+        string usedMethod = "already_matching";
+
+        if (cur != nextVal)
+        {
+            // 1. Primary: Genuine 'G' key handler PlayerInputController.processAutoBattlePress(InputActionEventArgs.Empty)
+            if (_piPicInstance != null && _miProcessAutoBattlePress != null)
+            {
+                try
+                {
+                    var pic = _piPicInstance.GetValue(null);
+                    if (pic != null)
+                    {
+                        object? emptyArgs = null;
+                        try { emptyArgs = _piEmptyInputArgs?.GetValue(null); } catch { }
+                        _miProcessAutoBattlePress.Invoke(pic, new object?[] { emptyArgs });
+                        usedMethod = "PlayerInputController.processAutoBattlePress";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _services.Log.Warning($"[AgyBridge][AutoCombat] processAutoBattlePress threw: {ex.Message}");
+                }
+            }
+
+            // 2. When turning OFF (e.g. catch-up sprint suppression or explicit disable), guarantee AI brain & UI badge cleanup
+            bool afterPrimary = GetAutoCombatState();
+            if (!nextVal)
+            {
+                if (afterPrimary && _lua.IsReady)
+                {
+                    _lua.Eval(@"
+local e = Z.EntityMgr and Z.EntityMgr.PlayerEnt
+if e and e.SetLuaAttr and Z.LocalAttr and Z.LocalAttr.EAutoBattleSwitch then
+  e:SetLuaAttr(Z.LocalAttr.EAutoBattleSwitch, false)
+end
+return true
+");
+                    usedMethod += "+LuaClearSwitch";
+                }
+
+                if (_miStopPlayerAiBattle != null)
+                {
+                    try { _miStopPlayerAiBattle.Invoke(null, null); } catch { }
+                }
+
+                if (_miSetIsAutoBattle != null)
+                {
+                    try { _miSetIsAutoBattle.Invoke(null, new object[] { ent, false }); } catch { }
+                }
+            }
+            else if (!afterPrimary && _lua.IsReady)
+            {
+                // Fallback if 'G' input handler was temporarily ignored (e.g. UI focus mask)
+                _lua.Eval(@"
+local e = Z.EntityMgr and Z.EntityMgr.PlayerEnt
+if e and e.SetLuaAttr and Z.LocalAttr and Z.LocalAttr.EAutoBattleSwitch then
+  e:SetLuaAttr(Z.LocalAttr.EAutoBattleSwitch, true)
+end
+return true
+");
+                usedMethod += "+LuaSetSwitch";
+            }
+        }
+
+        bool finalState = GetAutoCombatState();
+        return new JsonObject
+        {
+            ["ok"] = finalState == nextVal,
+            ["previous"] = cur,
+            ["enabled"] = finalState,
+            ["requested"] = nextVal,
+            ["method"] = usedMethod,
+            ["note"] = finalState != nextVal ? "Auto-Combat could not be switched in current state; AutoCombatKeeper will retry automatically." : ""
+        };
+    }
+
+    private void EnsureAutoCombatInterop()
+    {
+        if (_autoCombatResolved) return;
+        _autoCombatResolved = true;
+        try
+        {
+            var emType = InteropResolver.FindType("Panda.ZGame.ZEntityMgr");
+            _piEntityMgrInstance = emType?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
+            _piPlayerEntity = emType?.GetProperty("PlayerEntity", BindingFlags.Public | BindingFlags.Instance);
+            _piPlayerEnt = emType?.GetProperty("PlayerEnt", BindingFlags.Public | BindingFlags.Instance);
+
+            var extType = InteropResolver.FindType("Panda.ZGame.EntityAttrExtensions");
+            if (extType != null)
+            {
+                foreach (var m in extType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+                {
+                    if (m.Name == "GetIsAutoBattle" && m.GetParameters().Length == 1)
+                        _miGetIsAutoBattle = m;
+                    else if (m.Name == "SetIsAutoBattle" && m.GetParameters().Length == 2)
+                        _miSetIsAutoBattle = m;
+                }
+            }
+
+            var zbuType = InteropResolver.FindType("Panda.ZGame.ZBattleUtils");
+            _miStopPlayerAiBattle = zbuType?.GetMethod("StopPlayerAIBattle", BindingFlags.Public | BindingFlags.Static);
+
+            var picType = InteropResolver.FindType("Panda.ZInput.PlayerInputController");
+            _piPicInstance = picType?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
+            _miProcessAutoBattlePress = picType?.GetMethod("processAutoBattlePress", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+
+            var argsType = InteropResolver.FindType("Panda.ZInput.InputActionEventArgs");
+            _piEmptyInputArgs = argsType?.GetProperty("Empty", BindingFlags.Public | BindingFlags.Static);
+
+            _services.Log.Info($"[AgyBridge][AutoCombat] Interop resolved (GKey={_miProcessAutoBattlePress != null}, EmptyArgs={_piEmptyInputArgs != null}, StopAI={_miStopPlayerAiBattle != null})");
+        }
+        catch (Exception ex)
+        {
+            _services.Log.Warning($"[AgyBridge][AutoCombat] Interop resolve failed: {ex.Message}");
+        }
+    }
+
+    private object? ResolveLocalPlayerZEntity()
+    {
+        // ZEntityMgr.Instance is a lazy ZSingleton: reading it before the game finished Game.Init (e.g. at login
+        // screen / plugin construction) creates a premature duplicate manager and breaks world entry.
+        if (!_guard.IsWorldEntered)
+            return null;
+
+        try
+        {
+            var mgr = _piEntityMgrInstance?.GetValue(null);
+            if (mgr == null) return null;
+            return _piPlayerEntity?.GetValue(mgr) ?? _piPlayerEnt?.GetValue(mgr);
+        }
+        catch
+        {
+            return null;
+        }
     }
 }

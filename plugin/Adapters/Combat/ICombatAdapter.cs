@@ -14,4 +14,6 @@ public interface ICombatAdapter : ICapabilityProbe
     JsonObject PollAsync(string asyncId, bool clearWhenDone = true);
     bool IsNonCombatSafeScene(int sceneId);
     (bool ShareSuppressed, int RedFlashSeq) PollShareAndRedFlash();
+    bool GetAutoCombatState();
+    JsonObject SetAutoCombat(bool? enable = null);
 }

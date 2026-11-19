@@ -7,6 +7,7 @@ using Stellar.AgyBridge.Adapters.Character;
 using Stellar.AgyBridge.Adapters.Combat;
 using Stellar.AgyBridge.Adapters.Dungeon;
 using Stellar.AgyBridge.Adapters.External;
+using Stellar.AgyBridge.Adapters.Movement;
 using Stellar.AgyBridge.Adapters.Social;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Character;
@@ -38,6 +39,7 @@ public sealed class Plugin : IStellarPlugin
     private readonly IDungeonAdapter _dungeonAdapter;
     private readonly ISocialAdapter _socialAdapter;
     private readonly IExternalPluginAdapter _externalPluginAdapter;
+    private readonly IMovementAdapter _movementAdapter;
     private readonly PlayerMoveDriver _moveDriver;
     private readonly LocomotionBoostController _boost;
     private readonly WorldStateService _world;
@@ -80,18 +82,19 @@ public sealed class Plugin : IStellarPlugin
         _dungeonAdapter = new LuaDungeonAdapter(_services, _lua, _worldGuard);
         _socialAdapter = new LuaSocialAdapter(_services, _lua, _worldGuard);
         _externalPluginAdapter = new ExternalPluginAdapter(_services, _lua, _worldGuard);
+        _movementAdapter = new LuaMovementAdapter(_services, _lua, _worldGuard);
         _capabilities = new CapabilityRegistry(_services.Log, _worldGuard);
         _capabilities.RegisterProbe(_combatAdapter);
         _capabilities.RegisterProbe(_characterAdapter);
         _capabilities.RegisterProbe(_dungeonAdapter);
         _capabilities.RegisterProbe(_socialAdapter);
         _capabilities.RegisterProbe(_externalPluginAdapter);
-        _capabilities.RegisterProbe(new BaselineCapabilityProbe(_services, _lua, _worldGuard));
+        _capabilities.RegisterProbe(_movementAdapter);
         _capabilities.RunLoadTimeProbes();
         _moveDriver = new PlayerMoveDriver(_services);
-        _boost = new LocomotionBoostController(_services, _config, _lua);
+        _boost = new LocomotionBoostController(_services, _config, _movementAdapter);
         _world = new WorldStateService(_services, _config, _socialAdapter);
-        _navigator = new CrossMapNavigator(_services, _lua);
+        _navigator = new CrossMapNavigator(_services, _movementAdapter, _combatAdapter);
         _autoCombat = new AutoCombatKeeper(_services, _combatAdapter, _navigator);
         if (_config.IsFeatureEnabled(FeaturePolicyKeys.AutoCombat))
         {
@@ -117,7 +120,7 @@ public sealed class Plugin : IStellarPlugin
         _dungeonEntry = new DungeonEntryService(_services, _dungeonAdapter, _party);
         _stickers = new StickerService(_services, _socialAdapter, _world);
         _autoFishing = new AutoFishingIntegration(_services, _externalPluginAdapter);
-        _traversal = new TraversalGimmickService(_services, _lua, _mount);
+        _traversal = new TraversalGimmickService(_services, _movementAdapter, _mount);
         _combatEvade = new CombatEvadeService(
             _services,
             _config,
@@ -204,7 +207,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v0.9.18. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v0.9.19. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeatureModeChanged(string key, FeatureGateMode mode)
