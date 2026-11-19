@@ -36,8 +36,16 @@ jobs:
             mcp_bridge/config.py \
             mcp_bridge/hub.py \
             mcp_bridge/llm_backends.py \
+            mcp_bridge/policy.py \
+            mcp_bridge/prompt_builder.py \
+            mcp_bridge/chat_output.py \
+            mcp_bridge/action_executor.py \
             mcp_bridge/chat_monitor.py \
+            mcp_bridge/legacy_compat.py \
             mcp_bridge/server.py \
             mcp_bridge/bot_sandbox/tool_guard.py \
             mcp_bridge/prompts/linux_bpsr_workspace/bpsr_guard.py \
             mcp_bridge/prompts/linux_bpsr_workspace/bridge_cli.py
+
+      - name: Run Python Bridge Tests
+        run: python -m unittest discover -s mcp_bridge/tests -v
