@@ -87,8 +87,6 @@ public sealed partial class MemoryContextBundle
         bool hasPrintableMemory = false;
         foreach (MemoryEntry mem in Memories)
         {
-            if (string.Equals(mem.AuthorityTier, "non_commander", StringComparison.Ordinal))
-                continue;
             hasPrintableMemory = true;
             string tierLabel = TierLabels.TryGetValue(mem.AuthorityTier, out string? mapped) ? mapped : mem.AuthorityTier;
             string subj = mem.SubjectUid > 0 ? $" (대상UID:{mem.SubjectUid})" : "";
@@ -158,6 +156,9 @@ public sealed partial class BlockedMaterial
 
 public sealed partial class CraftPlanResult
 {
+    public string CountMode { get; set; } = "additional";
+    public int ExpectedOutputCount { get; set; } = 0;
+
     public JsonObject ToJson()
     {
         JsonObject? recipeSummary = null;
@@ -195,8 +196,10 @@ public sealed partial class CraftPlanResult
         {
             ["status"] = Status,
             ["message"] = Message,
+            ["count_mode"] = CountMode,
             ["requested_count"] = RequestedCount,
             ["crafts_needed"] = CraftsNeeded,
+            ["expected_output_count"] = ExpectedOutputCount,
             ["total_focus_needed"] = TotalFocusNeeded,
             ["target_recipe"] = recipeSummary,
             ["steps"] = stepsArr,

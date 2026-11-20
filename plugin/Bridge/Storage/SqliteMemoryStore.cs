@@ -41,7 +41,7 @@ public interface IMemoryStore : IDisposable
         string query = "",
         long? subjectUid = null,
         string category = "",
-        bool includeNonCommander = false,
+        bool includeNonCommander = true,
         int limit = 12);
 
     BotEventRecord? RecordEvent(
@@ -114,7 +114,7 @@ public static class MemoryStoreHelpers
     {
         string normTier = (authorityTier ?? "").Trim().ToLowerInvariant();
         if (!BridgeConstants.AuthorityTiers.Contains(normTier) || !CanWriteMemory(normTier))
-            return (false, "관리자 또는 시스템 출처만 기억을 저장할 수 있어요.", "", "", "", normTier);
+            return (false, "허용되지 않은 기억 권한 출처예요.", "", "", "", normTier);
 
         string normCat = (category ?? "").Trim().ToLowerInvariant();
         if (!BridgeConstants.AllowedMemoryCategories.Contains(normCat))
@@ -477,7 +477,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
         string query = "",
         long? subjectUid = null,
         string category = "",
-        bool includeNonCommander = false,
+        bool includeNonCommander = true,
         int limit = 12)
     {
         if (botCharId <= 0)
@@ -681,7 +681,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
         {
             foreach (MemoryEntry item in entries)
             {
-                if (seenIds.Contains(item.MemoryId) || string.Equals(item.AuthorityTier, "non_commander", StringComparison.Ordinal))
+                if (seenIds.Contains(item.MemoryId))
                     continue;
                 seenIds.Add(item.MemoryId);
                 picked.Add(item);

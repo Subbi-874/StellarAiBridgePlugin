@@ -69,6 +69,7 @@ public static class BridgePolicy
             ["dungeon_enter"] = new(enabled: true, adminOnly: false),
             ["auto_fish"] = new(enabled: true, adminOnly: false),
             ["auto_craft"] = new(enabled: true, adminOnly: false),
+            ["memory_manage"] = new(enabled: true, adminOnly: true),
         };
 
     private static readonly IReadOnlyDictionary<string, string> PolicyKeyAliases =
@@ -101,6 +102,12 @@ public static class BridgePolicy
             ["낚시"] = "auto_fish",
             ["craft"] = "auto_craft",
             ["제작"] = "auto_craft",
+            ["memory"] = "memory_manage",
+            ["기억"] = "memory_manage",
+            ["메모리"] = "memory_manage",
+            ["상호작용"] = "interaction_accept",
+            ["프리셋"] = "loadout_switch",
+            ["의상"] = "outfit_switch",
             ["party_action"] = "party_manage",
             ["dungeon"] = "dungeon_enter",
             ["던전"] = "dungeon_enter",

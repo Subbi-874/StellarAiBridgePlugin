@@ -1507,7 +1507,9 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 MakeFeatureGateRow(FeaturePolicyKeys.AutoFish),
                 MakeFeatureGateRow(FeaturePolicyKeys.AutoCraft),
                 MakeFeatureGateRow(FeaturePolicyKeys.LoadoutSwitch),
-                MakeFeatureGateRow(FeaturePolicyKeys.OutfitSwitch)
+                MakeFeatureGateRow(FeaturePolicyKeys.OutfitSwitch),
+                MakeFeatureGateRow(FeaturePolicyKeys.InteractionAccept),
+                MakeFeatureGateRow(FeaturePolicyKeys.MemoryManage)
             });
 
         return new ColumnElement(new HudElement[] { combatCard, movementCard, socialCraftCard }, 10f);

@@ -141,6 +141,31 @@ public sealed class GameBridgeHub
             return ListClientsLocked();
     }
 
+    public void UpdateClientIdentity(string connId, long charId, string? charName, bool? inWorld = null)
+    {
+        if (string.IsNullOrEmpty(connId))
+            return;
+
+        lock (_lock)
+        {
+            if (!_clients.TryGetValue(connId, out ClientConnection? c))
+                return;
+
+            if (charId > 0)
+                c.HelloInfo["local_char_id"] = charId;
+            if (!string.IsNullOrWhiteSpace(charName))
+                c.HelloInfo["local_char_name"] = charName;
+            if (inWorld.HasValue)
+                c.HelloInfo["in_world"] = inWorld.Value;
+        }
+    }
+
+    public string? TryResolveConnId(string selector)
+    {
+        lock (_lock)
+            return ResolveConnIdLocked(selector);
+    }
+
     private JsonArray ListClientsLocked()
     {
         var arr = new JsonArray();
@@ -153,8 +178,10 @@ public sealed class GameBridgeHub
             c.HelloInfo.TryGetPropertyValue("version", out JsonNode? verNode);
             c.HelloInfo.TryGetPropertyValue("pid", out JsonNode? pidNode);
             c.HelloInfo.TryGetPropertyValue("game_dir", out JsonNode? dirNode);
+            long localCharId = JsonNodeHelpers.GetLong(c.HelloInfo, "local_char_id", 0);
+            string localCharName = JsonNodeHelpers.GetString(c.HelloInfo, "local_char_name", "");
 
-            arr.Add(new JsonObject
+            var item = new JsonObject
             {
                 ["conn_id"] = cid,
                 ["is_active"] = string.Equals(cid, _activeConnId, StringComparison.Ordinal),
@@ -163,39 +190,91 @@ public sealed class GameBridgeHub
                 ["pid"] = JsonNodeHelpers.DeepClone(pidNode),
                 ["game_dir"] = JsonNodeHelpers.DeepClone(dirNode),
                 ["methods_count"] = methods?.Count ?? 0,
-            });
+            };
+            if (localCharId > 0)
+                item["local_char_id"] = localCharId;
+            if (!string.IsNullOrEmpty(localCharName))
+                item["local_char_name"] = localCharName;
+            arr.Add(item);
         }
         return arr;
     }
 
+    private string? ResolveConnIdLocked(string selector)
+    {
+        string trimmed = (selector ?? "").Trim();
+        string q = trimmed.ToLowerInvariant();
+        if (string.IsNullOrEmpty(q))
+            return null;
+
+        // Exact match on conn_id, pid, local_char_id, or local_char_name first.
+        foreach (string cid in _clientOrder)
+        {
+            if (!_clients.TryGetValue(cid, out ClientConnection? c))
+                continue;
+            if (MatchesExactLocked(cid, c, q))
+                return cid;
+        }
+
+        // Fallback to case-insensitive substring match on game_dir or local_char_name.
+        foreach (string cid in _clientOrder)
+        {
+            if (!_clients.TryGetValue(cid, out ClientConnection? c))
+                continue;
+            if (MatchesSubstringLocked(c, q))
+                return cid;
+        }
+
+        return null;
+    }
+
+    private static bool MatchesExactLocked(string cid, ClientConnection c, string qLower)
+    {
+        if (string.Equals(cid.ToLowerInvariant(), qLower, StringComparison.Ordinal))
+            return true;
+
+        long pidNum = JsonNodeHelpers.GetLong(c.HelloInfo, "pid", 0);
+        string pidStr = pidNum > 0 ? pidNum.ToString() : JsonNodeHelpers.GetString(c.HelloInfo, "pid", "").Trim();
+        if (!string.IsNullOrEmpty(pidStr) && string.Equals(pidStr, qLower, StringComparison.Ordinal))
+            return true;
+
+        long charIdNum = JsonNodeHelpers.GetLong(c.HelloInfo, "local_char_id", 0);
+        string charIdStr = charIdNum > 0 ? charIdNum.ToString() : JsonNodeHelpers.GetString(c.HelloInfo, "local_char_id", "").Trim();
+        if (!string.IsNullOrEmpty(charIdStr) && string.Equals(charIdStr, qLower, StringComparison.Ordinal))
+            return true;
+
+        string charName = JsonNodeHelpers.GetString(c.HelloInfo, "local_char_name", "").Trim().ToLowerInvariant();
+        return !string.IsNullOrEmpty(charName) && string.Equals(charName, qLower, StringComparison.Ordinal);
+    }
+
+    private static bool MatchesSubstringLocked(ClientConnection c, string qLower)
+    {
+        string gdir = JsonNodeHelpers.GetString(c.HelloInfo, "game_dir", "").ToLowerInvariant();
+        if (!string.IsNullOrEmpty(gdir) && gdir.Contains(qLower, StringComparison.Ordinal))
+            return true;
+
+        string charName = JsonNodeHelpers.GetString(c.HelloInfo, "local_char_name", "").ToLowerInvariant();
+        return !string.IsNullOrEmpty(charName) && charName.Contains(qLower, StringComparison.Ordinal);
+    }
+
     public JsonObject SelectActiveClient(string selector)
     {
-        string q = (selector ?? "").Trim().ToLowerInvariant();
-        if (string.IsNullOrEmpty(q))
+        string trimmed = (selector ?? "").Trim();
+        if (string.IsNullOrEmpty(trimmed))
             return new JsonObject { ["ok"] = false, ["error"] = "Empty client selector" };
 
         lock (_lock)
         {
-            foreach (string cid in _clientOrder)
+            string? matchedId = ResolveConnIdLocked(trimmed);
+            if (matchedId != null && _clients.TryGetValue(matchedId, out ClientConnection? matched))
             {
-                if (!_clients.TryGetValue(cid, out ClientConnection? c))
-                    continue;
-
-                string gdir = JsonNodeHelpers.GetString(c.HelloInfo, "game_dir", "").ToLowerInvariant();
-                long pidNum = JsonNodeHelpers.GetLong(c.HelloInfo, "pid", 0);
-                string pidStr = pidNum > 0 ? pidNum.ToString() : JsonNodeHelpers.GetString(c.HelloInfo, "pid", "");
-                if (string.Equals(cid.ToLowerInvariant(), q, StringComparison.Ordinal)
-                    || (!string.IsNullOrEmpty(pidStr) && string.Equals(pidStr, q, StringComparison.Ordinal))
-                    || (!string.IsNullOrEmpty(gdir) && gdir.Contains(q, StringComparison.Ordinal)))
+                _activeConnId = matchedId;
+                return new JsonObject
                 {
-                    _activeConnId = cid;
-                    return new JsonObject
-                    {
-                        ["ok"] = true,
-                        ["active_conn_id"] = cid,
-                        ["client"] = JsonNodeHelpers.CloneObject(c.HelloInfo),
-                    };
-                }
+                    ["ok"] = true,
+                    ["active_conn_id"] = matchedId,
+                    ["client"] = JsonNodeHelpers.CloneObject(matched.HelloInfo),
+                };
             }
 
             return new JsonObject

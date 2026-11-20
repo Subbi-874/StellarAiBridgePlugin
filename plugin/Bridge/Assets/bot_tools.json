@@ -60,14 +60,16 @@
         },
         "count": {
           "type": "integer",
-          "description": "목표 수량 (기본 1)"
+          "description": "목표 수량 또는 제작 횟수 (0이면 집중력/생활력 소진까지, 기본 1)"
         },
         "count_mode": {
           "type": "string",
-          "description": "수량 기준: additional(추가 제작) 또는 total(목표 보유량)",
+          "description": "수량 기준: additional(완성품 N개 추가), total_target(총 N개 보유 목표), crafts(제작 N번/N회 실행), max_focus(집중력/생활력 소진까지 최대 제작)",
           "enum": [
             "additional",
-            "total"
+            "total_target",
+            "crafts",
+            "max_focus"
           ]
         }
       },
@@ -162,7 +164,7 @@
         },
         "count": {
           "type": "integer",
-          "description": "채집/낚시 횟수(0이면 계속/집중력 소진 시까지) 또는 제작 개수(기본 1)"
+          "description": "채집/낚시 횟수 또는 제작 개수/횟수 (0이면 계속/집중력·생활력 소진 시까지, 기본 1)"
         },
         "use_focus": {
           "type": "boolean",
@@ -170,10 +172,12 @@
         },
         "count_mode": {
           "type": "string",
-          "description": "craft_goal 수량 기준",
+          "description": "craft_goal 수량 기준: additional(완성품 N개 추가), total_target(총 N개 보유 목표), crafts(제작 N번/N회 실행), max_focus(집중력/생활력 소진까지 최대 제작)",
           "enum": [
             "additional",
-            "total"
+            "total_target",
+            "crafts",
+            "max_focus"
           ]
         },
         "confirm_monster_farm": {
@@ -533,7 +537,7 @@
         },
         "key": {
           "type": "string",
-          "description": "대상 기능 정책 키 (예: send_world, send_say, follow_move, auto_combat, auto_gather, auto_fish, auto_craft, party_manage, dungeon_enter, ride, emote 등)"
+          "description": "대상 기능 정책 키 (예: send_world, send_say, follow_move, auto_combat, auto_gather, auto_fish, auto_craft, memory_manage, party_manage, dungeon_enter, ride, emote 등)"
         },
         "enabled": {
           "type": "boolean",

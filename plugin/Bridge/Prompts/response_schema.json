@@ -262,6 +262,15 @@
           "recipe_id": {
             "type": "integer"
           },
+          "count_mode": {
+            "type": "string",
+            "enum": [
+              "additional",
+              "total_target",
+              "crafts",
+              "max_focus"
+            ]
+          },
           "allow_monster_farm": {
             "type": "boolean"
           },

@@ -954,7 +954,7 @@ public sealed class ChatMonitorService
                 => HandleGoalActionAsync(agent, connId, cfg, actType, actObj, trigObj, innerCt);
             Task<(JsonObject Record, string? Error, JsonObject? Info)> OnMemoryActionAsync(
                 string actType, JsonObject actObj, JsonObject trigObj, CancellationToken _)
-                => Task.FromResult(HandleMemoryAction(agent, trigObj, actType, actObj));
+                => Task.FromResult(HandleMemoryAction(agent, cfg, trigObj, actType, actObj));
 
             BotToolDispatcher? toolRunner = null;
             if (cfg.Llm.EffectiveBackend is "openai_api" or "gemini_api"
@@ -1870,17 +1870,25 @@ public sealed class ChatMonitorService
 
     private (JsonObject Record, string? Error, JsonObject? Info) HandleMemoryAction(
         BotAgent? agent,
+        ClientChatSettings cfg,
         JsonObject trig,
         string atype,
         JsonObject act)
     {
         bool isAdmin = JsonNodeHelpers.GetBool(trig, "is_admin", JsonNodeHelpers.GetBool(trig, "is_commander", false));
-        if (!isAdmin)
+        string uiLang = !string.IsNullOrEmpty(cfg.UiLanguage) ? cfg.UiLanguage : (agent?.Settings.UiLanguage ?? "ko");
+        PolicyCheckResult pol = BridgePolicy.CheckActionPermission(cfg.FeaturePolicies, atype, isAdmin, uiLang);
+        if (!pol.Allowed)
         {
-            string uiLang = agent?.Settings.UiLanguage ?? "ko";
             return (
-                new JsonObject { ["action"] = atype, ["blocked_by_admin_lock"] = true, ["res"] = new JsonObject { ["ok"] = false, ["error"] = "unauthorized" } },
-                BridgeI18n.T("admin_only_memory_error", uiLang),
+                new JsonObject
+                {
+                    ["action"] = atype,
+                    ["blocked_by_admin_lock"] = pol.AdminLocked,
+                    ["policy_key"] = pol.PolicyKey,
+                    ["res"] = new JsonObject { ["ok"] = false, ["error"] = pol.AdminLocked ? "unauthorized" : "feature_disabled" },
+                },
+                pol.ErrorMessage,
                 null);
         }
 
@@ -1894,6 +1902,7 @@ public sealed class ChatMonitorService
         }
 
         long senderUid = Math.Max(0L, JsonNodeHelpers.GetLong(trig, "sender_id", 0));
+        string authorityTier = isAdmin ? "commander" : "non_commander";
         if (atype == "remember")
         {
             string category = JsonNodeHelpers.GetString(act, "category", "").Trim().ToLowerInvariant();
@@ -1909,7 +1918,7 @@ public sealed class ChatMonitorService
             long subjectUid = ResolveSubjectUid(act, trig, category);
 
             (MemoryEntry? entry, string err) = Memory.UpsertMemory(
-                botCid, category, memKey, content, "commander", senderUid, subjectUid);
+                botCid, category, memKey, content, authorityTier, senderUid, subjectUid);
             if (entry == null)
                 return (new JsonObject { ["action"] = atype, ["res"] = new JsonObject { ["ok"] = false, ["error"] = err } }, err, null);
 
@@ -1918,7 +1927,7 @@ public sealed class ChatMonitorService
                 "memory_saved",
                 $"[{entry.Category}] {entry.MemKey}: {entry.Content}",
                 outcome: "ok",
-                authorityTier: "commander",
+                authorityTier: authorityTier,
                 relatedUid: senderUid);
             return (
                 new JsonObject { ["action"] = atype, ["res"] = new JsonObject { ["ok"] = true, ["memory"] = entry.ToJson() } },
@@ -1942,7 +1951,7 @@ public sealed class ChatMonitorService
         }
 
         string label = !string.IsNullOrEmpty(delKey) ? delKey : $"id={rawMid}";
-        SafeRecordEvent(botCid, "memory_deleted", $"기억 삭제 ({label}, {deleted}건)", outcome: "ok", authorityTier: "commander", relatedUid: senderUid);
+        SafeRecordEvent(botCid, "memory_deleted", $"기억 삭제 ({label}, {deleted}건)", outcome: "ok", authorityTier: authorityTier, relatedUid: senderUid);
         return (
             new JsonObject { ["action"] = atype, ["res"] = new JsonObject { ["ok"] = true, ["deleted"] = deleted } },
             null,
@@ -2066,6 +2075,144 @@ public sealed class ChatMonitorService
                     null);
             }
 
+            if (goal.Steps.Count == 1 && goal.Steps[0].ActionType == "craft_goal")
+            {
+                JsonObject craftAct = JsonNodeHelpers.CloneObject(goal.Steps[0].Params);
+                string[] craftFallbackKeys =
+                {
+                    "item", "recipe_id", "query", "count", "count_mode",
+                    "allow_monster_farm", "confirm_monster_farm",
+                };
+                foreach (string key in craftFallbackKeys)
+                {
+                    if (!craftAct.ContainsKey(key) && act.TryGetPropertyValue(key, out JsonNode? v) && v != null)
+                        craftAct[key] = JsonNodeHelpers.DeepClone(v);
+                }
+                string[] schedKeys = { "priority", "preempt", "replace_active", "force_abort" };
+                foreach (string key in schedKeys)
+                {
+                    if (!craftAct.ContainsKey(key) && act.TryGetPropertyValue(key, out JsonNode? v) && v != null)
+                        craftAct[key] = JsonNodeHelpers.DeepClone(v);
+                }
+                craftAct["type"] = "craft_goal";
+                return await HandleCraftGoalActionAsync(agent, connId, cfg, craftAct, trig, ct).ConfigureAwait(false);
+            }
+
+            if (goal.Steps.Any(s => BridgeConstants.GoalActionTypes.Contains(s.ActionType)))
+            {
+                var expandedSteps = new List<GoalStep>();
+                CraftPlanResult? lastSatisfiedPlan = null;
+                foreach (GoalStep st in goal.Steps)
+                {
+                    if (st.ActionType == "craft_goal")
+                    {
+                        PolicyCheckResult cgPol = BridgePolicy.CheckActionPermission(cfg.FeaturePolicies, "craft_goal", isAdmin, cfg.UiLanguage);
+                        if (!cgPol.Allowed)
+                        {
+                            return (
+                                new JsonObject { ["action"] = atype, ["blocked_by_admin_lock"] = cgPol.AdminLocked, ["policy_key"] = cgPol.PolicyKey },
+                                cgPol.ErrorMessage,
+                                null);
+                        }
+
+                        int subRid = JsonNodeHelpers.GetInt(st.Params, "recipe_id", 0);
+                        string subQuery = ExtractCraftQuery(st.Params);
+                        int subCount = JsonNodeHelpers.GetInt(st.Params, "count", 1);
+                        string subMode = CraftPlanner.NormalizeCountMode(
+                            JsonNodeHelpers.GetString(st.Params, "count_mode", ""),
+                            subCount);
+                        bool subAllowMonster = JsonNodeHelpers.GetBool(st.Params, "allow_monster_farm", false);
+
+                        if (subRid <= 0 && string.IsNullOrEmpty(subQuery))
+                        {
+                            return (
+                                new JsonObject { ["action"] = atype, ["res"] = new JsonObject { ["ok"] = false, ["error"] = "missing_target" } },
+                                "만들 아이템이나 레시피 이름을 알려주세요.",
+                                null);
+                        }
+
+                        CraftPlanResult subPlan = await PrepareCraftPlanAsync(
+                            connId, subRid, subQuery, subCount, subMode, subAllowMonster, cfg.UiLanguage, ct).ConfigureAwait(false);
+                        if (subPlan.Status == "needs_monster_confirm")
+                        {
+                            int targetRid = JsonNodeHelpers.GetInt(subPlan.TargetRecipe, "recipe_id", 0);
+                            if (targetRid <= 0)
+                                targetRid = subRid;
+                            string pendingItem = !string.IsNullOrEmpty(subQuery)
+                                ? subQuery
+                                : JsonNodeHelpers.GetString(subPlan.TargetRecipe, "name", "");
+                            agent.Goals.PendingCraftConfirm = new JsonObject
+                            {
+                                ["recipe_id"] = targetRid,
+                                ["item"] = pendingItem,
+                                ["count"] = subCount,
+                                ["count_mode"] = subMode,
+                                ["priority"] = CloneProp(act, "priority"),
+                                ["preempt"] = JsonNodeHelpers.GetBool(act, "preempt", false),
+                            };
+                            var infoRes = new JsonObject { ["needs_monster_confirm"] = true };
+                            MergeInto(infoRes, subPlan.ToJson());
+                            return (
+                                new JsonObject { ["action"] = atype, ["plan"] = subPlan.ToJson() },
+                                null,
+                                new JsonObject
+                                {
+                                    ["action"] = "craft_goal",
+                                    ["target"] = !string.IsNullOrEmpty(subQuery) ? subQuery : $"#{subRid}",
+                                    ["result"] = infoRes,
+                                });
+                        }
+
+                        if (subPlan.Status == "already_satisfied")
+                        {
+                            lastSatisfiedPlan = subPlan;
+                            continue;
+                        }
+
+                        if (subPlan.Status != "ready")
+                        {
+                            return (
+                                new JsonObject { ["action"] = atype, ["plan"] = subPlan.ToJson() },
+                                null,
+                                new JsonObject
+                                {
+                                    ["action"] = "craft_goal",
+                                    ["target"] = !string.IsNullOrEmpty(subQuery) ? subQuery : $"#{subRid}",
+                                    ["result"] = subPlan.ToJson(),
+                                });
+                        }
+
+                        expandedSteps.AddRange(subPlan.Steps);
+                    }
+                    else if (BridgeConstants.GoalActionTypes.Contains(st.ActionType))
+                    {
+                        return (
+                            new JsonObject { ["action"] = atype, ["res"] = new JsonObject { ["ok"] = false, ["error"] = "nested_goal_action_unsupported" } },
+                            $"목표 단계에 '{st.ActionType}'은(는) 중첩할 수 없어요.",
+                            null);
+                    }
+                    else
+                    {
+                        expandedSteps.Add(st);
+                    }
+                }
+
+                if (expandedSteps.Count == 0 && lastSatisfiedPlan != null)
+                {
+                    return (
+                        new JsonObject { ["action"] = atype, ["plan"] = lastSatisfiedPlan.ToJson() },
+                        null,
+                        new JsonObject
+                        {
+                            ["action"] = "craft_goal",
+                            ["target"] = JsonNodeHelpers.GetString(lastSatisfiedPlan.TargetRecipe, "name", goal.Title),
+                            ["result"] = lastSatisfiedPlan.ToJson(),
+                        });
+                }
+
+                goal.Steps = expandedSteps;
+            }
+
             foreach (GoalStep stItem in goal.Steps)
             {
                 PolicyCheckResult pol = BridgePolicy.CheckActionPermission(cfg.FeaturePolicies, stItem.ActionType, isAdmin, cfg.UiLanguage);
@@ -2080,6 +2227,22 @@ public sealed class ChatMonitorService
                         },
                         pol.ErrorMessage,
                         null);
+                }
+                if (stItem.ActionType == "farm_monster_item")
+                {
+                    PolicyCheckResult acPol = BridgePolicy.CheckActionPermission(cfg.FeaturePolicies, "set_auto_combat", isAdmin, cfg.UiLanguage);
+                    if (!acPol.Allowed)
+                    {
+                        return (
+                            new JsonObject
+                            {
+                                ["action"] = atype,
+                                ["blocked_by_admin_lock"] = acPol.AdminLocked,
+                                ["policy_key"] = acPol.PolicyKey,
+                            },
+                            acPol.ErrorMessage,
+                            null);
+                    }
                 }
             }
 
@@ -2168,7 +2331,8 @@ public sealed class ChatMonitorService
             return new CraftPlanResult
             {
                 Status = "not_found",
-                RequestedCount = Math.Max(1, count),
+                CountMode = CraftPlanner.NormalizeCountMode(countMode, count),
+                RequestedCount = Math.Max(0, count),
                 Message = !string.IsNullOrEmpty(err) ? err : "캐시된 레시피가 아직 없어요.",
             };
         }
@@ -2178,7 +2342,7 @@ public sealed class ChatMonitorService
         {
             return CraftPlanner.PlanCraft(
                 recipes, obtainWays, new Dictionary<int, int>(),
-                recipeId, query, count, lang: lang);
+                recipeId, query, count, countMode: countMode, lang: lang);
         }
 
         List<int> candIds = CraftPlanner.CollectCandidateItemIds(recipes, rootRec);
@@ -2308,10 +2472,10 @@ public sealed class ChatMonitorService
 
         int recipeId = JsonNodeHelpers.GetInt(act, "recipe_id", 0);
         string query = ExtractCraftQuery(act);
-        int count = Math.Max(1, JsonNodeHelpers.GetInt(act, "count", 1));
-        string countMode = JsonNodeHelpers.GetString(act, "count_mode", "").Trim().ToLowerInvariant();
-        if (string.IsNullOrEmpty(countMode))
-            countMode = "additional";
+        int count = JsonNodeHelpers.GetInt(act, "count", 1);
+        string countMode = CraftPlanner.NormalizeCountMode(
+            JsonNodeHelpers.GetString(act, "count_mode", ""),
+            count);
         bool allowMonster = JsonNodeHelpers.GetBool(act, "allow_monster_farm", false);
 
         if (recipeId <= 0 && string.IsNullOrEmpty(query))
@@ -2402,10 +2566,18 @@ public sealed class ChatMonitorService
         if (string.IsNullOrEmpty(goalChannel))
             goalChannel = "party";
 
+        string goalTitle = plan.CountMode switch
+        {
+            "crafts" => $"{rName} {plan.CraftsNeeded}회 제작",
+            "max_focus" => $"{rName} 집중력 소진까지 {plan.CraftsNeeded}회 제작",
+            "total_target" => $"{rName} 총 {plan.RequestedCount}개 목표 제작",
+            _ => $"{rName} {plan.RequestedCount}개 제작",
+        };
+
         var goal = new Goal
         {
             GoalId = $"craft-{goalRid}-{Guid.NewGuid().ToString("N")[..6]}",
-            Title = $"{rName} {plan.RequestedCount}개 제작",
+            Title = goalTitle,
             Kind = "craft_goal",
             Steps = new List<GoalStep>(plan.Steps),
             Priority = GoalHelpers.ParsePriority(prioNode, GoalPriority.Command),
@@ -2561,6 +2733,20 @@ public sealed class ChatMonitorService
                 ["ok"] = false,
                 ["error"] = errMsg,
                 ["refused"] = batch.Refusals.Count > 0,
+                ["executed"] = execArr,
+            };
+        }
+
+        if (batch.Executed.Count == 0)
+        {
+            string errMsg = $"목표 단계 '{step.ActionType}'을(를) 실행할 수 없어요.";
+            step.Status = "failed";
+            step.LastError = errMsg;
+            agent.Goals.FailOrAbortActiveGoal(errMsg, abort: false);
+            return new JsonObject
+            {
+                ["ok"] = false,
+                ["error"] = errMsg,
                 ["executed"] = execArr,
             };
         }

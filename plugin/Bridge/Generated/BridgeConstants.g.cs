@@ -25,6 +25,7 @@ public static class BridgeConstants
     public static IReadOnlySet<string> WritableAuthorityTiers { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         "commander",
+        "non_commander",
         "system",
     };
 
@@ -245,6 +246,8 @@ public static class BridgeConstants
         ["craft_item"] = "auto_craft",
         ["craft_goal"] = "auto_craft",
         ["farm_monster_item"] = "follow_move",
+        ["remember"] = "memory_manage",
+        ["forget"] = "memory_manage",
     };
 
     public static IReadOnlyDictionary<string, string> RecvChannelPolicyMap { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)

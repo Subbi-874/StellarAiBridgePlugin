@@ -20,7 +20,10 @@ public sealed class BridgeRpcDispatcher
     public const string McpProtocolVersion = "2025-03-26";
 
     private const string McpInstructions =
-        "Controls and observes a Blue Protocol: Star Resonance character via the Stellar.AgyBridge plugin. " +
+        "Controls and observes Blue Protocol: Star Resonance characters via the Stellar.AgyBridge plugin. " +
+        "Multiple game accounts can be connected simultaneously: call list_game_clients (or inspect connected_clients returned by get_status) " +
+        "to discover every running character, call select_game_client to switch the default character, or pass the optional 'client' argument " +
+        "(character name, char_id, drive/path like 'E:' or 'G:', PID, or conn_id) to any tool to target that account directly. " +
         "Use get_status / get_party / get_guild_members to inspect state, teleport_to_place / list_places to move " +
         "to Guild Home, Personal Home, cities, or warp points, follow_player / follow_party_member to follow any " +
         "party or guild member across maps/hubs/channels (continuously or one-shot), and stop to halt movement.";
@@ -34,8 +37,45 @@ public sealed class BridgeRpcDispatcher
     private static readonly Lazy<JsonArray> McpToolsCatalog = new(() =>
     {
         string raw = EmbeddedAssets.ReadAsset("mcp_tools.json");
-        return JsonNode.Parse(raw) as JsonArray ?? new JsonArray();
+        JsonArray catalog = JsonNode.Parse(raw) as JsonArray ?? new JsonArray();
+        InjectClientParameter(catalog);
+        return catalog;
     });
+
+    private static void InjectClientParameter(JsonArray catalog)
+    {
+        foreach (JsonNode? item in catalog)
+        {
+            if (item is not JsonObject tool)
+                continue;
+            string name = JsonNodeHelpers.GetString(tool, "name", "");
+            if (string.Equals(name, "list_game_clients", StringComparison.Ordinal)
+                || string.Equals(name, "select_game_client", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (tool["inputSchema"] is not JsonObject schema)
+            {
+                schema = new JsonObject { ["type"] = "object" };
+                tool["inputSchema"] = schema;
+            }
+            if (schema["properties"] is not JsonObject props)
+            {
+                props = new JsonObject();
+                schema["properties"] = props;
+            }
+            if (!props.ContainsKey("client"))
+            {
+                props["client"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["title"] = "Client",
+                    ["description"] = "Optional target game client (character name, char_id, drive/path e.g. 'E:' or 'G:', PID, or conn_id). Omit to use the active client.",
+                };
+            }
+        }
+    }
 
     private readonly GameBridgeHub _hub;
     private readonly SleepAsync _sleep;
@@ -207,7 +247,7 @@ public sealed class BridgeRpcDispatcher
                         charId: JsonNodeHelpers.GetLong(p, "char_id", 0),
                         recipeId: JsonNodeHelpers.GetInt(p, "recipe_id", 0),
                         query: q,
-                        count: Math.Max(1, JsonNodeHelpers.GetInt(p, "count", 1)),
+                        count: JsonNodeHelpers.GetInt(p, "count", 1),
                         countMode: countMode,
                         allowMonsterFarm: JsonNodeHelpers.GetBool(p, "allow_monster_farm", false),
                         ct: ct).ConfigureAwait(false);
@@ -229,7 +269,7 @@ public sealed class BridgeRpcDispatcher
                         charId: JsonNodeHelpers.GetLong(p, "char_id", 0),
                         recipeId: JsonNodeHelpers.GetInt(p, "recipe_id", 0),
                         query: q,
-                        count: Math.Max(1, JsonNodeHelpers.GetInt(p, "count", 1)),
+                        count: JsonNodeHelpers.GetInt(p, "count", 1),
                         countMode: countMode,
                         allowMonsterFarm: JsonNodeHelpers.GetBool(p, "allow_monster_farm", false),
                         priority: priority,
@@ -265,12 +305,69 @@ public sealed class BridgeRpcDispatcher
             return res;
         }
 
-        return await _hub.CallAsync(
+        JsonObject callRes = await _hub.CallAsync(
             method,
             p,
             timeoutSec ?? BridgeRuntimeConfig.DefaultRpcTimeoutSec,
             connId,
             ct).ConfigureAwait(false);
+        if (method == "get_status"
+            && !string.IsNullOrEmpty(activeCid)
+            && (!string.IsNullOrEmpty(connId) || string.Equals(activeCid, _hub.ActiveConnId, StringComparison.Ordinal)))
+        {
+            UpdateHubIdentityFromStatus(activeCid, callRes);
+        }
+        return callRes;
+    }
+
+    private void UpdateHubIdentityFromStatus(string? connId, JsonObject status)
+    {
+        if (string.IsNullOrEmpty(connId) || !JsonNodeHelpers.GetBool(status, "ok", false))
+            return;
+
+        JsonObject? state = JsonNodeHelpers.GetObject(status, "state");
+        JsonObject? player = JsonNodeHelpers.GetObject(state, "player");
+        long charId = player != null ? JsonNodeHelpers.GetLong(player, "char_id", 0) : 0;
+        string charName = player != null ? JsonNodeHelpers.GetString(player, "name", "") : "";
+        bool? inWorld = state != null ? JsonNodeHelpers.GetNullableBool(state, "is_world_active") : null;
+        if (charId > 0 || !string.IsNullOrWhiteSpace(charName) || inWorld.HasValue)
+            _hub.UpdateClientIdentity(connId, charId, charName, inWorld);
+    }
+
+    private static JsonObject BuildEnrichedClientEntry(JsonObject clientSummary, JsonObject status)
+    {
+        JsonObject? state = JsonNodeHelpers.GetObject(status, "state");
+        JsonObject? player = JsonNodeHelpers.GetObject(state, "player");
+
+        JsonObject entry = JsonNodeHelpers.CloneObject(clientSummary);
+        entry["char_id"] = player != null && player.TryGetPropertyValue("char_id", out JsonNode? cidNode)
+            ? JsonNodeHelpers.DeepClone(cidNode)
+            : null;
+        entry["char_name"] = player != null && player.TryGetPropertyValue("name", out JsonNode? cnameNode)
+            ? JsonNodeHelpers.DeepClone(cnameNode)
+            : null;
+        entry["scene_name"] = state != null && state.TryGetPropertyValue("scene_name", out JsonNode? scNode)
+            ? JsonNodeHelpers.DeepClone(scNode)
+            : null;
+        return entry;
+    }
+
+    private async Task<JsonObject> InspectAndRefreshClientAsync(JsonObject clientSummary, CancellationToken ct)
+    {
+        string cid = JsonNodeHelpers.GetString(clientSummary, "conn_id", "");
+        JsonObject st = await _hub.CallAsync("get_status", new JsonObject(), 3.0, cid, ct).ConfigureAwait(false);
+        UpdateHubIdentityFromStatus(cid, st);
+        return BuildEnrichedClientEntry(clientSummary, st);
+    }
+
+    private static JsonObject? FindClientByConnId(JsonArray clients, string connId)
+    {
+        foreach (JsonNode? node in clients)
+        {
+            if (node is JsonObject c && string.Equals(JsonNodeHelpers.GetString(c, "conn_id", ""), connId, StringComparison.Ordinal))
+                return c;
+        }
+        return null;
     }
 
     private async Task<JsonObject> EnrichClientsAsync(CancellationToken ct)
@@ -281,58 +378,72 @@ public sealed class BridgeRpcDispatcher
         {
             if (node is not JsonObject c)
                 continue;
-            string cid = JsonNodeHelpers.GetString(c, "conn_id", "");
-            JsonObject st = await _hub.CallAsync("get_status", new JsonObject(), 3.0, cid, ct).ConfigureAwait(false);
-            JsonObject? state = JsonNodeHelpers.GetObject(st, "state");
-            JsonObject? player = JsonNodeHelpers.GetObject(state, "player");
-
-            JsonObject entry = JsonNodeHelpers.CloneObject(c);
-            entry["char_id"] = player != null && player.TryGetPropertyValue("char_id", out JsonNode? cidNode)
-                ? JsonNodeHelpers.DeepClone(cidNode)
-                : null;
-            entry["char_name"] = player != null && player.TryGetPropertyValue("name", out JsonNode? cnameNode)
-                ? JsonNodeHelpers.DeepClone(cnameNode)
-                : null;
-            entry["scene_name"] = state != null && state.TryGetPropertyValue("scene_name", out JsonNode? scNode)
-                ? JsonNodeHelpers.DeepClone(scNode)
-                : null;
-            enriched.Add(entry);
+            enriched.Add(await InspectAndRefreshClientAsync(c, ct).ConfigureAwait(false));
         }
-        return new JsonObject { ["ok"] = true, ["clients"] = enriched };
+        return new JsonObject
+        {
+            ["ok"] = true,
+            ["active_conn_id"] = _hub.ActiveConnId,
+            ["clients"] = enriched,
+        };
+    }
+
+    private async Task<(string? ConnId, JsonObject? ErrorResult, JsonObject? EnrichedEntry)> ResolveClientSelectorAsync(
+        string selector,
+        CancellationToken ct)
+    {
+        string trimmed = (selector ?? "").Trim();
+        if (string.IsNullOrEmpty(trimmed))
+            return (null, new JsonObject { ["ok"] = false, ["error"] = "Empty client selector" }, null);
+
+        string? matchedConnId = _hub.TryResolveConnId(trimmed);
+        if (!string.IsNullOrEmpty(matchedConnId))
+            return (matchedConnId, null, null);
+
+        // Initial login-screen hello often lacks char_id/char_name; query live get_status and retry.
+        JsonObject refreshedRes = await EnrichClientsAsync(ct).ConfigureAwait(false);
+        JsonArray refreshedClients = JsonNodeHelpers.GetArray(refreshedRes, "clients") ?? new JsonArray();
+        matchedConnId = _hub.TryResolveConnId(trimmed);
+        if (!string.IsNullOrEmpty(matchedConnId))
+            return (matchedConnId, null, FindClientByConnId(refreshedClients, matchedConnId));
+
+        return (
+            null,
+            new JsonObject
+            {
+                ["ok"] = false,
+                ["error"] = $"No connected client matched '{selector}'",
+                ["active_conn_id"] = _hub.ActiveConnId,
+                ["clients"] = JsonNodeHelpers.DeepClone(refreshedClients),
+            },
+            null);
     }
 
     private async Task<JsonObject> SelectClientAsync(string selector, CancellationToken ct)
     {
-        string trimmed = (selector ?? "").Trim();
-        JsonObject direct = _hub.SelectActiveClient(trimmed);
-        if (JsonNodeHelpers.GetBool(direct, "ok", false))
-            return direct;
+        (string? connId, JsonObject? resolveErr, JsonObject? enrichedEntry) =
+            await ResolveClientSelectorAsync(selector, ct).ConfigureAwait(false);
+        if (resolveErr != null || string.IsNullOrEmpty(connId))
+            return resolveErr ?? new JsonObject { ["ok"] = false, ["error"] = $"No connected client matched '{selector}'" };
 
-        string selLow = trimmed.ToLowerInvariant();
-        if (!string.IsNullOrEmpty(selLow))
+        if (enrichedEntry == null)
         {
-            JsonArray clients = _hub.ListClientsJson();
-            foreach (JsonNode? node in clients)
-            {
-                if (node is not JsonObject c)
-                    continue;
-                string cid = JsonNodeHelpers.GetString(c, "conn_id", "");
-                JsonObject st = await _hub.CallAsync("get_status", new JsonObject(), 3.0, cid, ct).ConfigureAwait(false);
-                JsonObject? state = JsonNodeHelpers.GetObject(st, "state");
-                JsonObject? player = JsonNodeHelpers.GetObject(state, "player");
-                string cname = JsonNodeHelpers.GetString(player, "name", "");
-                long ccidNum = JsonNodeHelpers.GetLong(player, "char_id", 0);
-                string ccidStr = ccidNum > 0 ? ccidNum.ToString() : JsonNodeHelpers.GetString(player, "char_id", "");
-
-                if ((!string.IsNullOrEmpty(cname) && cname.ToLowerInvariant().Contains(selLow, StringComparison.Ordinal))
-                    || (!string.IsNullOrEmpty(ccidStr) && string.Equals(trimmed, ccidStr, StringComparison.Ordinal)))
-                {
-                    return _hub.SelectActiveClient(cid);
-                }
-            }
+            JsonObject? summary = FindClientByConnId(_hub.ListClientsJson(), connId);
+            if (summary != null)
+                enrichedEntry = await InspectAndRefreshClientAsync(summary, ct).ConfigureAwait(false);
         }
 
-        return direct;
+        JsonObject selected = _hub.SelectActiveClient(connId);
+        if (!JsonNodeHelpers.GetBool(selected, "ok", false))
+            return selected;
+
+        if (enrichedEntry != null)
+        {
+            selected["char_id"] = JsonNodeHelpers.DeepClone(enrichedEntry["char_id"]);
+            selected["char_name"] = JsonNodeHelpers.DeepClone(enrichedEntry["char_name"]);
+            selected["scene_name"] = JsonNodeHelpers.DeepClone(enrichedEntry["scene_name"]);
+        }
+        return selected;
     }
 
     public async Task<JsonObject> AwaitAsyncRpcAsync(
@@ -464,21 +575,61 @@ public sealed class BridgeRpcDispatcher
     {
         JsonObject args = arguments ?? new JsonObject();
         CancellationToken outerCt = ct;
+
+        string? targetConnId = null;
+        if (!string.Equals(toolName, "list_game_clients", StringComparison.Ordinal)
+            && !string.Equals(toolName, "select_game_client", StringComparison.Ordinal))
+        {
+            string clientSelector = JsonNodeHelpers.GetString(args, "client", "").Trim();
+            if (string.IsNullOrEmpty(clientSelector))
+                clientSelector = JsonNodeHelpers.GetString(args, "conn_id", "").Trim();
+            if (!string.IsNullOrEmpty(clientSelector))
+            {
+                (string? resolvedConnId, JsonObject? resolveErr, _) =
+                    await ResolveClientSelectorAsync(clientSelector, outerCt).ConfigureAwait(false);
+                if (resolveErr != null || string.IsNullOrEmpty(resolvedConnId))
+                    return resolveErr ?? new JsonObject { ["ok"] = false, ["error"] = $"No connected client matched '{clientSelector}'" };
+                targetConnId = resolvedConnId;
+            }
+        }
+
         Task<JsonObject> DispatchMcpRpc(string m, JsonObject p, CancellationToken ct = default)
         {
             p["as_admin"] = true;
-            return DispatchGameRpcAsync(m, p, ct: ct.CanBeCanceled ? ct : outerCt);
+            return DispatchGameRpcAsync(m, p, connId: targetConnId, ct: ct.CanBeCanceled ? ct : outerCt);
         }
         Task<JsonObject> InvokeMcpAndWaitAsync(string m, JsonObject p, double waitSec = 12.0, CancellationToken ct = default)
         {
             p["as_admin"] = true;
-            return InvokeAndWaitAsync(m, p, waitSec: waitSec, ct: ct.CanBeCanceled ? ct : outerCt);
+            return InvokeAndWaitAsync(m, p, waitSec: waitSec, connId: targetConnId, ct: ct.CanBeCanceled ? ct : outerCt);
         }
 
         switch (toolName)
         {
             case "get_status":
-                return await DispatchMcpRpc("get_status", new JsonObject()).ConfigureAwait(false);
+            {
+                string? statusCid = targetConnId ?? _hub.ActiveConnId;
+                JsonObject status = await DispatchMcpRpc("get_status", new JsonObject()).ConfigureAwait(false);
+                UpdateHubIdentityFromStatus(statusCid, status);
+
+                JsonArray rawClients = _hub.ListClientsJson();
+                if (rawClients.Count > 1)
+                {
+                    JsonObject enriched = await EnrichClientsAsync(outerCt).ConfigureAwait(false);
+                    status["active_conn_id"] = _hub.ActiveConnId;
+                    if (!string.IsNullOrEmpty(targetConnId))
+                        status["target_conn_id"] = targetConnId;
+                    status["connected_clients"] = JsonNodeHelpers.DeepClone(enriched["clients"]);
+                    status["multi_client_hint"] =
+                        "Multiple game clients are connected. Call select_game_client(selector) to switch the active default client, " +
+                        "or pass the optional 'client' argument (<char_name|char_id|conn_id|game_dir|pid>) to any tool.";
+                }
+                else if (!string.IsNullOrEmpty(statusCid))
+                {
+                    status["active_conn_id"] = statusCid;
+                }
+                return status;
+            }
 
             case "get_party":
                 return await DispatchMcpRpc("get_party", new JsonObject
@@ -601,11 +752,13 @@ public sealed class BridgeRpcDispatcher
                 return await ToolTeleportToPlaceAsync(
                     JsonNodeHelpers.GetString(args, "destination", ""),
                     HasNonNull(args, "wait_until_loaded") ? JsonNodeHelpers.GetBool(args, "wait_until_loaded", true) : true,
+                    targetConnId,
                     ct).ConfigureAwait(false);
 
             case "leave_special_scene":
                 return await ToolLeaveSpecialSceneAsync(
                     HasNonNull(args, "wait_until_loaded") ? JsonNodeHelpers.GetBool(args, "wait_until_loaded", true) : true,
+                    targetConnId,
                     ct).ConfigureAwait(false);
 
             case "inspect_skill_slots":
@@ -652,7 +805,7 @@ public sealed class BridgeRpcDispatcher
                 string asyncId = JsonNodeHelpers.GetString(res, "async_id", "");
                 if (!string.IsNullOrEmpty(asyncId))
                 {
-                    JsonObject rpcRes = await AwaitAsyncRpcAsync(asyncId, 6.0, ct: ct).ConfigureAwait(false);
+                    JsonObject rpcRes = await AwaitAsyncRpcAsync(asyncId, 6.0, connId: targetConnId, ct: ct).ConfigureAwait(false);
                     return new JsonObject
                     {
                         ["ok"] = JsonNodeHelpers.GetBool(rpcRes, "ok", true),
@@ -1039,9 +1192,10 @@ public sealed class BridgeRpcDispatcher
     private async Task<JsonObject> ToolTeleportToPlaceAsync(
         string destination,
         bool waitUntilLoaded,
+        string? connId,
         CancellationToken ct)
     {
-        JsonObject pre = await DispatchGameRpcAsync("get_status", new JsonObject(), ct: ct).ConfigureAwait(false);
+        JsonObject pre = await DispatchGameRpcAsync("get_status", new JsonObject(), connId: connId, ct: ct).ConfigureAwait(false);
         JsonObject preState = JsonNodeHelpers.GetObject(pre, "state") ?? new JsonObject();
         int prevSceneId = JsonNodeHelpers.GetInt(preState, "scene_id", 0);
 
@@ -1050,13 +1204,13 @@ public sealed class BridgeRpcDispatcher
             ["destination"] = destination,
             ["leave_special_first"] = false,
             ["as_admin"] = true,
-        }, ct: ct).ConfigureAwait(false);
+        }, connId: connId, ct: ct).ConfigureAwait(false);
         if (!JsonNodeHelpers.GetBool(startRes, "ok", false))
             return startRes;
 
         string asyncId = JsonNodeHelpers.GetString(startRes, "async_id", "");
         JsonObject rpcRes = !string.IsNullOrEmpty(asyncId)
-            ? await AwaitAsyncRpcAsync(asyncId, ct: ct).ConfigureAwait(false)
+            ? await AwaitAsyncRpcAsync(asyncId, connId: connId, ct: ct).ConfigureAwait(false)
             : JsonNodeHelpers.CloneObject(startRes);
 
         if (!JsonNodeHelpers.GetBool(rpcRes, "ok", false) || JsonNodeHelpers.GetBool(rpcRes, "already_in_scene", false))
@@ -1079,17 +1233,17 @@ public sealed class BridgeRpcDispatcher
         }
 
         int expectedScene = JsonNodeHelpers.GetInt(rpcRes, "sceneId", 0);
-        JsonObject postState = await WaitForSceneReadyAsync(prevSceneId, expectedScene, 25.0, ct: ct).ConfigureAwait(false);
+        JsonObject postState = await WaitForSceneReadyAsync(prevSceneId, expectedScene, 25.0, connId: connId, ct: ct).ConfigureAwait(false);
         int curAfter = JsonNodeHelpers.GetInt(postState, "scene_id", 0);
 
         if (expectedScene > 0 && expectedScene != prevSceneId && curAfter == prevSceneId && prevSceneId >= 12000)
         {
-            JsonObject leaveStart = await DispatchGameRpcAsync("leave_hub", new JsonObject { ["as_admin"] = true }, ct: ct).ConfigureAwait(false);
+            JsonObject leaveStart = await DispatchGameRpcAsync("leave_hub", new JsonObject { ["as_admin"] = true }, connId: connId, ct: ct).ConfigureAwait(false);
             string leaveAsyncId = JsonNodeHelpers.GetString(leaveStart, "async_id", "");
             if (!string.IsNullOrEmpty(leaveAsyncId))
-                await AwaitAsyncRpcAsync(leaveAsyncId, ct: ct).ConfigureAwait(false);
+                await AwaitAsyncRpcAsync(leaveAsyncId, connId: connId, ct: ct).ConfigureAwait(false);
 
-            JsonObject midState = await WaitForSceneReadyAsync(prevSceneId, 0, 25.0, ct: ct).ConfigureAwait(false);
+            JsonObject midState = await WaitForSceneReadyAsync(prevSceneId, 0, 25.0, connId: connId, ct: ct).ConfigureAwait(false);
             int midScene = JsonNodeHelpers.GetInt(midState, "scene_id", 0);
             if (midScene > 0 && midScene != expectedScene)
             {
@@ -1099,11 +1253,11 @@ public sealed class BridgeRpcDispatcher
                     ["destination"] = destination,
                     ["leave_special_first"] = false,
                     ["as_admin"] = true,
-                }, ct: ct).ConfigureAwait(false);
+                }, connId: connId, ct: ct).ConfigureAwait(false);
                 string retryAsyncId = JsonNodeHelpers.GetString(retryStart, "async_id", "");
                 if (!string.IsNullOrEmpty(retryAsyncId))
-                    rpcRes = await AwaitAsyncRpcAsync(retryAsyncId, ct: ct).ConfigureAwait(false);
-                postState = await WaitForSceneReadyAsync(midScene, expectedScene, 25.0, ct: ct).ConfigureAwait(false);
+                    rpcRes = await AwaitAsyncRpcAsync(retryAsyncId, connId: connId, ct: ct).ConfigureAwait(false);
+                postState = await WaitForSceneReadyAsync(midScene, expectedScene, 25.0, connId: connId, ct: ct).ConfigureAwait(false);
             }
             else
             {
@@ -1120,19 +1274,19 @@ public sealed class BridgeRpcDispatcher
         };
     }
 
-    private async Task<JsonObject> ToolLeaveSpecialSceneAsync(bool waitUntilLoaded, CancellationToken ct)
+    private async Task<JsonObject> ToolLeaveSpecialSceneAsync(bool waitUntilLoaded, string? connId, CancellationToken ct)
     {
-        JsonObject pre = await DispatchGameRpcAsync("get_status", new JsonObject(), ct: ct).ConfigureAwait(false);
+        JsonObject pre = await DispatchGameRpcAsync("get_status", new JsonObject(), connId: connId, ct: ct).ConfigureAwait(false);
         JsonObject preState = JsonNodeHelpers.GetObject(pre, "state") ?? new JsonObject();
         int prevSceneId = JsonNodeHelpers.GetInt(preState, "scene_id", 0);
 
-        JsonObject startRes = await DispatchGameRpcAsync("leave_hub", new JsonObject { ["as_admin"] = true }, ct: ct).ConfigureAwait(false);
+        JsonObject startRes = await DispatchGameRpcAsync("leave_hub", new JsonObject { ["as_admin"] = true }, connId: connId, ct: ct).ConfigureAwait(false);
         if (!JsonNodeHelpers.GetBool(startRes, "ok", false))
             return startRes;
 
         string asyncId = JsonNodeHelpers.GetString(startRes, "async_id", "");
         JsonObject rpcRes = !string.IsNullOrEmpty(asyncId)
-            ? await AwaitAsyncRpcAsync(asyncId, ct: ct).ConfigureAwait(false)
+            ? await AwaitAsyncRpcAsync(asyncId, connId: connId, ct: ct).ConfigureAwait(false)
             : JsonNodeHelpers.CloneObject(startRes);
 
         if (!JsonNodeHelpers.GetBool(rpcRes, "ok", false) || !waitUntilLoaded)
@@ -1144,7 +1298,7 @@ public sealed class BridgeRpcDispatcher
             };
         }
 
-        JsonObject postState = await WaitForSceneReadyAsync(prevSceneId, 0, 25.0, ct: ct).ConfigureAwait(false);
+        JsonObject postState = await WaitForSceneReadyAsync(prevSceneId, 0, 25.0, connId: connId, ct: ct).ConfigureAwait(false);
         return new JsonObject
         {
             ["ok"] = true,
@@ -1215,7 +1369,7 @@ public sealed class BridgeRpcDispatcher
                         ["serverInfo"] = new JsonObject
                         {
                             ["name"] = "stellar-agy-bridge",
-                            ["version"] = "1.0.0",
+                            ["version"] = "1.0.1",
                         },
                         ["instructions"] = McpInstructions,
                     });

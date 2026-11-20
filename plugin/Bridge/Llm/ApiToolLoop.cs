@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Stellar.AgyBridge.Bridge.Core;
 using Stellar.AgyBridge.Bridge.Models;
+using Stellar.AgyBridge.Bridge.Planning;
 using Stellar.AgyBridge.Bridge.Runtime;
 using Stellar.AgyBridge.Bridge.Storage;
 
@@ -730,10 +731,10 @@ public sealed class BotToolDispatcher
             mode = "plan_craft";
         string query = JsonNodeHelpers.GetString(args, "query", "").Trim();
         int recipeId = JsonNodeHelpers.GetInt(args, "recipe_id", 0);
-        int count = Math.Max(1, JsonNodeHelpers.GetInt(args, "count", 1));
-        string countMode = JsonNodeHelpers.GetString(args, "count_mode", "").Trim().ToLowerInvariant();
-        if (string.IsNullOrEmpty(countMode))
-            countMode = "additional";
+        int count = JsonNodeHelpers.GetInt(args, "count", 1);
+        string countMode = CraftPlanner.NormalizeCountMode(
+            JsonNodeHelpers.GetString(args, "count_mode", ""),
+            count);
 
         if (mode == "item_count")
         {

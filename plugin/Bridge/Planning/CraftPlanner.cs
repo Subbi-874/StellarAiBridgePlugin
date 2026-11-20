@@ -13,7 +13,23 @@ namespace Stellar.AgyBridge.Bridge.Planning;
 /// </summary>
 public sealed class CraftPlanner
 {
+    private const int MaxAutoCraftsCap = 9999;
+    private const int ZeroFocusProbeCap = 500;
     private static readonly Regex RecipeNormStripRegex = new(@"[\W_\u200b\ufeff]+", RegexOptions.Compiled);
+
+    public static string NormalizeCountMode(string? countMode, int requestedCount = 1)
+    {
+        string norm = (countMode ?? "").Trim().ToLowerInvariant();
+        if (norm is "max_focus" or "until_focus_empty" or "all_focus" or "exhaust_focus" or "focus" or "max" or "생활력" or "집중력")
+            return "max_focus";
+        if (requestedCount <= 0)
+            return "max_focus";
+        if (norm is "crafts" or "craft" or "times" or "runs" or "batches" or "batch" or "회" or "번" or "횟수")
+            return "crafts";
+        if (norm is "total_target" or "total" or "target" or "target_total" or "보유" or "목표보유량")
+            return "total_target";
+        return "additional";
+    }
 
     public static string NormalizeRecipeName(string? text)
         => RecipeNormStripRegex.Replace((text ?? "").ToLowerInvariant(), "");
@@ -278,6 +294,16 @@ public sealed class CraftPlanner
         return ids.OrderBy(id => id).ToList();
     }
 
+    private sealed class CraftExpansionEval
+    {
+        public List<GoalStep> Steps { get; set; } = new();
+        public Dictionary<int, int> MonsterDeficits { get; set; } = new();
+        public List<int> MonsterOrder { get; set; } = new();
+        public Dictionary<int, (string ItemLabel, int MonsterId, string MonsterName)> MonsterMeta { get; set; } = new();
+        public List<BlockedMaterial> Blocked { get; set; } = new();
+        public int FocusTotal { get; set; }
+    }
+
     public CraftPlanResult PlanCraft(
         IReadOnlyList<JsonObject> recipes,
         IReadOnlyDictionary<int, JsonObject> obtainWays,
@@ -292,7 +318,11 @@ public sealed class CraftPlanner
         IReadOnlyDictionary<int, int>? unequippedBaseEquipCounts = null,
         string lang = "ko")
     {
-        int reqCnt = Math.Max(1, requestedCount <= 0 ? 1 : requestedCount);
+        string canonicalMode = NormalizeCountMode(countMode, requestedCount);
+        int reqCnt = canonicalMode == "max_focus"
+            ? Math.Max(0, requestedCount)
+            : Math.Max(1, requestedCount);
+
         JsonObject? root = SelectTargetRecipe(recipes, recipeId, query, unlockMap);
         if (root == null)
         {
@@ -300,42 +330,57 @@ public sealed class CraftPlanner
             return new CraftPlanResult
             {
                 Status = "not_found",
+                CountMode = canonicalMode,
                 RequestedCount = reqCnt,
+                ExpectedOutputCount = 0,
                 Message = BridgeI18n.Format("craft_not_found", lang, ("label", label)),
             };
         }
 
         int rootOutId = JsonNodeHelpers.GetInt(root, "output_item_id", 0);
         int rootYield = Math.Max(1, JsonNodeHelpers.GetInt(root, "yield_per_craft", 1));
+        int rootFocusCost = Math.Max(0, JsonNodeHelpers.GetInt(root, "focus_cost", 0));
         var initialBag = new Dictionary<int, int>();
         foreach (KeyValuePair<int, int> kv in bagCounts)
             initialBag[kv.Key] = Math.Max(0, kv.Value);
-        var virtualBag = new Dictionary<int, int>(initialBag);
 
-        int rootCrafts;
-        if (string.Equals(countMode, "total_target", StringComparison.Ordinal) && rootOutId > 0)
+        int fixedRootCrafts = 0;
+        if (canonicalMode == "total_target")
         {
-            int rootOwned = virtualBag.GetValueOrDefault(rootOutId, 0);
-            int rootDeficit = Math.Max(0, reqCnt - rootOwned);
-            if (rootDeficit == 0)
+            if (rootOutId > 0)
             {
-                string dispName = JsonNodeHelpers.GetString(root, "output_name", "");
-                if (string.IsNullOrEmpty(dispName))
-                    dispName = JsonNodeHelpers.GetString(root, "name", "");
-                return new CraftPlanResult
+                int rootOwned = initialBag.GetValueOrDefault(rootOutId, 0);
+                int rootDeficit = Math.Max(0, reqCnt - rootOwned);
+                if (rootDeficit == 0)
                 {
-                    Status = "already_satisfied",
-                    TargetRecipe = root,
-                    RequestedCount = reqCnt,
-                    CraftsNeeded = 0,
-                    Message = BridgeI18n.Format("craft_already_owned", lang, ("name", dispName), ("owned", rootOwned)),
-                };
+                    string dispName = JsonNodeHelpers.GetString(root, "output_name", "");
+                    if (string.IsNullOrEmpty(dispName))
+                        dispName = JsonNodeHelpers.GetString(root, "name", "");
+                    return new CraftPlanResult
+                    {
+                        Status = "already_satisfied",
+                        TargetRecipe = root,
+                        CountMode = canonicalMode,
+                        RequestedCount = reqCnt,
+                        CraftsNeeded = 0,
+                        ExpectedOutputCount = 0,
+                        Message = BridgeI18n.Format("craft_already_owned", lang, ("name", dispName), ("owned", rootOwned)),
+                    };
+                }
+                fixedRootCrafts = CeilDiv(rootDeficit, rootYield);
             }
-            rootCrafts = CeilDiv(rootDeficit, rootYield);
+            else
+            {
+                fixedRootCrafts = CeilDiv(reqCnt, rootYield);
+            }
         }
-        else
+        else if (canonicalMode == "crafts")
         {
-            rootCrafts = CeilDiv(reqCnt, rootYield);
+            fixedRootCrafts = reqCnt;
+        }
+        else if (canonicalMode == "additional")
+        {
+            fixedRootCrafts = CeilDiv(reqCnt, rootYield);
         }
 
         var byOutput = new Dictionary<int, List<JsonObject>>();
@@ -364,21 +409,6 @@ public sealed class CraftPlanner
                 .ToList();
         }
 
-        var steps = new List<GoalStep>();
-        var monsterDeficits = new Dictionary<int, int>();
-        var monsterOrder = new List<int>();
-        var monsterMeta = new Dictionary<int, (string ItemLabel, int MonsterId, string MonsterName)>();
-        var blocked = new List<BlockedMaterial>();
-        int focusTotal = 0;
-
-        (int Used, int Deficit) ConsumeFromBag(int itemId, int needQty)
-        {
-            int have = virtualBag.GetValueOrDefault(itemId, 0);
-            int take = Math.Min(have, needQty);
-            virtualBag[itemId] = have - take;
-            return (take, needQty - take);
-        }
-
         JsonObject? PickSubRecipe(int itemId, HashSet<int> visitingItems)
         {
             if (visitingItems.Contains(itemId))
@@ -395,301 +425,479 @@ public sealed class CraftPlanner
             return null;
         }
 
-        void ExpandRecipe(JsonObject rec, int craftsCnt, HashSet<int> visitingItems)
+        CraftExpansionEval EvaluateExpansion(int craftsToEvaluate)
         {
-            int rid = JsonNodeHelpers.GetInt(rec, "recipe_id", 0);
-            string rname = JsonNodeHelpers.GetString(rec, "name", "");
-            if (string.IsNullOrEmpty(rname))
-                rname = $"Recipe#{rid}";
-            string rkind = JsonNodeHelpers.GetString(rec, "recipe_kind", "");
-            if (string.IsNullOrEmpty(rkind))
-                rkind = "life_build";
-            int oid = JsonNodeHelpers.GetInt(rec, "output_item_id", 0);
-            int ryield = Math.Max(1, JsonNodeHelpers.GetInt(rec, "yield_per_craft", 1));
-            int fcost = Math.Max(0, JsonNodeHelpers.GetInt(rec, "focus_cost", 0));
-            focusTotal += fcost * craftsCnt;
+            var virtualBag = new Dictionary<int, int>(initialBag);
+            var steps = new List<GoalStep>();
+            var monsterDeficits = new Dictionary<int, int>();
+            var monsterOrder = new List<int>();
+            var monsterMeta = new Dictionary<int, (string ItemLabel, int MonsterId, string MonsterName)>();
+            var blocked = new List<BlockedMaterial>();
+            int focusTotal = 0;
 
-            if (unlockMap != null && unlockMap.TryGetValue(rid, out bool rootUnlocked) && !rootUnlocked)
+            (int Used, int Deficit) ConsumeFromBag(int itemId, int needQty)
             {
-                blocked.Add(new BlockedMaterial
-                {
-                    ItemId = oid,
-                    ItemName = rname,
-                    Needed = craftsCnt * ryield,
-                    Owned = initialBag.GetValueOrDefault(oid, 0),
-                    Deficit = craftsCnt * ryield,
-                    Reason = "recipe_locked",
-                    ObtainHints = new List<string> { BridgeI18n.T("craft_recipe_locked", lang) },
-                });
-                return;
+                int have = virtualBag.GetValueOrDefault(itemId, 0);
+                int take = Math.Min(have, needQty);
+                virtualBag[itemId] = have - take;
+                return (take, needQty - take);
             }
 
-            if (rkind == "equip_create" && JsonNodeHelpers.GetInt(rec, "equip_name_group_id", 0) > 0)
+            void ExpandRecipe(JsonObject rec, int craftsCnt, HashSet<int> visitingItems)
             {
-                if (unequippedBaseEquipCounts != null)
+                int rid = JsonNodeHelpers.GetInt(rec, "recipe_id", 0);
+                string rname = JsonNodeHelpers.GetString(rec, "name", "");
+                if (string.IsNullOrEmpty(rname))
+                    rname = $"Recipe#{rid}";
+                string rkind = JsonNodeHelpers.GetString(rec, "recipe_kind", "");
+                if (string.IsNullOrEmpty(rkind))
+                    rkind = "life_build";
+                int oid = JsonNodeHelpers.GetInt(rec, "output_item_id", 0);
+                int ryield = Math.Max(1, JsonNodeHelpers.GetInt(rec, "yield_per_craft", 1));
+                int fcost = Math.Max(0, JsonNodeHelpers.GetInt(rec, "focus_cost", 0));
+                focusTotal += fcost * craftsCnt;
+
+                if (unlockMap != null && unlockMap.TryGetValue(rid, out bool rootUnlocked) && !rootUnlocked)
                 {
-                    int baseHave = unequippedBaseEquipCounts.GetValueOrDefault(rid, 0);
-                    if (baseHave < craftsCnt)
+                    blocked.Add(new BlockedMaterial
                     {
-                        blocked.Add(new BlockedMaterial
-                        {
-                            ItemId = oid,
-                            ItemName = rname,
-                            Needed = craftsCnt,
-                            Owned = baseHave,
-                            Deficit = craftsCnt - baseHave,
-                            Reason = "missing_base_equip",
-                            ObtainHints = new List<string> { BridgeI18n.T("craft_missing_base_equip", lang) },
-                        });
-                        return;
-                    }
+                        ItemId = oid,
+                        ItemName = rname,
+                        Needed = craftsCnt * ryield,
+                        Owned = initialBag.GetValueOrDefault(oid, 0),
+                        Deficit = craftsCnt * ryield,
+                        Reason = "recipe_locked",
+                        ObtainHints = new List<string> { BridgeI18n.T("craft_recipe_locked", lang) },
+                    });
+                    return;
                 }
-            }
 
-            var nextVisiting = new HashSet<int>(visitingItems);
-            if (oid > 0)
-                nextVisiting.Add(oid);
-
-            JsonArray? mats = JsonNodeHelpers.GetArray(rec, "materials");
-            if (mats != null)
-            {
-                foreach (JsonNode? matNode in mats)
+                if (rkind == "equip_create" && JsonNodeHelpers.GetInt(rec, "equip_name_group_id", 0) > 0)
                 {
-                    if (matNode is not JsonObject mat)
-                        continue;
-
-                    int perNeed = Math.Max(1, JsonNodeHelpers.GetInt(mat, "count", 1));
-                    int totalNeed = perNeed * craftsCnt;
-                    int mid = JsonNodeHelpers.GetInt(mat, "item_id", 0);
-                    string mname = JsonNodeHelpers.GetString(mat, "item_name", "");
-                    if (string.IsNullOrEmpty(mname))
-                        mname = $"Item#{mid}";
-
-                    int fishTb = JsonNodeHelpers.GetInt(mat, "fish_type_b", 0);
-                    if (mid == 0 && fishTb > 0)
+                    if (unequippedBaseEquipCounts != null)
                     {
-                        var cands = new List<int>();
-                        JsonArray? candArr = JsonNodeHelpers.GetArray(mat, "candidate_item_ids");
-                        if (candArr != null)
-                        {
-                            foreach (JsonNode? x in candArr)
-                            {
-                                if (JsonNodeHelpers.TryGetInt(x, out int cVal) && cVal > 0)
-                                    cands.Add(cVal);
-                            }
-                        }
-
-                        int rem = totalNeed;
-                        foreach (int cid in cands)
-                        {
-                            (_, rem) = ConsumeFromBag(cid, rem);
-                            if (rem <= 0)
-                                break;
-                        }
-
-                        if (rem > 0 && cands.Count > 0)
-                        {
-                            int pickId = cands[0];
-                            obtainWays.TryGetValue(pickId, out JsonObject? owFish);
-                            JsonObject? fishInfo = JsonNodeHelpers.GetObject(owFish, "fish");
-                            string spotName = JsonNodeHelpers.GetString(fishInfo, "name", "");
-                            if (string.IsNullOrEmpty(spotName))
-                                spotName = JsonNodeHelpers.GetString(owFish, "item_name", "");
-                            if (string.IsNullOrEmpty(spotName))
-                                spotName = $"어류#{fishTb}";
-
-                            steps.Add(new GoalStep
-                            {
-                                ActionType = "fish",
-                                Params = new JsonObject { ["spot"] = spotName, ["count"] = rem },
-                                TargetCount = rem,
-                                BehaviorKind = GoalHelpers.InferBehaviorKind("fish"),
-                            });
-                        }
-                        else if (rem > 0)
+                        int baseHave = unequippedBaseEquipCounts.GetValueOrDefault(rid, 0);
+                        if (baseHave < craftsCnt)
                         {
                             blocked.Add(new BlockedMaterial
                             {
-                                ItemId = 0,
-                                ItemName = mname,
-                                Needed = totalNeed,
-                                Owned = totalNeed - rem,
-                                Deficit = rem,
-                                Reason = "unknown_fish_category",
-                                ObtainHints = new List<string> { BridgeI18n.T("craft_fish_grade_missing", lang) },
+                                ItemId = oid,
+                                ItemName = rname,
+                                Needed = craftsCnt,
+                                Owned = baseHave,
+                                Deficit = craftsCnt - baseHave,
+                                Reason = "missing_base_equip",
+                                ObtainHints = new List<string> { BridgeI18n.T("craft_missing_base_equip", lang) },
                             });
-                        }
-                        continue;
-                    }
-
-                    if (mid <= 0)
-                        continue;
-
-                    (int usedFromBag, int deficit) = ConsumeFromBag(mid, totalNeed);
-                    if (deficit <= 0)
-                        continue;
-
-                    // 1. Sub-recipe craftable
-                    JsonObject? subRec = PickSubRecipe(mid, nextVisiting);
-                    if (subRec != null)
-                    {
-                        int subYield = Math.Max(1, JsonNodeHelpers.GetInt(subRec, "yield_per_craft", 1));
-                        int subCrafts = CeilDiv(deficit, subYield);
-                        ExpandRecipe(subRec, subCrafts, nextVisiting);
-                        int surplus = subCrafts * subYield - deficit;
-                        if (surplus > 0)
-                            virtualBag[mid] = virtualBag.GetValueOrDefault(mid, 0) + surplus;
-                        continue;
-                    }
-
-                    // 2. Obtain way resolution (gather > fish > monster > blocked)
-                    obtainWays.TryGetValue(mid, out JsonObject? ow);
-                    string itemLabel = JsonNodeHelpers.GetString(ow, "item_name", "");
-                    if (string.IsNullOrEmpty(itemLabel))
-                        itemLabel = mname;
-
-                    JsonObject? gather = JsonNodeHelpers.GetObject(ow, "gather");
-                    JsonObject? fish = JsonNodeHelpers.GetObject(ow, "fish");
-                    JsonObject? monster = JsonNodeHelpers.GetObject(ow, "monster");
-                    var otherWays = new List<string>();
-                    JsonArray? otherArr = JsonNodeHelpers.GetArray(ow, "other_ways");
-                    if (otherArr != null)
-                    {
-                        foreach (JsonNode? n in otherArr)
-                        {
-                            string s = JsonNodeHelpers.AsString(n, "");
-                            if (!string.IsNullOrEmpty(s))
-                                otherWays.Add(s);
+                            return;
                         }
                     }
+                }
 
-                    string resName = JsonNodeHelpers.GetString(gather, "resource_name", "").Trim();
-                    if (!string.IsNullOrEmpty(resName))
-                    {
-                        steps.Add(new GoalStep
-                        {
-                            ActionType = "gather_resource",
-                            Params = new JsonObject { ["resource"] = resName, ["count"] = deficit },
-                            TargetCount = deficit,
-                            BehaviorKind = GoalHelpers.InferBehaviorKind("gather_resource"),
-                        });
-                        continue;
-                    }
+                var nextVisiting = new HashSet<int>(visitingItems);
+                if (oid > 0)
+                    nextVisiting.Add(oid);
 
-                    string fishName = JsonNodeHelpers.GetString(fish, "name", "").Trim();
-                    if (!string.IsNullOrEmpty(fishName))
+                JsonArray? mats = JsonNodeHelpers.GetArray(rec, "materials");
+                if (mats != null)
+                {
+                    foreach (JsonNode? matNode in mats)
                     {
-                        steps.Add(new GoalStep
-                        {
-                            ActionType = "fish",
-                            Params = new JsonObject { ["spot"] = fishName, ["count"] = deficit },
-                            TargetCount = deficit,
-                            BehaviorKind = GoalHelpers.InferBehaviorKind("fish"),
-                        });
-                        continue;
-                    }
+                        if (matNode is not JsonObject mat)
+                            continue;
 
-                    string monName = JsonNodeHelpers.GetString(monster, "monster_name", "").Trim();
-                    if (!string.IsNullOrEmpty(monName))
-                    {
-                        int monId = JsonNodeHelpers.GetInt(monster, "monster_id", 0);
-                        if (!monsterDeficits.ContainsKey(mid))
-                            monsterOrder.Add(mid);
-                        monsterDeficits[mid] = monsterDeficits.GetValueOrDefault(mid, 0) + deficit;
-                        monsterMeta[mid] = (itemLabel, monId, monName);
-                        if (allowMonsterFarm)
+                        int perNeed = Math.Max(1, JsonNodeHelpers.GetInt(mat, "count", 1));
+                        int totalNeed = perNeed * craftsCnt;
+                        int mid = JsonNodeHelpers.GetInt(mat, "item_id", 0);
+                        string mname = JsonNodeHelpers.GetString(mat, "item_name", "");
+                        if (string.IsNullOrEmpty(mname))
+                            mname = $"Item#{mid}";
+
+                        int fishTb = JsonNodeHelpers.GetInt(mat, "fish_type_b", 0);
+                        if (mid == 0 && fishTb > 0)
                         {
-                            int targetTotal = initialBag.GetValueOrDefault(mid, 0) + monsterDeficits[mid];
+                            var cands = new List<int>();
+                            JsonArray? candArr = JsonNodeHelpers.GetArray(mat, "candidate_item_ids");
+                            if (candArr != null)
+                            {
+                                foreach (JsonNode? x in candArr)
+                                {
+                                    if (JsonNodeHelpers.TryGetInt(x, out int cVal) && cVal > 0)
+                                        cands.Add(cVal);
+                                }
+                            }
+
+                            int rem = totalNeed;
+                            foreach (int cid in cands)
+                            {
+                                (_, rem) = ConsumeFromBag(cid, rem);
+                                if (rem <= 0)
+                                    break;
+                            }
+
+                            if (rem > 0 && cands.Count > 0)
+                            {
+                                int pickId = cands[0];
+                                obtainWays.TryGetValue(pickId, out JsonObject? owFish);
+                                JsonObject? fishInfo = JsonNodeHelpers.GetObject(owFish, "fish");
+                                string spotName = JsonNodeHelpers.GetString(fishInfo, "name", "");
+                                if (string.IsNullOrEmpty(spotName))
+                                    spotName = JsonNodeHelpers.GetString(owFish, "item_name", "");
+                                if (string.IsNullOrEmpty(spotName))
+                                    spotName = $"어류#{fishTb}";
+
+                                steps.Add(new GoalStep
+                                {
+                                    ActionType = "fish",
+                                    Params = new JsonObject { ["spot"] = spotName, ["count"] = rem },
+                                    TargetCount = rem,
+                                    BehaviorKind = GoalHelpers.InferBehaviorKind("fish"),
+                                });
+                            }
+                            else if (rem > 0)
+                            {
+                                blocked.Add(new BlockedMaterial
+                                {
+                                    ItemId = 0,
+                                    ItemName = mname,
+                                    Needed = totalNeed,
+                                    Owned = totalNeed - rem,
+                                    Deficit = rem,
+                                    Reason = "unknown_fish_category",
+                                    ObtainHints = new List<string> { BridgeI18n.T("craft_fish_grade_missing", lang) },
+                                });
+                            }
+                            continue;
+                        }
+
+                        if (mid <= 0)
+                            continue;
+
+                        (int usedFromBag, int deficit) = ConsumeFromBag(mid, totalNeed);
+                        if (deficit <= 0)
+                            continue;
+
+                        // 1. Sub-recipe craftable
+                        JsonObject? subRec = PickSubRecipe(mid, nextVisiting);
+                        if (subRec != null)
+                        {
+                            int subYield = Math.Max(1, JsonNodeHelpers.GetInt(subRec, "yield_per_craft", 1));
+                            int subCrafts = CeilDiv(deficit, subYield);
+                            ExpandRecipe(subRec, subCrafts, nextVisiting);
+                            int surplus = subCrafts * subYield - deficit;
+                            if (surplus > 0)
+                                virtualBag[mid] = virtualBag.GetValueOrDefault(mid, 0) + surplus;
+                            continue;
+                        }
+
+                        // 2. Obtain way resolution (gather > fish > monster > blocked)
+                        obtainWays.TryGetValue(mid, out JsonObject? ow);
+                        string itemLabel = JsonNodeHelpers.GetString(ow, "item_name", "");
+                        if (string.IsNullOrEmpty(itemLabel))
+                            itemLabel = mname;
+
+                        JsonObject? gather = JsonNodeHelpers.GetObject(ow, "gather");
+                        JsonObject? fish = JsonNodeHelpers.GetObject(ow, "fish");
+                        JsonObject? monster = JsonNodeHelpers.GetObject(ow, "monster");
+                        var otherWays = new List<string>();
+                        JsonArray? otherArr = JsonNodeHelpers.GetArray(ow, "other_ways");
+                        if (otherArr != null)
+                        {
+                            foreach (JsonNode? n in otherArr)
+                            {
+                                string s = JsonNodeHelpers.AsString(n, "");
+                                if (!string.IsNullOrEmpty(s))
+                                    otherWays.Add(s);
+                            }
+                        }
+
+                        string resName = JsonNodeHelpers.GetString(gather, "resource_name", "").Trim();
+                        if (!string.IsNullOrEmpty(resName))
+                        {
                             steps.Add(new GoalStep
                             {
-                                ActionType = "farm_monster_item",
-                                Params = new JsonObject
-                                {
-                                    ["monster"] = monName,
-                                    ["item_id"] = mid,
-                                    ["count"] = targetTotal,
-                                    ["target_count"] = targetTotal,
-                                },
-                                TargetCount = targetTotal,
-                                BehaviorKind = GoalHelpers.InferBehaviorKind("farm_monster_item"),
+                                ActionType = "gather_resource",
+                                Params = new JsonObject { ["resource"] = resName, ["count"] = deficit },
+                                TargetCount = deficit,
+                                BehaviorKind = GoalHelpers.InferBehaviorKind("gather_resource"),
                             });
+                            continue;
                         }
-                        continue;
-                    }
 
-                    bool hasLockedSub = byOutput.TryGetValue(mid, out List<JsonObject>? subCands)
-                        && subCands.Any(c =>
+                        string fishName = JsonNodeHelpers.GetString(fish, "name", "").Trim();
+                        if (!string.IsNullOrEmpty(fishName))
                         {
-                            int cRid = JsonNodeHelpers.GetInt(c, "recipe_id", 0);
-                            return unlockMap != null && unlockMap.TryGetValue(cRid, out bool u) && !u;
+                            steps.Add(new GoalStep
+                            {
+                                ActionType = "fish",
+                                Params = new JsonObject { ["spot"] = fishName, ["count"] = deficit },
+                                TargetCount = deficit,
+                                BehaviorKind = GoalHelpers.InferBehaviorKind("fish"),
+                            });
+                            continue;
+                        }
+
+                        string monName = JsonNodeHelpers.GetString(monster, "monster_name", "").Trim();
+                        if (!string.IsNullOrEmpty(monName))
+                        {
+                            int monId = JsonNodeHelpers.GetInt(monster, "monster_id", 0);
+                            if (!monsterDeficits.ContainsKey(mid))
+                                monsterOrder.Add(mid);
+                            monsterDeficits[mid] = monsterDeficits.GetValueOrDefault(mid, 0) + deficit;
+                            monsterMeta[mid] = (itemLabel, monId, monName);
+                            if (allowMonsterFarm)
+                            {
+                                int targetTotal = initialBag.GetValueOrDefault(mid, 0) + monsterDeficits[mid];
+                                steps.Add(new GoalStep
+                                {
+                                    ActionType = "farm_monster_item",
+                                    Params = new JsonObject
+                                    {
+                                        ["monster"] = monName,
+                                        ["item_id"] = mid,
+                                        ["count"] = targetTotal,
+                                        ["target_count"] = targetTotal,
+                                    },
+                                    TargetCount = targetTotal,
+                                    BehaviorKind = GoalHelpers.InferBehaviorKind("farm_monster_item"),
+                                });
+                            }
+                            continue;
+                        }
+
+                        bool hasLockedSub = byOutput.TryGetValue(mid, out List<JsonObject>? subCands)
+                            && subCands.Any(c =>
+                            {
+                                int cRid = JsonNodeHelpers.GetInt(c, "recipe_id", 0);
+                                return unlockMap != null && unlockMap.TryGetValue(cRid, out bool u) && !u;
+                            });
+
+                        string reason = hasLockedSub ? "sub_recipe_locked" : "non_automatable_source";
+                        List<string> hints = otherWays.Count > 0
+                            ? otherWays
+                            : new List<string>
+                            {
+                                BridgeI18n.T(hasLockedSub ? "craft_sub_recipe_locked" : "craft_external_source_hint", lang),
+                            };
+
+                        blocked.Add(new BlockedMaterial
+                        {
+                            ItemId = mid,
+                            ItemName = itemLabel,
+                            Needed = totalNeed,
+                            Owned = usedFromBag,
+                            Deficit = deficit,
+                            Reason = reason,
+                            ObtainHints = hints,
                         });
-
-                    string reason = hasLockedSub ? "sub_recipe_locked" : "non_automatable_source";
-                    List<string> hints = otherWays.Count > 0
-                        ? otherWays
-                        : new List<string>
-                        {
-                            BridgeI18n.T(hasLockedSub ? "craft_sub_recipe_locked" : "craft_external_source_hint", lang),
-                        };
-
-                    blocked.Add(new BlockedMaterial
-                    {
-                        ItemId = mid,
-                        ItemName = itemLabel,
-                        Needed = totalNeed,
-                        Owned = usedFromBag,
-                        Deficit = deficit,
-                        Reason = reason,
-                        ObtainHints = hints,
-                    });
+                    }
                 }
+
+                steps.Add(new GoalStep
+                {
+                    ActionType = "craft_item",
+                    Params = new JsonObject
+                    {
+                        ["recipe_id"] = rid,
+                        ["query"] = rname,
+                        ["recipe_kind"] = rkind,
+                        ["count"] = craftsCnt,
+                    },
+                    TargetCount = craftsCnt,
+                    BehaviorKind = GoalHelpers.InferBehaviorKind("craft_item"),
+                });
             }
 
-            steps.Add(new GoalStep
+            ExpandRecipe(root, craftsToEvaluate, new HashSet<int>());
+            return new CraftExpansionEval
             {
-                ActionType = "craft_item",
-                Params = new JsonObject
-                {
-                    ["recipe_id"] = rid,
-                    ["query"] = rname,
-                    ["recipe_kind"] = rkind,
-                    ["count"] = craftsCnt,
-                },
-                TargetCount = craftsCnt,
-                BehaviorKind = GoalHelpers.InferBehaviorKind("craft_item"),
-            });
+                Steps = steps,
+                MonsterDeficits = monsterDeficits,
+                MonsterOrder = monsterOrder,
+                MonsterMeta = monsterMeta,
+                Blocked = blocked,
+                FocusTotal = focusTotal,
+            };
         }
 
-        ExpandRecipe(root, rootCrafts, new HashSet<int>());
+        bool IsFeasible(CraftExpansionEval ev)
+            => ev.Blocked.Count == 0 && ev.FocusTotal <= availableFocus;
 
-        if (availableFocus >= 0 && focusTotal > availableFocus)
+        (int Crafts, CraftExpansionEval Eval) BinarySearchMaxCrafts(CraftExpansionEval bestEval, int high, int bestK = 1)
         {
-            blocked.Add(new BlockedMaterial
+            int lo = bestK + 1;
+            int hi = high;
+            while (lo <= hi)
+            {
+                int mid = lo + (hi - lo) / 2;
+                CraftExpansionEval midEval = EvaluateExpansion(mid);
+                if (IsFeasible(midEval))
+                {
+                    bestK = mid;
+                    bestEval = midEval;
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid - 1;
+                }
+            }
+            return (bestK, bestEval);
+        }
+
+        int rootCrafts;
+        CraftExpansionEval eval;
+        if (canonicalMode == "max_focus")
+        {
+            if (availableFocus < 0)
+            {
+                string unavailableMsg = BridgeI18n.T("craft_focus_unavailable", lang);
+                int needHint = Math.Max(1, rootFocusCost);
+                return new CraftPlanResult
+                {
+                    Status = "blocked",
+                    TargetRecipe = root,
+                    CountMode = canonicalMode,
+                    RequestedCount = reqCnt,
+                    CraftsNeeded = 0,
+                    ExpectedOutputCount = 0,
+                    BlockedMaterials = new List<BlockedMaterial>
+                    {
+                        new BlockedMaterial
+                        {
+                            ItemId = 20003,
+                            ItemName = BridgeI18n.T("craft_focus_name", lang),
+                            Needed = needHint,
+                            Owned = 0,
+                            Deficit = needHint,
+                            Reason = "focus_unavailable",
+                            ObtainHints = new List<string> { unavailableMsg },
+                        },
+                    },
+                    Message = unavailableMsg,
+                };
+            }
+
+            CraftExpansionEval eval1 = EvaluateExpansion(1);
+            if (!IsFeasible(eval1))
+            {
+                rootCrafts = 1;
+                eval = eval1;
+            }
+            else if (rootFocusCost > 0)
+            {
+                int hi = Math.Min(availableFocus / rootFocusCost, MaxAutoCraftsCap);
+                if (hi <= 1)
+                {
+                    rootCrafts = 1;
+                    eval = eval1;
+                }
+                else
+                {
+                    CraftExpansionEval evalHi = EvaluateExpansion(hi);
+                    if (IsFeasible(evalHi))
+                    {
+                        rootCrafts = hi;
+                        eval = evalHi;
+                    }
+                    else
+                    {
+                        (rootCrafts, eval) = BinarySearchMaxCrafts(eval1, hi - 1);
+                    }
+                }
+            }
+            else
+            {
+                CraftExpansionEval probe = EvaluateExpansion(ZeroFocusProbeCap);
+                if (probe.FocusTotal == 0)
+                {
+                    string noFocusMsg = BridgeI18n.T("craft_no_focus_cost", lang);
+                    return new CraftPlanResult
+                    {
+                        Status = "blocked",
+                        TargetRecipe = root,
+                        CountMode = canonicalMode,
+                        RequestedCount = reqCnt,
+                        CraftsNeeded = 0,
+                        ExpectedOutputCount = 0,
+                        BlockedMaterials = new List<BlockedMaterial>
+                        {
+                            new BlockedMaterial
+                            {
+                                ItemId = 20003,
+                                ItemName = BridgeI18n.T("craft_focus_name", lang),
+                                Needed = 0,
+                                Owned = availableFocus,
+                                Deficit = 0,
+                                Reason = "no_focus_cost",
+                                ObtainHints = new List<string> { noFocusMsg },
+                            },
+                        },
+                        Message = noFocusMsg,
+                    };
+                }
+
+                int bestK = 1;
+                CraftExpansionEval bestEval = eval1;
+                int hi = ZeroFocusProbeCap;
+                CraftExpansionEval evalHi = probe;
+                while (IsFeasible(evalHi) && hi < MaxAutoCraftsCap)
+                {
+                    bestK = hi;
+                    bestEval = evalHi;
+                    hi = Math.Min(hi * 2, MaxAutoCraftsCap);
+                    evalHi = EvaluateExpansion(hi);
+                }
+
+                if (IsFeasible(evalHi))
+                {
+                    rootCrafts = hi;
+                    eval = evalHi;
+                }
+                else
+                {
+                    (rootCrafts, eval) = BinarySearchMaxCrafts(bestEval, hi - 1, bestK);
+                }
+            }
+        }
+        else
+        {
+            rootCrafts = fixedRootCrafts;
+            eval = EvaluateExpansion(rootCrafts);
+        }
+
+        int expectedOutputCount = rootCrafts * rootYield;
+
+        if (availableFocus >= 0 && eval.FocusTotal > availableFocus)
+        {
+            eval.Blocked.Add(new BlockedMaterial
             {
                 ItemId = 20003,
                 ItemName = BridgeI18n.T("craft_focus_name", lang),
-                Needed = focusTotal,
+                Needed = eval.FocusTotal,
                 Owned = availableFocus,
-                Deficit = focusTotal - availableFocus,
+                Deficit = eval.FocusTotal - availableFocus,
                 Reason = "insufficient_focus",
                 ObtainHints = new List<string>
                 {
-                    BridgeI18n.Format("craft_focus_shortage", lang, ("needed", focusTotal), ("owned", availableFocus)),
+                    BridgeI18n.Format("craft_focus_shortage", lang, ("needed", eval.FocusTotal), ("owned", availableFocus)),
                 },
             });
         }
 
-        if (blocked.Count > 0)
+        if (eval.Blocked.Count > 0)
         {
-            BlockedMaterial firstB = blocked[0];
+            BlockedMaterial firstB = eval.Blocked[0];
             return new CraftPlanResult
             {
                 Status = "blocked",
                 TargetRecipe = root,
+                CountMode = canonicalMode,
                 RequestedCount = reqCnt,
                 CraftsNeeded = rootCrafts,
-                TotalFocusNeeded = focusTotal,
-                BlockedMaterials = blocked,
+                ExpectedOutputCount = expectedOutputCount,
+                TotalFocusNeeded = eval.FocusTotal,
+                BlockedMaterials = eval.Blocked,
                 Message = BridgeI18n.Format(
                     "craft_blocked",
                     lang,
@@ -699,17 +907,17 @@ public sealed class CraftPlanner
             };
         }
 
-        if (monsterDeficits.Count > 0 && !allowMonsterFarm)
+        if (eval.MonsterDeficits.Count > 0 && !allowMonsterFarm)
         {
-            var prompts = new List<MonsterFarmPrompt>(monsterOrder.Count);
-            foreach (int mid in monsterOrder)
+            var prompts = new List<MonsterFarmPrompt>(eval.MonsterOrder.Count);
+            foreach (int mid in eval.MonsterOrder)
             {
-                (string iLabel, int monId, string monName) = monsterMeta[mid];
+                (string iLabel, int monId, string monName) = eval.MonsterMeta[mid];
                 prompts.Add(new MonsterFarmPrompt
                 {
                     ItemId = mid,
                     ItemName = iLabel,
-                    Deficit = monsterDeficits[mid],
+                    Deficit = eval.MonsterDeficits[mid],
                     MonsterId = monId,
                     MonsterName = monName,
                 });
@@ -727,23 +935,27 @@ public sealed class CraftPlanner
             {
                 Status = "needs_monster_confirm",
                 TargetRecipe = root,
+                CountMode = canonicalMode,
                 RequestedCount = reqCnt,
                 CraftsNeeded = rootCrafts,
-                TotalFocusNeeded = focusTotal,
+                ExpectedOutputCount = expectedOutputCount,
+                TotalFocusNeeded = eval.FocusTotal,
                 MonsterPrompts = prompts,
                 Message = BridgeI18n.Format("craft_needs_monster_confirm", lang, ("desc", desc)),
             };
         }
 
-        List<GoalStep> finalSteps = CoalesceSteps(steps);
+        List<GoalStep> finalSteps = CoalesceSteps(eval.Steps);
         string rootName = JsonNodeHelpers.GetString(root, "name", "");
         return new CraftPlanResult
         {
             Status = "ready",
             TargetRecipe = root,
+            CountMode = canonicalMode,
             RequestedCount = reqCnt,
             CraftsNeeded = rootCrafts,
-            TotalFocusNeeded = focusTotal,
+            ExpectedOutputCount = expectedOutputCount,
+            TotalFocusNeeded = eval.FocusTotal,
             Steps = finalSteps,
             Message = BridgeI18n.Format(
                 "craft_ready",

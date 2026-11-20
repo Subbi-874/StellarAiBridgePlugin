@@ -1,7 +1,33 @@
 [
   {
+    "name": "list_game_clients",
+    "description": "Lists all simultaneously connected game clients (conn_id, PID, game_dir, char_id, char_name, scene_name, is_active). Call this or get_status when multiple accounts may be running so you can see every character.",
+    "inputSchema": {
+      "properties": {},
+      "title": "list_game_clientsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "select_game_client",
+    "description": "Sets the default game client that MCP tools target (by character name, char_id, drive/path substring e.g. 'E:' or 'G:', PID, or conn_id). Use list_game_clients to inspect available clients, or pass the optional 'client' argument to any individual tool.",
+    "inputSchema": {
+      "properties": {
+        "selector": {
+          "title": "Selector",
+          "type": "string"
+        }
+      },
+      "required": [
+        "selector"
+      ],
+      "title": "select_game_clientArguments",
+      "type": "object"
+    }
+  },
+  {
     "name": "get_status",
-    "description": "Returns local player state (HP, scene, channel line_id, 3D coordinates, party summary) and active behavior.",
+    "description": "Returns the target player's state (HP, scene, channel line_id, 3D coordinates, party summary) and active behavior. When multiple game clients are connected, also includes active_conn_id and connected_clients so you can see every character.",
     "inputSchema": {
       "properties": {},
       "title": "get_statusArguments",
@@ -1152,6 +1178,7 @@
         },
         "count": {
           "default": 1,
+          "description": "Item quantity or craft batch count (0 = craft max possible until Focus/Vitality is exhausted).",
           "title": "Count",
           "type": "integer"
         },
@@ -1167,6 +1194,13 @@
         },
         "count_mode": {
           "default": "additional",
+          "description": "Counting mode: additional (output N more items), total_target (reach N total owned), crafts (execute recipe N times regardless of yield), or max_focus (craft maximum times within available Focus/Vitality).",
+          "enum": [
+            "additional",
+            "total_target",
+            "crafts",
+            "max_focus"
+          ],
           "title": "Count Mode",
           "type": "string"
         },
@@ -1192,6 +1226,7 @@
         },
         "count": {
           "default": 1,
+          "description": "Item quantity or craft batch count (0 = craft max possible until Focus/Vitality is exhausted).",
           "title": "Count",
           "type": "integer"
         },
@@ -1207,6 +1242,13 @@
         },
         "count_mode": {
           "default": "additional",
+          "description": "Counting mode: additional (output N more items), total_target (reach N total owned), crafts (execute recipe N times regardless of yield), or max_focus (craft maximum times within available Focus/Vitality).",
+          "enum": [
+            "additional",
+            "total_target",
+            "crafts",
+            "max_focus"
+          ],
           "title": "Count Mode",
           "type": "string"
         },
@@ -1391,32 +1433,6 @@
         }
       },
       "title": "send_stickerArguments",
-      "type": "object"
-    }
-  },
-  {
-    "name": "list_game_clients",
-    "description": "Lists all simultaneously connected game clients (e.g. E:\\ StarASIA and G:\\ StarASIA_STEAM) with character names.",
-    "inputSchema": {
-      "properties": {},
-      "title": "list_game_clientsArguments",
-      "type": "object"
-    }
-  },
-  {
-    "name": "select_game_client",
-    "description": "Selects which connected game client AGY controls (by character name e.g. '쵸로기', drive/path 'E:' or 'G:', PID, or conn_id).",
-    "inputSchema": {
-      "properties": {
-        "selector": {
-          "title": "Selector",
-          "type": "string"
-        }
-      },
-      "required": [
-        "selector"
-      ],
-      "title": "select_game_clientArguments",
       "type": "object"
     }
   },

@@ -32,3 +32,8 @@
 20. '던전 나가 / 레이드 나가 / 불안정 공간 나가 / 여기서 나가 / 길드홈 나가 / 마이홈 나가 / 퇴장하자'처럼 현재 인스턴스·특수 공간에서 빠져나오라는 요청이면 {"type": "leave_dungeon"}을 넣으세요(기존 따라가기·낚시는 자동 중지됨).
 21. '바람의 통로 타 / 기믹 작동해 / 저거 타고 날아가 / 전송 장치 써'처럼 주변 이동형 필드·던전 기믹(바람 통로·활공 발판·맵 내 순간 이동 등) 사용 요청이면 {"type": "use_gimmick", "gimmick": "<기믹명 또는 빈 문자열 ''>"}을 넣으세요(참고: 자동전투가 켜져 있으면 장판 폭발 직전 및 보스 붉은 섬광 시 회피키 `Rush` 저스트 회피를 우선 수행하고, 일반 평타 및 녹색 회복·분담/집합 장판은 회피에서 제외합니다).
 22. 요청된 기능이 현재 꺼짐(OFF) 상태라면(chat_monitor 제외), 먼저 {"type": "set_feature_policy", "key": "<기능키>", "enabled": true}를 실행해 켠 뒤 같은 응답의 actions 뒤쪽에 본 동작을 이어서 넣으세요. 관리자 전용(🔒) 잠금 설정/해제는 {"type": "set_feature_policy", "key": "<기능키>", "admin_only": true | false}를, 특정 채널(월챗/일반챗/귓속말/파티/길드)에 텍스트를 발신하라는 지시는 {"type": "send_chat", "channel": "world|say|party|guild|whisper", "text": "..."}를 사용하세요.
+23. 제작/목표 제작 요청('~ N개 만들어', '~ N번 만들어', '생활력/집중력 다 쓸 때까지 만들어', '목표에 ~ 제작 추가해')은 절대 set_goal로 감싸지 말고 반드시 craft_goal 액션을 직접 넣으세요:
+    - '~ N개 만들어': {"type": "craft_goal", "item": "...", "count": N, "count_mode": "additional"}
+    - '~ 총 N개 되게/보유하게 만들어': {"type": "craft_goal", "item": "...", "count": N, "count_mode": "total_target"}
+    - '~ N번 / N회 만들어': {"type": "craft_goal", "item": "...", "count": N, "count_mode": "crafts"} (1회 생산량과 무관하게 제작 N회 실행)
+    - '생활력/집중력 다 쓸 때까지 만들어': {"type": "craft_goal", "item": "...", "count": 0, "count_mode": "max_focus"}

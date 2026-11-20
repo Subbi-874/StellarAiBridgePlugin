@@ -54,6 +54,8 @@ public static class GoalHelpers
         "target_count",
         "item_name",
         "recipe_name",
+        "count_mode",
+        "allow_monster_farm",
     };
 
     private static readonly IReadOnlyDictionary<string, string> BehaviorKindMap =
