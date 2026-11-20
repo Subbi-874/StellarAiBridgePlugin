@@ -18,6 +18,7 @@ public sealed class CrossMapNavigator
     private readonly IPluginServices _services;
     private readonly IMovementAdapter _movement;
     private readonly ICombatAdapter _combat;
+    private readonly SceneTransferGate _transferGate = new();
 
     public CrossMapNavigator(IPluginServices services, IMovementAdapter movement, ICombatAdapter combat)
     {
@@ -25,6 +26,24 @@ public sealed class CrossMapNavigator
         _movement = movement;
         _combat = combat;
     }
+
+    public void Tick(float dt)
+    {
+        bool isLoadingOrOutOfWorld = _services.ClientState.Phase != GamePhase.World
+            || (_services.ClientState.UiState & GameUIState.Loading) != 0
+            || !_services.PlayerState.IsAvailable;
+        _transferGate.Tick(dt, isLoadingOrOutOfWorld);
+    }
+
+    public bool IsTransferBusy(out string reason, out float remainingSec)
+        => _transferGate.IsBlocked(out reason, out remainingSec);
+
+    private static JsonObject TransferBusyJson(string blockReason) => new()
+    {
+        ["ok"] = false,
+        ["reason_code"] = "transfer_in_progress",
+        ["error"] = $"Another scene/channel transfer is already in progress ({blockReason})"
+    };
 
     /// <summary>
     /// Lists current channel and available channels on the active map via sceneline_vm.AsyncReqSceneLineInfo().
@@ -50,10 +69,17 @@ public sealed class CrossMapNavigator
         if (!_movement.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
+        if (!_transferGate.TryBegin("channel", SceneTransferGate.ChannelSwitchLockSec, out string blockReason))
+            return TransferBusyJson(blockReason);
+
         string? reqId = _movement.StartSwitchChannelForMemberCoroutine(targetCharId, fallbackLineId);
         if (reqId == null)
+        {
+            _transferGate.CancelStart();
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start channel-switch coroutine" };
+        }
 
+        _transferGate.AttachAsyncId(reqId);
         return new JsonObject
         {
             ["ok"] = true,
@@ -74,10 +100,17 @@ public sealed class CrossMapNavigator
         if (targetLineId <= 0)
             return new JsonObject { ["ok"] = false, ["error"] = "유효한 채널 번호(1 이상)를 지정해주세요" };
 
+        if (!_transferGate.TryBegin("channel", SceneTransferGate.ChannelSwitchLockSec, out string blockReason))
+            return TransferBusyJson(blockReason);
+
         string? reqId = _movement.StartSwitchChannelCoroutine(targetLineId);
         if (reqId == null)
+        {
+            _transferGate.CancelStart();
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start channel-switch coroutine" };
+        }
 
+        _transferGate.AttachAsyncId(reqId);
         return new JsonObject { ["ok"] = true, ["async_id"] = reqId, ["target_line"] = targetLineId };
     }
 
@@ -98,6 +131,9 @@ public sealed class CrossMapNavigator
         if (!_movement.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
+        if (!_transferGate.TryBegin("teleport", SceneTransferGate.MapTeleportLockSec, out string blockReason))
+            return TransferBusyJson(blockReason);
+
         float tx = useClosestWarp ? targetPos.X : 0f;
         float tz = useClosestWarp ? targetPos.Z : 0f;
 
@@ -105,8 +141,12 @@ public sealed class CrossMapNavigator
             targetSceneId, tx, tz, targetCharId, localSceneId, leaveSpecialFirst);
 
         if (reqId == null)
+        {
+            _transferGate.CancelStart();
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start teleport coroutine" };
+        }
 
+        _transferGate.AttachAsyncId(reqId);
         return new JsonObject
         {
             ["ok"] = true,
@@ -165,10 +205,17 @@ public sealed class CrossMapNavigator
         if (!_movement.IsLuaReady || sceneId <= 0 || transferId <= 0)
             return new JsonObject { ["ok"] = false, ["error"] = "Invalid intra-map teleport parameters" };
 
+        if (!_transferGate.TryBegin("intra_warp", SceneTransferGate.IntraWarpLockSec, out string blockReason))
+            return TransferBusyJson(blockReason);
+
         string? reqId = _movement.StartIntraMapTeleportCoroutine(sceneId, transferId);
         if (reqId == null)
+        {
+            _transferGate.CancelStart();
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start intra-map teleport coroutine" };
+        }
 
+        _transferGate.AttachAsyncId(reqId);
         return new JsonObject
         {
             ["ok"] = true,
@@ -191,10 +238,17 @@ public sealed class CrossMapNavigator
         if (string.IsNullOrWhiteSpace(destinationQuery))
             return new JsonObject { ["ok"] = false, ["error"] = "Destination query is empty" };
 
+        if (!_transferGate.TryBegin("teleport", SceneTransferGate.MapTeleportLockSec, out string blockReason))
+            return TransferBusyJson(blockReason);
+
         string? reqId = _movement.StartTeleportByQueryCoroutine(destinationQuery.Trim(), localSceneId, leaveSpecialFirst);
         if (reqId == null)
+        {
+            _transferGate.CancelStart();
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start destination teleport coroutine" };
+        }
 
+        _transferGate.AttachAsyncId(reqId);
         return new JsonObject
         {
             ["ok"] = true,
@@ -211,10 +265,17 @@ public sealed class CrossMapNavigator
         if (!_movement.IsLuaReady)
             return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
 
+        if (!_transferGate.TryBegin("leave_hub", SceneTransferGate.MapTeleportLockSec, out string blockReason))
+            return TransferBusyJson(blockReason);
+
         string? reqId = _movement.StartLeaveSpecialSceneCoroutine(localSceneId);
         if (reqId == null)
+        {
+            _transferGate.CancelStart();
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start leave-hub coroutine" };
+        }
 
+        _transferGate.AttachAsyncId(reqId);
         return new JsonObject { ["ok"] = true, ["async_id"] = reqId };
     }
 
@@ -258,7 +319,24 @@ public sealed class CrossMapNavigator
         return true;
     }
 
-    public JsonObject PollOperation(string asyncId) => _movement.PollOperation(asyncId);
+    public JsonObject PollOperation(string asyncId)
+    {
+        var poll = _movement.PollOperation(asyncId);
+        if (poll["result"] is JsonObject resObj)
+        {
+            string? st = resObj["state"]?.GetValue<string>();
+            if (st is "done" or "error" or "missing")
+            {
+                var inner = resObj["result"] as JsonObject;
+                bool ok = st == "done" && (inner == null || inner["ok"]?.GetValue<bool>() != false);
+                bool alreadyMatched = inner != null && (inner["already_on_channel"]?.GetValue<bool>() == true
+                    || inner["already_in_scene"]?.GetValue<bool>() == true);
+                bool canceledBySceneUnload = inner != null && inner["canceled_by_scene_unload"]?.GetValue<bool>() == true;
+                _transferGate.NotifyAsyncCompleted(asyncId, ok, alreadyMatched, canceledBySceneUnload);
+            }
+        }
+        return poll;
+    }
 
     public bool GetAutoCombatState() => _combat.GetAutoCombatState();
 

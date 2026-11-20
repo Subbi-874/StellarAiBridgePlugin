@@ -1369,7 +1369,7 @@ public sealed class BridgeRpcDispatcher
                         ["serverInfo"] = new JsonObject
                         {
                             ["name"] = "stellar-agy-bridge",
-                            ["version"] = "1.0.5",
+                            ["version"] = "1.0.6",
                         },
                         ["instructions"] = McpInstructions,
                     });

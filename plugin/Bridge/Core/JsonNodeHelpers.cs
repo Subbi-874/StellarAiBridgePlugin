@@ -272,6 +272,83 @@ public static class JsonNodeHelpers
         return "";
     }
 
+    /// <summary>
+    /// Returns the first integer value parsed across the given <paramref name="keys"/>,
+    /// or <paramref name="fallback"/> if none is found.
+    /// </summary>
+    public static int GetFirstInt(JsonObject? obj, int fallback, params string[] keys)
+    {
+        if (obj == null || keys == null)
+            return fallback;
+        foreach (string key in keys)
+        {
+            if (string.IsNullOrEmpty(key))
+                continue;
+            if (obj.TryGetPropertyValue(key, out JsonNode? node) && node != null && TryGetInt(node, out int val))
+                return val;
+        }
+        return fallback;
+    }
+
+    /// <summary>
+    /// Returns the first non-empty string across <paramref name="keys"/>, or if none matches and
+    /// the object contains exactly one payload property (excluding <c>type</c> and <c>as_admin</c>)
+    /// whose JSON value is strictly a string, returns that trimmed string.
+    /// </summary>
+    public static string GetFirstStringOrSoleValue(JsonObject? obj, params string[] keys)
+    {
+        string explicitVal = GetFirstString(obj, keys);
+        if (!string.IsNullOrEmpty(explicitVal))
+            return explicitVal;
+        if (TryGetSolePayloadProperty(obj, out _, out JsonNode? soleNode)
+            && soleNode is JsonValue jv
+            && jv.TryGetValue(out string? s))
+        {
+            return (s ?? "").Trim();
+        }
+        return "";
+    }
+
+    /// <summary>
+    /// Returns the first boolean value across <paramref name="keys"/>, or if none matches and
+    /// the object contains exactly one payload property (excluding <c>type</c> and <c>as_admin</c>),
+    /// attempts to parse that property via <see cref="GetNullableBool"/>.
+    /// </summary>
+    public static bool? GetFirstNullableBoolOrSoleBool(JsonObject? obj, params string[] keys)
+    {
+        bool? explicitVal = GetFirstNullableBool(obj, keys);
+        if (explicitVal.HasValue)
+            return explicitVal.Value;
+        if (TryGetSolePayloadProperty(obj, out string soleKey, out _))
+            return GetNullableBool(obj, soleKey);
+        return null;
+    }
+
+    private static bool TryGetSolePayloadProperty(JsonObject? obj, out string soleKey, out JsonNode? soleNode)
+    {
+        soleKey = "";
+        soleNode = null;
+        if (obj == null)
+            return false;
+
+        int count = 0;
+        foreach (System.Collections.Generic.KeyValuePair<string, JsonNode?> kv in obj)
+        {
+            if (string.Equals(kv.Key, "type", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(kv.Key, "as_admin", StringComparison.OrdinalIgnoreCase)
+                || kv.Value == null)
+            {
+                continue;
+            }
+            soleKey = kv.Key;
+            soleNode = kv.Value;
+            count++;
+            if (count > 1)
+                return false;
+        }
+        return count == 1;
+    }
+
     public static JsonObject? GetObject(JsonObject? obj, string key)
     {
         if (obj == null || !obj.TryGetPropertyValue(key, out JsonNode? node))

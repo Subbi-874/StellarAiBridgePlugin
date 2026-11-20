@@ -22,6 +22,7 @@ public sealed class FollowPartyBehavior : IBehavior
 {
     private const double IntraWarpSamePortalBlockSec = 20.0;
     private const float PostJumpMinWarpCooldownSec = 3.5f;
+    private const float TargetChannelStableDebounceSec = 1.0f;
 
     private readonly IPluginServices _services;
     private readonly BridgeConfig _config;
@@ -71,6 +72,8 @@ public sealed class FollowPartyBehavior : IBehavior
     private int _lastObservedLocalSceneId;
     private int _lastAttemptMyLineId;
     private int _lastAttemptTargetLineId;
+    private int _observedTargetLineId;
+    private float _targetLineStableTimer;
     private bool _wasTargetInAoi;
     private float _preTeleportCoordWaitTimer;
     private float _postChannelSwitchSyncTimer;
@@ -139,6 +142,8 @@ public sealed class FollowPartyBehavior : IBehavior
         _sameIntraWarpBlockTimer = 0f;
         _dungeonExitConfirmTimer = 0f;
         _unenterableVerifyTimer = 0f;
+        _observedTargetLineId = 0;
+        _targetLineStableTimer = 0f;
         _recentIntraWarps.Clear();
         _targetTrail.Clear();
         _lastAttemptTargetSceneId = 0;
@@ -224,7 +229,11 @@ public sealed class FollowPartyBehavior : IBehavior
         }
 
         if (_sameIntraWarpBlockTimer > 0f)
-            _sameIntraWarpBlockTimer -= dt;
+            _sameIntraWarpBlockTimer = MathF.Max(0f, _sameIntraWarpBlockTimer - dt);
+        if (_intraMapTpCooldown > 0f)
+            _intraMapTpCooldown = MathF.Max(0f, _intraMapTpCooldown - dt);
+        if (_transferWaitTimer > 0f)
+            _transferWaitTimer = MathF.Max(0f, _transferWaitTimer - dt);
 
         // Resolve target across party, guild, friend, AOI, or chat
         var target = _world.FindAnyPlayerTarget(
@@ -284,10 +293,13 @@ public sealed class FollowPartyBehavior : IBehavior
             _lastObservedLocalSceneId = mySceneId;
             if (wasPreviousScene)
             {
-                _transferWaitTimer = 0f;
+                if (!_navigator.IsTransferBusy(out _, out _))
+                    _transferWaitTimer = 0f;
                 _channelAttempts = 0;
                 _lastAttemptMyLineId = 0;
                 _lastAttemptTargetLineId = 0;
+                _observedTargetLineId = 0;
+                _targetLineStableTimer = 0f;
                 _outOfAoiCloseTimer = 0f;
                 _preTeleportCoordWaitTimer = 0f;
                 _combatClearWaitTimer = 0f;
@@ -312,9 +324,12 @@ public sealed class FollowPartyBehavior : IBehavior
             _channelAttempts = 0;
             _lastAttemptMyLineId = 0;
             _lastAttemptTargetLineId = 0;
+            _observedTargetLineId = 0;
+            _targetLineStableTimer = 0f;
             _lastAttemptTargetSceneId = 0;
             _teleportAttempts = 0;
-            _transferWaitTimer = 0f;
+            if (_pendingAsyncId == null && !_navigator.IsTransferBusy(out _, out _))
+                _transferWaitTimer = 0f;
             _hasLastTargetPos = false;
             _targetTrail.Clear();
             _boost.PathNavigator.Reset();
@@ -389,6 +404,9 @@ public sealed class FollowPartyBehavior : IBehavior
             CancelTracking("cancelled_admin_lock", followGateErr);
             return;
         }
+
+        bool gateBusy = _navigator.IsTransferBusy(out string gateBusyReason, out float gateBusyRem);
+        bool transferBusy = _pendingAsyncId != null || _transferWaitTimer > 0f || _postChannelSwitchSyncTimer > 0f || gateBusy;
 
         // Stage 1: Different Scene (Map / Hub) -> Validate enterability first, then teleport
         bool allowTpAndChannel = _config.IsFeatureEnabled(FeaturePolicyKeys.TeleportChannel);
@@ -479,20 +497,23 @@ public sealed class FollowPartyBehavior : IBehavior
             {
                 // Intermediate hub exit succeeded (e.g. Guild Hall -> Asterleeds); allow final hop
                 _teleportAttempts = 0;
-                _transferWaitTimer = 0f;
+                if (!gateBusy)
+                    _transferWaitTimer = 0f;
             }
             if (_lastAttemptTargetSceneId > 0 && target.SceneId != _lastAttemptTargetSceneId)
             {
                 // Target hopped to yet another scene while we were moving/waiting; redirect cleanly
                 _teleportAttempts = 0;
-                _transferWaitTimer = 0f;
+                if (!gateBusy)
+                    _transferWaitTimer = 0f;
                 _pendingAsyncId = null;
             }
 
-            if (_transferWaitTimer > 0f)
+            if (_transferWaitTimer > 0f || _pendingAsyncId != null || gateBusy)
             {
-                _transferWaitTimer -= dt;
                 _phase = "waiting_map_teleport";
+                if (gateBusy)
+                    _detail = $"Waiting for active transfer ({gateBusyReason}, {gateBusyRem:F1}s)...";
                 return;
             }
 
@@ -530,6 +551,13 @@ public sealed class FollowPartyBehavior : IBehavior
                     useClosestWarp: _config.EnableClosestTeleport);
                 if (tpRes["ok"]?.GetValue<bool>() != true)
                 {
+                    if (tpRes["reason_code"]?.GetValue<string>() == "transfer_in_progress")
+                    {
+                        _teleportAttempts = Math.Max(0, _teleportAttempts - 1);
+                        _phase = "waiting_map_teleport";
+                        _detail = tpRes["error"]?.GetValue<string>() ?? "Waiting for active transfer";
+                        return;
+                    }
                     CancelTracking("cancelled_teleport_unavailable", tpRes["error"]?.GetValue<string>() ?? "Teleport start failed");
                     return;
                 }
@@ -549,7 +577,8 @@ public sealed class FollowPartyBehavior : IBehavior
         // Reset map teleport state once in the same scene
         if (_teleportAttempts > 0)
         {
-            _transferWaitTimer = 0f;
+            if (!gateBusy)
+                _transferWaitTimer = 0f;
             _pendingAsyncId = null;
         }
         _teleportAttempts = 0;
@@ -558,9 +587,6 @@ public sealed class FollowPartyBehavior : IBehavior
         _partyInstanceSyncTimer = 0f;
         _preTeleportCoordWaitTimer = 0f;
         _dungeonExitConfirmTimer = 0f;
-
-        if (_intraMapTpCooldown > 0f)
-            _intraMapTpCooldown -= dt;
 
         // Detect sudden >= 55m intra-map warp jumps so portal cooldown & NavMesh corridor reset immediately
         bool hasSameScenePos = (target.SceneId <= 0 || target.SceneId == mySceneId)
@@ -595,14 +621,17 @@ public sealed class FollowPartyBehavior : IBehavior
         // Instanced dungeons/raids have no channels; only run intra-map warp & channel-switch logic on open-world/hub scenes
         bool currentIsInstancedDungeon = !_navigator.CheckSceneEnterability(mySceneId, isPartyMember: true, out _);
         int myLineId = (!target.InAoi && !currentIsInstancedDungeon) ? _world.GetLocalLineId(forceRefresh: true) : 0;
-        bool knownLineMismatch = !target.InAoi && !currentIsInstancedDungeon && target.LineId > 0 && myLineId > 0 && target.LineId != myLineId;
+        bool sameChannelConfirmed = SceneTransferGate.IsSameChannelConfirmedForIntraWarp(
+            target.InAoi, currentIsInstancedDungeon, myLineId, target.LineId);
+        bool differentChannelConfirmed = SceneTransferGate.IsDifferentChannelConfirmedForSwitch(
+            target.InAoi, currentIsInstancedDungeon, myLineId, target.LineId);
 
-        // Stage 1.5: Same Scene & Same Channel (never warp around on the wrong channel first), Far Away -> Closest Unlocked Warp Point
+        // Stage 1.5: Same Scene & Confirmed Same Channel (never warp during active transfer or before lineId is confirmed), Far Away -> Closest Unlocked Warp Point
         if (_autoTeleport
             && allowTpAndChannel
             && _config.EnableClosestTeleport
-            && !currentIsInstancedDungeon
-            && !knownLineMismatch
+            && !transferBusy
+            && sameChannelConfirmed
             && (!target.InAoi || sameSceneHorizDist >= 140f)
             && _intraMapTpCooldown <= 0f
             && (target.Position.X != 0f || target.Position.Z != 0f))
@@ -657,7 +686,7 @@ public sealed class FollowPartyBehavior : IBehavior
                         _recentIntraWarps.Add((mySceneId, bestTpId, nowSec));
                         _settleTimer = 2.0f;
                         _channelAttempts = 0;
-                        _transferWaitTimer = 0f;
+                        _transferWaitTimer = SceneTransferGate.IntraWarpLockSec;
                         _phase = "intra_map_closest_warp";
                         _detail = $"Warping to closest portal '{bestTpName}' (#{bestTpId}, saves {gainMeters:F0}m)";
                         _services.Log.Info($"[AgyBridge][Follow] Intra-map closest warp in scene {mySceneId}: {_detail}");
@@ -667,7 +696,7 @@ public sealed class FollowPartyBehavior : IBehavior
             }
         }
 
-        // Stage 2: Same Scene, NOT in AOI -> Switch to Target's Channel FIRST (Follow-First Priority over Combat)
+        // Stage 2: Same Scene, NOT in AOI -> Switch to Target's Channel FIRST (only when channel is confirmed & no transfer active)
         if (!target.InAoi && !currentIsInstancedDungeon)
         {
             // If our own channel actually changed since our last channel-switch request, that switch SUCCEEDED!
@@ -676,7 +705,9 @@ public sealed class FollowPartyBehavior : IBehavior
             {
                 _channelAttempts = 0;
                 _lastAttemptMyLineId = 0;
-                _transferWaitTimer = 0f;
+                if (!gateBusy)
+                    _transferWaitTimer = 0f;
+                _intraMapTpCooldown = MathF.Max(_intraMapTpCooldown, 4.0f);
                 _outOfAoiCloseTimer = 0f;
                 _world.ResetSocialRefreshThrottle(target.CharId);
                 _postChannelSwitchSyncTimer = 2.2f;
@@ -695,6 +726,34 @@ public sealed class FollowPartyBehavior : IBehavior
                 _moveDriver.Stop(this);
                 _phase = "syncing_target_channel";
                 _detail = $"Refreshing {target.Name}'s live channel ({_postChannelSwitchSyncTimer:F1}s)...";
+                return;
+            }
+
+            if (differentChannelConfirmed)
+            {
+                if (_observedTargetLineId != target.LineId)
+                {
+                    _observedTargetLineId = target.LineId;
+                    _targetLineStableTimer = 0f;
+                }
+                else
+                {
+                    _targetLineStableTimer += dt;
+                }
+            }
+            else
+            {
+                _observedTargetLineId = target.LineId;
+                _targetLineStableTimer = 0f;
+            }
+
+            if (!differentChannelConfirmed && !sameChannelConfirmed)
+            {
+                _world.TryRefreshSocialThrottled(target.CharId, fast: true);
+                _boost.Reset();
+                _moveDriver.Stop(this);
+                _phase = "confirming_target_channel";
+                _detail = $"Confirming {target.Name}'s live channel (local={myLineId}, target={target.LineId})...";
                 return;
             }
 
@@ -721,7 +780,13 @@ public sealed class FollowPartyBehavior : IBehavior
                 _outOfAoiCloseTimer = 0f;
             }
 
-            if (knownLineMismatch || closeButInvisible)
+            if (sameChannelConfirmed && closeButInvisible)
+            {
+                _outOfAoiCloseTimer = 0f;
+                _world.TriggerImmediateSocialRefresh(target.CharId);
+            }
+
+            if (differentChannelConfirmed)
             {
                 if (!_autoSwitchChannel || !allowTpAndChannel)
                 {
@@ -776,15 +841,32 @@ public sealed class FollowPartyBehavior : IBehavior
                 _holdingInRange = false;
                 _combatClearWaitTimer = 0f;
 
-                if (_transferWaitTimer > 0f)
+                if (transferBusy)
                 {
-                    _transferWaitTimer -= dt;
                     _phase = "waiting_channel_switch";
+                    if (gateBusy)
+                        _detail = $"Waiting for active transfer before channel switch ({gateBusyReason}, {gateBusyRem:F1}s)...";
+                    return;
+                }
+
+                if (_targetLineStableTimer < TargetChannelStableDebounceSec)
+                {
+                    _world.TryRefreshSocialThrottled(target.CharId, fast: true);
+                    _phase = "confirming_target_channel";
+                    _detail = $"Confirming {target.Name}'s channel #{target.LineId} ({_targetLineStableTimer:F1}s/{TargetChannelStableDebounceSec:F1}s)...";
                     return;
                 }
 
                 if (_channelAttempts < 2)
                 {
+                    var chRes = _navigator.RequestSwitchChannelForMember(target.CharId, target.LineId);
+                    if (chRes["ok"]?.GetValue<bool>() != true && chRes["reason_code"]?.GetValue<string>() == "transfer_in_progress")
+                    {
+                        _phase = "waiting_channel_switch";
+                        _detail = chRes["error"]?.GetValue<string>() ?? "Waiting for active transfer";
+                        return;
+                    }
+
                     _channelAttempts++;
                     _lastAttemptMyLineId = myLineId;
                     _lastAttemptTargetLineId = target.LineId;
@@ -792,10 +874,12 @@ public sealed class FollowPartyBehavior : IBehavior
                     _world.ResetSocialRefreshThrottle(target.CharId);
                     _phase = "requesting_channel_switch";
                     _targetTrail.Clear();
-                    var chRes = _navigator.RequestSwitchChannelForMember(target.CharId, target.LineId);
                     _pendingAsyncId = chRes["async_id"]?.GetValue<string>();
                     _detail = chRes.ToJsonString();
                     _transferWaitTimer = _config.ChannelSwitchTimeoutSeconds;
+                    _settleTimer = 2.0f;
+                    _intraMapTpCooldown = MathF.Max(_intraMapTpCooldown, _config.ChannelSwitchTimeoutSeconds + 3.0f);
+                    _targetLineStableTimer = 0f;
                     _services.Log.Info($"[AgyBridge][Follow] Requesting channel switch #{_channelAttempts}/2 to {target.Name} (CharId={target.CharId}, TargetLine={target.LineId}, LocalLine={myLineId})");
                     return;
                 }
@@ -812,7 +896,10 @@ public sealed class FollowPartyBehavior : IBehavior
             _channelAttempts = 0;
             _lastAttemptMyLineId = 0;
             _lastAttemptTargetLineId = 0;
-            _transferWaitTimer = 0f;
+            _observedTargetLineId = 0;
+            _targetLineStableTimer = 0f;
+            if (_pendingAsyncId == null && !gateBusy)
+                _transferWaitTimer = 0f;
             _outOfAoiCloseTimer = 0f;
             _combatClearWaitTimer = 0f;
         }

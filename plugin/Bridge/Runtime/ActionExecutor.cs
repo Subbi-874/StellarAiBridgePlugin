@@ -265,11 +265,7 @@ public sealed class ActionExecutor
             method = "switch_channel";
             wait = true;
             defaultErr = "채널 이동에 실패했어요";
-            int lineVal = JsonNodeHelpers.GetInt(act, "line_id", 0);
-            if (lineVal <= 0)
-                lineVal = JsonNodeHelpers.GetInt(act, "number", 0);
-            if (lineVal <= 0)
-                lineVal = JsonNodeHelpers.GetInt(act, "channel", 0);
+            int lineVal = JsonNodeHelpers.GetFirstInt(act, 0, "line_id", "number", "channel");
             if (lineVal > 0)
                 parameters["line_id"] = lineVal;
             string tgt = JsonNodeHelpers.GetFirstString(act, "target", "name");
@@ -308,10 +304,7 @@ public sealed class ActionExecutor
         {
             method = "use_gimmick";
             defaultErr = "주변에서 사용할 수 있는 이동 기믹을 찾지 못했어요";
-            string gimmick = FirstNonEmpty(
-                JsonNodeHelpers.GetString(act, "gimmick", ""),
-                JsonNodeHelpers.GetString(act, "destination", ""),
-                JsonNodeHelpers.GetString(act, "name", "")).Trim();
+            string gimmick = JsonNodeHelpers.GetFirstStringOrSoleValue(act, "gimmick", "gimmick_name", "destination", "name", "query");
             parameters["gimmick"] = gimmick;
             onClearKinds?.Invoke(new[] { "follow", "fish" });
         }
@@ -351,7 +344,7 @@ public sealed class ActionExecutor
         {
             method = "seek_monster";
             defaultErr = "몬스터를 찾아가지 못했어요";
-            string mon = JsonNodeHelpers.GetFirstString(act, "monster", "query", "name", "target");
+            string mon = JsonNodeHelpers.GetFirstStringOrSoleValue(act, "monster", "monster_name", "query", "name", "target");
             parameters["monster"] = mon;
             parameters["engage"] = JsonNodeHelpers.GetBool(act, "engage", false);
             if (string.IsNullOrEmpty(mon))
@@ -641,7 +634,7 @@ public sealed class ActionExecutor
 
             if (atype == "set_auto_combat")
             {
-                bool? requestedEnable = JsonNodeHelpers.GetFirstNullableBool(act, "enable", "enabled");
+                bool? requestedEnable = JsonNodeHelpers.GetFirstNullableBoolOrSoleBool(act, "enable", "enabled", "state", "active");
                 var rpcParams = new JsonObject { ["as_admin"] = isAdmin };
                 if (requestedEnable.HasValue)
                     rpcParams["enable"] = requestedEnable.Value;
@@ -739,7 +732,7 @@ public sealed class ActionExecutor
             }
             else if (atype == "teleport_to_place")
             {
-                string dest = JsonNodeHelpers.GetFirstString(act, "destination", "place", "target", "name", "query");
+                string dest = JsonNodeHelpers.GetFirstStringOrSoleValue(act, "destination", "place", "place_name", "warp", "target", "name", "query");
                 if (string.IsNullOrEmpty(dest))
                 {
                     batch.ActionErrors.Add("이동할 장소 이름이 없어요.");
@@ -806,7 +799,7 @@ public sealed class ActionExecutor
             }
             else if (atype == "gather_resource")
             {
-                string resource = JsonNodeHelpers.GetFirstString(act, "resource", "item", "name", "query", "target");
+                string resource = JsonNodeHelpers.GetFirstStringOrSoleValue(act, "resource", "resource_name", "item", "item_name", "name", "query", "target");
                 if (string.IsNullOrEmpty(resource))
                 {
                     batch.ActionErrors.Add("채집할 자원 이름이 없어요.");
@@ -905,27 +898,37 @@ public sealed class ActionExecutor
             }
             else if (atype == "play_emote")
             {
-                string emName = JsonNodeHelpers.GetFirstString(act, "emote", "name", "query");
-                if (string.IsNullOrEmpty(emName))
+                int emoteId = JsonNodeHelpers.GetFirstInt(act, 0, "emote_id", "id");
+                string emName = emoteId > 0
+                    ? JsonNodeHelpers.GetFirstString(act, "emote", "emote_name", "name", "query", "action")
+                    : JsonNodeHelpers.GetFirstStringOrSoleValue(act, "emote", "emote_name", "name", "query", "action");
+                if (string.IsNullOrEmpty(emName) && emoteId <= 0)
                 {
                     batch.ActionErrors.Add("실행할 감정표현 이름이 없어요.");
                     continue;
                 }
+                var rpcParams = new JsonObject { ["as_admin"] = isAdmin };
+                if (!string.IsNullOrEmpty(emName))
+                    rpcParams["emote"] = emName;
+                if (emoteId > 0)
+                    rpcParams["emote_id"] = emoteId;
+                string emoteLabel = !string.IsNullOrEmpty(emName) ? emName : $"#{emoteId}";
+
                 JsonObject r = await _dispatch(
                     "play_emote",
-                    new JsonObject { ["emote"] = emName, ["as_admin"] = isAdmin },
+                    rpcParams,
                     connId,
                     ct).ConfigureAwait(false);
                 batch.Executed.Add(new JsonObject
                 {
                     ["action"] = atype,
-                    ["emote"] = emName,
+                    ["emote"] = emoteLabel,
                     ["res"] = JsonNodeHelpers.CloneObject(r),
                 });
                 if (!JsonNodeHelpers.GetBool(r, "ok", false))
                 {
                     string err = JsonNodeHelpers.GetString(r, "error", "");
-                    batch.ActionErrors.Add(!string.IsNullOrEmpty(err) ? err : $"감정표현 '{emName}' 실행 불가");
+                    batch.ActionErrors.Add(!string.IsNullOrEmpty(err) ? err : $"감정표현 '{emoteLabel}' 실행 불가");
                 }
                 else
                 {
