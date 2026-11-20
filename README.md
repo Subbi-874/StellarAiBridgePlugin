@@ -1,6 +1,8 @@
 # Stellar.AgyBridge
 
-Blue Protocol: Star Resonance용 **단일 DLL(`Stellar.AgyBridge.dll`)** 기반 AI 브리지 · MCP 서버 · 인게임 자동화 플러그인입니다.
+Blue Protocol: Star Resonance용 **[스텔라 레조넌스(StellarResonance)](https://github.com/StellarProtocol/StellarResonanceModSystem)** 프레임워크 플러그인입니다. **단일 DLL(`Stellar.AgyBridge.dll`)** 기반 AI 브리지 · MCP 서버 · 인게임 자동화 기능을 제공합니다.
+
+> 이 플러그인은 [스텔라 레조넌스 (StellarResonanceModSystem)](https://github.com/StellarProtocol/StellarResonanceModSystem) 위에서 동작합니다. ([런처](https://github.com/StellarProtocol/StellarResonance) · [공식 문서](https://docs.stellarresonance.app))
 
 별도의 Python 런타임이나 외부 스크립트 프로세스 없이, 게임 플러그인 DLL 하나만으로 **내장 MCP Streamable HTTP 서버**, **WebSocket 멀티클라이언트 허브**, **REST API**, 그리고 **SQLite(WAL + FTS5) 장기 기억 저장소**까지 모두 인프로세스로 구동됩니다.
 
@@ -106,3 +108,9 @@ Antigravity / Claude Code / Cursor 등의 MCP 설정(`mcp_config.json`, `.mcp.js
 # 플러그인 Release 빌드 (단일 DLL 생성)
 dotnet build plugin/Stellar.AgyBridge.csproj -c Release --nologo -v minimal
 ```
+
+---
+
+## 6. 라이선스
+
+이 프로젝트는 [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE) 라이선스를 따릅니다.
