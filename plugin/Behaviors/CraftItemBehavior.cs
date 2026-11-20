@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters.Items;
+using Stellar.AgyBridge.Bridge.Core;
 using Stellar.AgyBridge.Core;
 using Stellar.AgyBridge.Locomotion;
 using Stellar.AgyBridge.Lua;
@@ -10,6 +11,65 @@ using Stellar.AgyBridge.World;
 using UnityEngine;
 
 namespace Stellar.AgyBridge.Behaviors;
+
+/// <summary>
+/// Tracks multi-craft loop execution independently of Unity runtime so both
+/// <see cref="CraftItemBehavior"/> and unit tests share identical state transitions.
+/// </summary>
+public sealed class CraftLoopTracker
+{
+    public CraftLoopTracker(string recipeKind, int targetCount, double manufactureCostSec)
+    {
+        RecipeKind = (recipeKind ?? "").Trim();
+        TargetCount = Math.Max(1, targetCount);
+        UsesPerCraftLoop = !string.Equals(RecipeKind, "house_furniture", StringComparison.OrdinalIgnoreCase);
+        InterCraftDelaySec = ResolveInterCraftDelaySec(RecipeKind, manufactureCostSec);
+    }
+
+    public string RecipeKind { get; }
+    public int TargetCount { get; }
+    public int CompletedCount { get; private set; }
+    public int RemainingCount => Math.Max(0, TargetCount - CompletedCount);
+    public bool UsesPerCraftLoop { get; }
+    public float InterCraftDelaySec { get; }
+    public long ReportedItemGain { get; private set; }
+    public bool IsCompleted => CompletedCount >= TargetCount;
+    public int NextDispatchCount => UsesPerCraftLoop ? 1 : TargetCount;
+
+    public static float ResolveInterCraftDelaySec(string recipeKind, double manufactureCostSec)
+    {
+        string kind = (recipeKind ?? "").Trim();
+        if (string.Equals(kind, "house_furniture", StringComparison.OrdinalIgnoreCase))
+            return 0f;
+        if (manufactureCostSec > 0.0)
+            return (float)Math.Clamp(manufactureCostSec, 0.5, 5.0);
+        if (string.Equals(kind, "equip_create", StringComparison.OrdinalIgnoreCase))
+            return 0.5f;
+        return 2.0f;
+    }
+
+    public bool RecordSuccess(long reportedItems)
+    {
+        if (reportedItems > 0)
+            ReportedItemGain += reportedItems;
+        CompletedCount = UsesPerCraftLoop ? Math.Min(TargetCount, CompletedCount + 1) : TargetCount;
+        return IsCompleted;
+    }
+
+    public long ResolveTotalGained(long baselineCount, long afterCount)
+    {
+        long bagDelta = Math.Max(0L, afterCount - baselineCount);
+        return Math.Max(bagDelta, ReportedItemGain);
+    }
+
+    public string FormatPartialFailureReason(string baseReason)
+    {
+        string msg = string.IsNullOrWhiteSpace(baseReason) ? "제작 중 오류가 발생했어요." : baseReason.Trim();
+        if (CompletedCount > 0 && CompletedCount < TargetCount)
+            return $"{msg} ({CompletedCount}/{TargetCount}회 완료 후 중단)";
+        return msg;
+    }
+}
 
 /// <summary>
 /// Navigates to the recipe's required crafting station (hearth, alchemy table, forge, workbench, or My Home),
@@ -35,6 +95,8 @@ public sealed class CraftItemBehavior : IBehavior
     private readonly string _recipeQuery;
     private readonly int _craftCount;
 
+    private CraftLoopTracker _loop = new("life_build", 1, 0);
+    private float _interCraftTimer;
     private int _recipeId;
     private string _recipeName = "";
     private string _recipeKind = "";
@@ -113,6 +175,9 @@ public sealed class CraftItemBehavior : IBehavior
         _outputItemId = rec["output_item_id"]?.GetValue<int>() ?? 0;
         _requiresHomeland = rec["requires_homeland"]?.GetValue<bool>() == true;
         _buildQueued = _recipeKind == "house_furniture";
+        double manufactureCostSec = JsonNodeHelpers.GetDouble(rec, "manufacture_cost_sec", 0.0);
+        _loop = new CraftLoopTracker(_recipeKind, _craftCount, manufactureCostSec);
+        _interCraftTimer = 0f;
 
         if (rec["unlocked"]?.GetValue<bool>() == false)
         {
@@ -176,8 +241,8 @@ public sealed class CraftItemBehavior : IBehavior
             _moveDriver.Install(this);
         }
         _phase = "preparing";
-        _detail = $"'{_recipeName}' x{_craftCount} 제작 준비 중";
-        _services.Log.Info($"[AgyBridge][Craft] Started: id={_recipeId} kind={_recipeKind} name='{_recipeName}' x{_craftCount}");
+        _detail = $"'{_recipeName}' {_craftCount}회 제작 준비 중";
+        _services.Log.Info($"[AgyBridge][Craft] Started: id={_recipeId} kind={_recipeKind} name='{_recipeName}' x{_craftCount} (loop={_loop.UsesPerCraftLoop}, delay={_loop.InterCraftDelaySec:F1}s)");
     }
 
     public void Tick(float dt)
@@ -299,16 +364,27 @@ public sealed class CraftItemBehavior : IBehavior
         _moveDriver.Uninstall(this);
         _autoCombat.SuppressForCatchup = false;
 
-        _coroAsyncId = _items.StartCraftCoroutine(_recipeId, _recipeKind, _craftCount);
+        if (_interCraftTimer > 0f)
+        {
+            _interCraftTimer -= dt;
+            _phase = "crafting_wait";
+            _detail = $"'{_recipeName}' 제작 진행 중 ({_loop.CompletedCount}/{_craftCount})...";
+            return;
+        }
+
+        int dispatchCount = _loop.NextDispatchCount;
+        _coroAsyncId = _items.StartCraftCoroutine(_recipeId, _recipeKind, dispatchCount);
         if (string.IsNullOrEmpty(_coroAsyncId))
         {
-            Fail("craft_coro_start_failed", $"'{_recipeName}' 제작 코루틴을 시작하지 못했어요.");
+            Fail("craft_coro_start_failed", _loop.FormatPartialFailureReason($"'{_recipeName}' 제작 코루틴을 시작하지 못했어요."));
             return;
         }
         _coroElapsed = 0f;
         _pollTimer = 0.25f;
         _phase = "crafting";
-        _detail = $"'{_recipeName}' x{_craftCount} 제작 실행 중...";
+        _detail = _loop.UsesPerCraftLoop
+            ? $"'{_recipeName}' 제작 실행 중 ({_loop.CompletedCount + 1}/{_craftCount})..."
+            : $"'{_recipeName}' x{_craftCount} 제작 실행 중...";
     }
 
     private bool TryStepSceneTeleport(float dt, int mySceneId, int targetSceneId, bool useHomelandQuery)
@@ -363,7 +439,8 @@ public sealed class CraftItemBehavior : IBehavior
         _coroElapsed += dt;
         if (_coroElapsed > CoroTimeoutSec)
         {
-            Fail("craft_timeout", $"'{_recipeName}' 제작 응답 시간이 초과되었어요.");
+            _coroAsyncId = null;
+            Fail("craft_timeout", _loop.FormatPartialFailureReason($"'{_recipeName}' 제작 응답 시간이 초과되었어요."));
             return;
         }
         _pollTimer -= dt;
@@ -378,9 +455,13 @@ public sealed class CraftItemBehavior : IBehavior
         string state = entry?["state"]?.GetValue<string>() ?? "running";
         if (state == "running") return;
 
+        _coroAsyncId = null;
+
         if (state == "error" || state == "missing")
         {
-            Fail("craft_rpc_error", entry?["error"]?.GetValue<string>() ?? $"제작 처리 중 오류({state})가 발생했어요.");
+            string entryErr = JsonNodeHelpers.GetString(entry, "error", "");
+            Fail("craft_rpc_error", _loop.FormatPartialFailureReason(
+                !string.IsNullOrEmpty(entryErr) ? entryErr : $"제작 처리 중 오류({state})가 발생했어요."));
             return;
         }
 
@@ -389,12 +470,23 @@ public sealed class CraftItemBehavior : IBehavior
         _errCode = inner?["err_code"]?.GetValue<int>() ?? 0;
         if (!rpcOk || _errCode != 0)
         {
-            string reason = inner?["error"]?.GetValue<string>() ?? $"제작 거절됨 (err_code={_errCode})";
-            Fail("craft_rejected", reason);
+            string rawErr = JsonNodeHelpers.GetString(inner, "error", "");
+            string reason = !string.IsNullOrEmpty(rawErr) ? rawErr : $"제작 거절됨 (err_code={_errCode})";
+            Fail("craft_rejected", _loop.FormatPartialFailureReason(reason));
             return;
         }
 
+        long itemTotal = inner != null ? JsonNodeHelpers.GetLong(inner, "item_total", 0L) : 0L;
         _afterCount = _outputItemId > 0 ? _items.ReadItemCount(_outputItemId) : _baselineCount;
+        bool done = _loop.RecordSuccess(itemTotal);
+        if (!done)
+        {
+            _interCraftTimer = _loop.InterCraftDelaySec;
+            _phase = "crafting_wait";
+            _detail = $"'{_recipeName}' 제작 진행 중 ({_loop.CompletedCount}/{_craftCount})...";
+            return;
+        }
+
         Complete();
     }
 
@@ -403,11 +495,13 @@ public sealed class CraftItemBehavior : IBehavior
         _boost.Reset();
         _moveDriver.Uninstall(this);
         _autoCombat.SuppressForCatchup = false;
-        long gained = Math.Max(0L, _afterCount - _baselineCount);
+        long gained = _loop.ResolveTotalGained(_baselineCount, _afterCount);
+        long displayAfter = Math.Max(_afterCount, _baselineCount + gained);
+        _afterCount = displayAfter;
         _phase = "completed";
         _detail = _buildQueued
             ? $"'{_recipeName}' x{_craftCount} 홈 가구 제작을 등록했어요."
-            : $"'{_recipeName}' x{_craftCount} 제작 완료 (변화 +{gained}, 보유 {_afterCount})";
+            : $"'{_recipeName}' {_loop.CompletedCount}회 제작 완료 (변화 +{gained}, 보유 {displayAfter})";
         IsFinished = true;
         _services.Log.Info($"[AgyBridge][Craft] Completed: {_detail}");
         _world.EmitBridgeEvent("craft_completed", GetSnapshot());
@@ -445,9 +539,12 @@ public sealed class CraftItemBehavior : IBehavior
         ["recipe_kind"] = _recipeKind,
         ["output_item_id"] = _outputItemId,
         ["craft_count"] = _craftCount,
+        ["target_count"] = _craftCount,
+        ["crafted_count"] = _loop.CompletedCount,
         ["before_count"] = _baselineCount,
         ["after_count"] = _afterCount,
-        ["gained_count"] = Math.Max(0L, _afterCount - _baselineCount),
+        ["gained_count"] = _loop.ResolveTotalGained(_baselineCount, _afterCount),
+        ["inter_craft_delay_sec"] = _loop.InterCraftDelaySec,
         ["build_queued"] = _buildQueued,
         ["err_code"] = _errCode
     };

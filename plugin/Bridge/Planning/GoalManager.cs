@@ -167,6 +167,13 @@ public static class GoalHelpers
                 ? Math.Max(0, parsed)
                 : 0;
         }
+        else if (atype == "craft_item")
+        {
+            targetCount = rawCount != null && JsonNodeHelpers.TryGetInt(rawCount, out int parsed) && parsed > 0
+                ? parsed
+                : 1;
+            parameters["count"] = targetCount;
+        }
 
         bool continuous;
         if (raw.TryGetPropertyValue("continuous", out JsonNode? contNode) && contNode != null)

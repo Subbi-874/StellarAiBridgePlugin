@@ -394,7 +394,7 @@ public sealed class GoalEventRouter
         {
             if (src == null)
                 continue;
-            foreach (string key in new[] { "gathered_count", "caught_count" })
+            foreach (string key in new[] { "gathered_count", "caught_count", "crafted_count", "farmed_count" })
             {
                 if (src.TryGetPropertyValue(key, out JsonNode? node) && JsonNodeHelpers.TryGetInt(node, out int val))
                     return Math.Max(0, val);

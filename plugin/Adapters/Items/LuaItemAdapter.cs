@@ -339,6 +339,14 @@ local function convertLifeRow(row, lpVm, itemTbl, parentSet, fishByTypeB, liveMo
     focusCost = row.Cost[2]
   end
 
+  local castCostSec = 0
+  if pid > 0 and lpVm and lpVm.GetLifeManufactureCost then
+    local okCost, sec = pcall(function() return lpVm.GetLifeManufactureCost(pid) end)
+    if okCost and type(sec) == 'number' and sec > 0 then
+      castCostSec = sec
+    end
+  end
+
   local rec = {
     recipe_id = row.Id,
     recipe_kind = kind,
@@ -349,6 +357,7 @@ local function convertLifeRow(row, lpVm, itemTbl, parentSet, fishByTypeB, liveMo
     furniture_id = row.FurnitureId or 0,
     yield_per_craft = resolveYieldPerCraft(row, lpVm),
     focus_cost = focusCost,
+    manufacture_cost_sec = castCostSec,
     need_level = row.NeedLevel or 1,
     requires_homeland = (kind == 'house_furniture'),
     station = (kind ~= 'house_furniture') and resolveStation(row) or nil,
@@ -409,6 +418,7 @@ local function convertEquipRow(row, eqVm, itemTbl, liveMode)
     furniture_id = 0,
     yield_per_craft = 1,
     focus_cost = 0,
+    manufacture_cost_sec = 0,
     function_id = row.FunctionId or 0,
     equip_name_group_id = baseGroup,
     base_equip_candidates = baseCands,
@@ -720,6 +730,7 @@ local itemsVm = Z.VMMgr.GetVM('items')
 local eqVm = Z.VMMgr.GetVM('equip_system')
 local efVm = Z.VMMgr.GetVM('equip_forge')
 local houseVm = Z.VMMgr.GetVM('house')
+local worldProxy = require('zproxy.world_proxy')
 local prodTbl = Z.TableMgr.GetTable('LifeProductionListTableMgr')
 local eqTbl = Z.TableMgr.GetTable('EquipCreateTableMgr')
 local cmTbl = Z.TableMgr.GetTable('CookMaterialTableMgr')
@@ -727,15 +738,51 @@ local cmTbl = Z.TableMgr.GetTable('CookMaterialTableMgr')
 local cs = Z.CancelSource.Rent()
 local token = cs:CreateToken()
 
+local function handleLifeRet(ret, refreshRecipeId)
+  if type(ret) ~= 'table' then
+    return { ok = false, err_code = -1, error = 'nil_rpc_reply', item_entries = 0, item_total = 0 }
+  end
+  local code = tonumber(ret.errCode) or 0
+  local entryCount = 0
+  local totalQty = 0
+  if type(ret.items) == 'table' then
+    for _, it in pairs(ret.items) do
+      entryCount = entryCount + 1
+      if type(it) == 'table' then
+        local q = tonumber(it.count) or tonumber(it.Count) or ((it.configId or it.ConfigId) and 1 or 0)
+        if q > 0 then totalQty = totalQty + q end
+      else
+        totalQty = totalQty + 1
+      end
+    end
+  end
+  if code == 0 then
+    pcall(function()
+      if Z.EventMgr and Z.ConstValue and Z.ConstValue.LifeProfession and Z.ConstValue.LifeProfession.LifeProfessionBuildRefresh then
+        Z.EventMgr:Dispatch(Z.ConstValue.LifeProfession.LifeProfessionBuildRefresh, refreshRecipeId)
+      end
+    end)
+    return { ok = true, err_code = 0, item_entries = entryCount, item_total = totalQty }
+  end
+  pcall(function()
+    if Z.TipsVM and Z.TipsVM.ShowTips then
+      Z.TipsVM.ShowTips(code)
+    end
+  end)
+  return { ok = false, err_code = code, error = 'err_code_' .. tostring(code), item_entries = entryCount, item_total = totalQty }
+end
+
 local okCall, errCodeOrBool, extraErr = pcall(function()
   if reqKind == 'life_build' then
-    if not lpVm then return false, 'life_profession_vm_missing' end
-    return lpVm.AsyncRequestLifeProfessionBuild(reqRecipeId, reqCount, token)
+    if not worldProxy or not worldProxy.LifeProfessionBuild then return false, 'world_proxy_missing' end
+    local ret = worldProxy.LifeProfessionBuild({ recipeId = reqRecipeId, count = reqCount }, token)
+    return handleLifeRet(ret, reqRecipeId)
   elseif reqKind == 'alchemy' then
-    if not lpVm then return false, 'life_profession_vm_missing' end
-    return lpVm.AsyncRequestLifeProfessionAlchemy(reqRecipeId, reqCount, token)
+    if not worldProxy or not worldProxy.LifeProfessionAlchemy then return false, 'world_proxy_missing' end
+    local ret = worldProxy.LifeProfessionAlchemy({ recipeId = reqRecipeId, count = reqCount }, token)
+    return handleLifeRet(ret, reqRecipeId)
   elseif reqKind == 'cooking' then
-    if not lpVm then return false, 'life_profession_vm_missing' end
+    if not worldProxy or not worldProxy.LifeProfessionCooking then return false, 'world_proxy_missing' end
     local row = prodTbl and prodTbl.GetRow(reqRecipeId, true)
     if not row then return false, 'recipe_row_not_found' end
     local mats = {}
@@ -774,7 +821,8 @@ local okCall, errCodeOrBool, extraErr = pcall(function()
         end
       end
     end
-    return lpVm.RequestLifeProfessionCooking(reqRecipeId, reqCount, mats, token)
+    local ret = worldProxy.LifeProfessionCooking({ recipeId = reqRecipeId, count = reqCount, materials = mats }, token)
+    return handleLifeRet(ret, reqRecipeId)
   elseif reqKind == 'house_furniture' then
     if not houseVm or not houseVm.AsyncCommunityBuildFurniture then return false, 'house_vm_missing' end
     local row = prodTbl and prodTbl.GetRow(reqRecipeId, true)
@@ -817,6 +865,9 @@ end)
 cs:Recycle()
 if not okCall then
   return { ok = false, err_code = -1, error = tostring(errCodeOrBool) }
+end
+if type(errCodeOrBool) == 'table' then
+  return errCodeOrBool
 end
 if type(errCodeOrBool) == 'boolean' then
   return { ok = errCodeOrBool, err_code = errCodeOrBool and 0 or -1, error = extraErr }
