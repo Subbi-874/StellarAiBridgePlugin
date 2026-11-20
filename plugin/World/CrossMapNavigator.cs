@@ -38,6 +38,19 @@ public sealed class CrossMapNavigator
     public bool IsTransferBusy(out string reason, out float remainingSec)
         => _transferGate.IsBlocked(out reason, out remainingSec);
 
+    public JsonObject GetTransferGateStatusJson()
+    {
+        bool busy = _transferGate.IsBlocked(out string reason, out float remainingSec);
+        return new JsonObject
+        {
+            ["busy"] = busy,
+            ["reason"] = reason,
+            ["remaining_sec"] = Math.Round(remainingSec, 2),
+            ["active_kind"] = _transferGate.ActiveKind,
+            ["is_loading"] = _transferGate.IsCurrentlyLoading,
+        };
+    }
+
     private static JsonObject TransferBusyJson(string blockReason) => new()
     {
         ["ok"] = false,

@@ -87,6 +87,7 @@ public static class CoreCommands
             ["auto_combat"] = autoCombat.GetStatusJson(),
             ["auto_evade"] = combatEvade.GetStatusJson(),
             ["behavior"] = behaviors.GetStatusJson(),
+            ["transfer_gate"] = navigator.GetTransferGateStatusJson(),
             ["chat_settings"] = config.ToChatSettingsJson(includeSecrets: false),
             ["feature_policies"] = config.ToFeaturePoliciesJson(),
             ["autogather_available"] = autoGather.IsAvailable,

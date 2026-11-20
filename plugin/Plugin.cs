@@ -234,7 +234,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v1.0.6. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v1.0.7. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeaturePolicyChanged(string key, FeaturePolicyState policy)

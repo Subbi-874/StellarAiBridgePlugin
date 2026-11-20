@@ -6,7 +6,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>Stellar.AgyBridge</RootNamespace>
     <AssemblyName>Stellar.AgyBridge</AssemblyName>
-    <Version>1.0.6</Version>
+    <Version>1.0.7</Version>
     <!-- Must match the Stellar.Framework version installed in the game (see BepInEx/plugins/Stellar.Framework/.stellar-version) -->
     <StellarVersion>2.33.0</StellarVersion>
     <Deterministic>true</Deterministic>

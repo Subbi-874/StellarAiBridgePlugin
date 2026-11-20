@@ -105,6 +105,62 @@ public sealed class ActionExecutor
         return res;
     }
 
+    public async Task<bool> WaitForTransferSettleAsync(
+        string? connId,
+        double timeoutSec = 20.0,
+        CancellationToken ct = default)
+    {
+        double deadline = GoalHelpers.MonotonicNow() + timeoutSec;
+        int maxPolls = Math.Max(1, (int)Math.Ceiling(timeoutSec / 0.4) + 5);
+        for (int poll = 0; poll < maxPolls && GoalHelpers.MonotonicNow() < deadline; poll++)
+        {
+            JsonObject? st = null;
+            try
+            {
+                st = await _dispatch("get_status", new JsonObject(), connId, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                st = null;
+            }
+
+            if (st != null && JsonNodeHelpers.GetBool(st, "ok", false))
+            {
+                JsonObject? gate = JsonNodeHelpers.GetObject(st, "transfer_gate");
+                if (gate == null || !JsonNodeHelpers.GetBool(gate, "busy", false))
+                    return true;
+            }
+
+            await _sleep(0.4, ct).ConfigureAwait(false);
+        }
+        return false;
+    }
+
+    public async Task<JsonObject> RunTransferWithWaitAsync(
+        string method,
+        JsonObject parameters,
+        string? connId,
+        double waitSec = 10.0,
+        double settleTimeoutSec = 20.0,
+        CancellationToken ct = default)
+    {
+        JsonObject res = await RunWithResultAsync(method, parameters, connId, waitSec, ct).ConfigureAwait(false);
+        string reasonCode = FirstNonEmpty(
+            JsonNodeHelpers.GetString(res, "reason_code", ""),
+            JsonNodeHelpers.GetString(JsonNodeHelpers.GetObject(res, "final"), "reason_code", ""));
+        if (!JsonNodeHelpers.GetBool(res, "ok", false)
+            && string.Equals(reasonCode, "transfer_in_progress", StringComparison.Ordinal))
+        {
+            await WaitForTransferSettleAsync(connId, settleTimeoutSec, ct).ConfigureAwait(false);
+            res = await RunWithResultAsync(method, parameters, connId, waitSec, ct).ConfigureAwait(false);
+        }
+        return res;
+    }
+
     public async Task<JsonObject?> PrecheckFollowAsync(
         string target,
         string? connId,
@@ -373,6 +429,10 @@ public sealed class ActionExecutor
                 r = await _dispatch(method, pPoll, connId, ct).ConfigureAwait(false);
             }
         }
+        else if (IsTransferRpcMethod(method))
+        {
+            r = await RunTransferWithWaitAsync(method, parameters, connId, ct: ct).ConfigureAwait(false);
+        }
         else if (wait)
         {
             r = await RunWithResultAsync(method, parameters, connId, ct: ct).ConfigureAwait(false);
@@ -431,8 +491,9 @@ public sealed class ActionExecutor
         var batch = new ActionBatchResult();
         bool isAdmin = JsonNodeHelpers.GetBool(trig, "is_admin", JsonNodeHelpers.GetBool(trig, "is_commander", false));
 
-        foreach (JsonObject act in actionsToRun)
+        for (int idx = 0; idx < actionsToRun.Count; idx++)
         {
+            JsonObject act = actionsToRun[idx];
             string atype = JsonNodeHelpers.GetString(act, "type", "");
             if (atype == "send_sticker")
             {
@@ -739,11 +800,11 @@ public sealed class ActionExecutor
                     continue;
                 }
                 onClearKinds?.Invoke(new[] { "follow" });
-                JsonObject r = await _dispatch(
+                JsonObject r = await RunTransferWithWaitAsync(
                     "teleport_place",
                     new JsonObject { ["destination"] = dest, ["as_admin"] = isAdmin },
                     connId,
-                    ct).ConfigureAwait(false);
+                    ct: ct).ConfigureAwait(false);
                 batch.Executed.Add(new JsonObject
                 {
                     ["action"] = atype,
@@ -758,6 +819,8 @@ public sealed class ActionExecutor
                 else
                 {
                     batch.SucceededActions++;
+                    if (HasFollowupAction(actionsToRun, idx))
+                        await WaitForTransferSettleAsync(connId, ct: ct).ConfigureAwait(false);
                 }
             }
             else if (atype == "disable_chat_monitor")
@@ -967,12 +1030,32 @@ public sealed class ActionExecutor
                 if (!string.IsNullOrEmpty(err))
                     batch.ActionErrors.Add(err);
                 else
+                {
                     batch.SucceededActions++;
+                    if (IsTransferAction(atype) && HasFollowupAction(actionsToRun, idx))
+                        await WaitForTransferSettleAsync(connId, ct: ct).ConfigureAwait(false);
+                }
                 if (info != null)
                     batch.InfoResults.Add(info);
             }
         }
         return batch;
+    }
+
+    private static bool IsTransferAction(string atype)
+        => atype is "teleport_to_place" or "switch_channel" or "leave_dungeon";
+
+    private static bool IsTransferRpcMethod(string method)
+        => method is "teleport_place" or "switch_channel" or "leave_dungeon" or "leave_hub" or "teleport_scene";
+
+    private static bool HasFollowupAction(IReadOnlyList<JsonObject> actions, int currentIndex)
+    {
+        for (int j = currentIndex + 1; j < actions.Count; j++)
+        {
+            if (JsonNodeHelpers.GetString(actions[j], "type", "") != "send_sticker")
+                return true;
+        }
+        return false;
     }
 
     private static string TrigSenderOrName(JsonObject trig)
