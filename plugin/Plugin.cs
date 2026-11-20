@@ -12,6 +12,7 @@ using Stellar.AgyBridge.Adapters.Items;
 using Stellar.AgyBridge.Adapters.Movement;
 using Stellar.AgyBridge.Adapters.Social;
 using Stellar.AgyBridge.Behaviors;
+using Stellar.AgyBridge.Bridge.Server;
 using Stellar.AgyBridge.Character;
 using Stellar.AgyBridge.Commands;
 using Stellar.AgyBridge.Core;
@@ -69,6 +70,7 @@ public sealed class Plugin : IStellarPlugin
     private readonly EcoModeService _ecoMode;
     private readonly BehaviorRunner _behaviors;
     private readonly CommandRegistry _commands;
+    private readonly LeaderBridgeHost _bridgeHost;
     private readonly BridgeWebSocketClient _wsClient;
     private readonly AgyBridgeUiWindow _uiWindow;
     private sealed record IdentitySnapshot(long CharId, string CharName, bool InWorld);
@@ -146,7 +148,12 @@ public sealed class Plugin : IStellarPlugin
         _cameraGuard = new AutoCameraGuardService(_services, _config, _world, _autoCombat, _behaviors);
         _ecoMode = new EcoModeService(_services, _config);
 
-        _wsClient = new BridgeWebSocketClient(_services.Log, _config, _dispatcher, _commands, _capabilities.BuildStatusJson, BuildIdentitySnapshotJson);
+        _bridgeHost = new LeaderBridgeHost(
+            () => _config.BridgeUrl,
+            () => _config.AutoStartLocalBridge,
+            () => _config.AuthToken,
+            log: msg => _services.Log.Info(msg));
+        _wsClient = new BridgeWebSocketClient(_services.Log, _config, _dispatcher, _commands, _capabilities.BuildStatusJson, BuildIdentitySnapshotJson, _bridgeHost);
         _uiWindow = new AgyBridgeUiWindow(
             _services,
             _config,
@@ -218,7 +225,7 @@ public sealed class Plugin : IStellarPlugin
         _capabilities.CapabilitiesUpdated += OnCapabilitiesUpdated;
         _config.ChatSettingsChanged += OnUiChatSettingsChanged;
         _services.Localization.LanguageChanged += OnUiChatSettingsChanged;
-        _config.FeatureModeChanged += OnFeatureModeChanged;
+        _config.FeaturePolicyChanged += OnFeaturePolicyChanged;
 
         EnforceRunInBackground();
 
@@ -230,38 +237,38 @@ public sealed class Plugin : IStellarPlugin
         _services.Log.Info($"[AgyBridge] Initialized v1.0.0. Connecting to {_config.BridgeUrl}");
     }
 
-    private void OnFeatureModeChanged(string key, FeatureGateMode mode)
+    private void OnFeaturePolicyChanged(string key, FeaturePolicyState policy)
     {
         if (key == FeaturePolicyKeys.AutoCombat)
         {
-            _autoCombat.SetDesired(mode == FeatureGateMode.Enabled);
-            if (mode == FeatureGateMode.AdminLock && _behaviors.Current is FarmMonsterItemBehavior)
-                _behaviors.StopCurrent("policy_disabled_or_locked");
+            _autoCombat.SetDesired(policy.Enabled);
+            if (!policy.Enabled && _behaviors.Current is FarmMonsterItemBehavior)
+                _behaviors.StopCurrent("policy_disabled");
         }
-        else if (key == FeaturePolicyKeys.FollowMove && mode != FeatureGateMode.Enabled)
+        else if (key == FeaturePolicyKeys.FollowMove && !policy.Enabled)
         {
-            if (_behaviors.Current is FollowPartyBehavior or MoveToBehavior or FarmMonsterItemBehavior)
-                _behaviors.StopCurrent("policy_disabled_or_locked");
+            if (_behaviors.Current is FollowPartyBehavior or MoveToBehavior or SeekMonsterBehavior or UseGimmickBehavior or FarmMonsterItemBehavior)
+                _behaviors.StopCurrent("policy_disabled");
         }
-        else if (key == FeaturePolicyKeys.AutoCraft && mode != FeatureGateMode.Enabled)
+        else if (key == FeaturePolicyKeys.AutoCraft && !policy.Enabled)
         {
             if (_behaviors.Current is CraftItemBehavior)
-                _behaviors.StopCurrent("policy_disabled_or_locked");
+                _behaviors.StopCurrent("policy_disabled");
         }
-        else if (key == FeaturePolicyKeys.AutoGather && mode != FeatureGateMode.Enabled)
+        else if (key == FeaturePolicyKeys.AutoGather && !policy.Enabled)
         {
             if (_behaviors.Current is GatherResourceBehavior)
-                _behaviors.StopCurrent("policy_disabled_or_locked");
+                _behaviors.StopCurrent("policy_disabled");
             _autoGather.StopAutoGather();
         }
-        else if (key == FeaturePolicyKeys.AutoFish && mode != FeatureGateMode.Enabled)
+        else if (key == FeaturePolicyKeys.AutoFish && !policy.Enabled)
         {
             if (_behaviors.Current is FishAtSpotBehavior)
-                _behaviors.StopCurrent("policy_disabled_or_locked");
+                _behaviors.StopCurrent("policy_disabled");
             _autoFishing.StopAutoFishing();
             _autoFishing.ExitFishingStateLua();
         }
-        else if (key == FeaturePolicyKeys.Emote && mode != FeatureGateMode.Enabled)
+        else if (key == FeaturePolicyKeys.Emote && !policy.Enabled)
         {
             _world.ForceResetActiveEmote();
         }
@@ -423,7 +430,7 @@ public sealed class Plugin : IStellarPlugin
     public void Dispose()
     {
         _services.Framework.Update -= OnUpdate;
-        _config.FeatureModeChanged -= OnFeatureModeChanged;
+        _config.FeaturePolicyChanged -= OnFeaturePolicyChanged;
         _services.Localization.LanguageChanged -= OnUiChatSettingsChanged;
         _config.ChatSettingsChanged -= OnUiChatSettingsChanged;
         _capabilities.CapabilitiesUpdated -= OnCapabilitiesUpdated;
@@ -433,6 +440,7 @@ public sealed class Plugin : IStellarPlugin
         _uiWindow.Dispose();
         _ecoMode.Dispose();
         _wsClient.Dispose();
+        _bridgeHost.Dispose();
         _cameraGuard.Dispose();
         _combatEvade.Dispose();
         _boost.Reset();

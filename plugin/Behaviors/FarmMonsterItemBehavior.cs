@@ -195,12 +195,9 @@ public sealed class FarmMonsterItemBehavior : IBehavior
             return;
         }
 
-        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string gateErr)
-            || _config.IsAdminLocked(FeaturePolicyKeys.AutoCombat))
+        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string gateErr, asAdmin: true))
         {
-            Fail("admin_locked", _config.IsAdminLocked(FeaturePolicyKeys.AutoCombat)
-                ? "자동전투 기능이 어드민락으로 잠겨 있어 사냥 파밍을 할 수 없어요."
-                : gateErr);
+            Fail("policy_disabled", gateErr);
             return;
         }
 
@@ -416,7 +413,9 @@ public sealed class FarmMonsterItemBehavior : IBehavior
         _boost.Reset();
         _moveDriver.Uninstall(this);
         _autoCombat.SuppressForCatchup = false;
-        if (!_hadAutoCombatDesired && _autoCombat.DesiredEnabled && !_config.IsAdminLocked(FeaturePolicyKeys.AutoCombat))
+        if (!_hadAutoCombatDesired && _autoCombat.DesiredEnabled && _config.IsFeatureEnabled(FeaturePolicyKeys.AutoCombat) == false)
+            _autoCombat.SetDesired(false);
+        else if (!_hadAutoCombatDesired && _autoCombat.DesiredEnabled)
             _autoCombat.SetDesired(false);
     }
 

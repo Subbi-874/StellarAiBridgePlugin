@@ -1,0 +1,1519 @@
+[
+  {
+    "name": "get_status",
+    "description": "Returns local player state (HP, scene, channel line_id, 3D coordinates, party summary) and active behavior.",
+    "inputSchema": {
+      "properties": {},
+      "title": "get_statusArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_party",
+    "description": "Lists all party members with their name, char_id, leader status, scene, channel (line_id), AOI status, and position.",
+    "inputSchema": {
+      "properties": {
+        "refresh_line": {
+          "default": true,
+          "title": "Refresh Line",
+          "type": "boolean"
+        }
+      },
+      "title": "get_partyArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_guild_members",
+    "description": "Lists guild members (name, char_id, level, online status, current scene_id and scene_name).",
+    "inputSchema": {
+      "properties": {
+        "online_only": {
+          "default": true,
+          "title": "Online Only",
+          "type": "boolean"
+        }
+      },
+      "title": "get_guild_membersArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_social_roster",
+    "description": "\nLists a unified, deduplicated UID roster across Party ('party'), Friends ('friend'), and Guild ('guild'), or 'all'.\nReturns each player's numeric uid (char_id), name, online status, source_badge ([파티], [친구], [길드]), and scene.\nUse this to disambiguate duplicate nicknames and select exact UIDs for follow_player or configure_chat_monitor.\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "default": "all",
+          "title": "Category",
+          "type": "string"
+        },
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "online_only": {
+          "default": false,
+          "title": "Online Only",
+          "type": "boolean"
+        }
+      },
+      "title": "get_social_rosterArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "follow_player",
+    "description": "\nFollows ANY player (party member, guild member, friend, chat sender, or numeric char_id) across maps, Guild Hall, and channels.\n- target: Character name (e.g. '안도라'), numeric char_id, or 'leader' / '파티장'.\n- stop_distance: Distance in meters to maintain from the target (default 2.5).\n- continuous: If True (default), continuously follows the target as they walk or change maps/channels until stop() is called.\n              If False, approaches the target once and stops automatically upon arrival.\n- auto_teleport: Automatically enter Guild Hall / teleport to the target's map if on a different scene.\n- auto_switch_channel: Automatically switch channel (line) to match the target.\n",
+    "inputSchema": {
+      "properties": {
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "stop_distance": {
+          "default": 2.5,
+          "title": "Stop Distance",
+          "type": "number"
+        },
+        "continuous": {
+          "default": true,
+          "title": "Continuous",
+          "type": "boolean"
+        },
+        "auto_teleport": {
+          "default": true,
+          "title": "Auto Teleport",
+          "type": "boolean"
+        },
+        "auto_switch_channel": {
+          "default": true,
+          "title": "Auto Switch Channel",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "follow_playerArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "follow_party_member",
+    "description": "\nFollows a party member (or 'leader' / '파티장').\n- continuous: True (default) keeps following until stop() is called; False moves to them once and stops on arrival.\n",
+    "inputSchema": {
+      "properties": {
+        "target": {
+          "default": "leader",
+          "title": "Target",
+          "type": "string"
+        },
+        "stop_distance": {
+          "default": 2.5,
+          "title": "Stop Distance",
+          "type": "number"
+        },
+        "continuous": {
+          "default": true,
+          "title": "Continuous",
+          "type": "boolean"
+        },
+        "auto_teleport": {
+          "default": true,
+          "title": "Auto Teleport",
+          "type": "boolean"
+        },
+        "auto_switch_channel": {
+          "default": true,
+          "title": "Auto Switch Channel",
+          "type": "boolean"
+        }
+      },
+      "title": "follow_party_memberArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "stop",
+    "description": "Immediately stops any active movement or player-following behavior.",
+    "inputSchema": {
+      "properties": {
+        "reason": {
+          "default": "user_stop",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "title": "stopArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "move_to",
+    "description": "Moves the character once to the specified world coordinates (x, y, z) on the current map.",
+    "inputSchema": {
+      "properties": {
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "z": {
+          "title": "Z",
+          "type": "number"
+        },
+        "y": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Y"
+        },
+        "stop_distance": {
+          "default": 1.8,
+          "title": "Stop Distance",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "z"
+      ],
+      "title": "move_toArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_nearby_entities",
+    "description": "Lists nearby in-AOI entities ('player', 'monster', or '' for all) sorted by distance.",
+    "inputSchema": {
+      "properties": {
+        "kind": {
+          "default": "",
+          "title": "Kind",
+          "type": "string"
+        },
+        "limit": {
+          "default": 40,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "get_nearby_entitiesArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_recent_chats",
+    "description": "Returns recent in-game chat messages (excluding noisy system notices).",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "get_recent_chatsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "send_chat",
+    "description": "Sends an in-game chat message. channel can be 'party', 'say', 'world', 'guild', or 'whisper'.",
+    "inputSchema": {
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "channel": {
+          "default": "party",
+          "title": "Channel",
+          "type": "string"
+        },
+        "target_char_id": {
+          "default": 0,
+          "title": "Target Char Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "send_chatArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "set_auto_combat",
+    "description": "Toggles (when enable is None) or sets built-in in-game Auto-Combat ('G' key feature).",
+    "inputSchema": {
+      "properties": {
+        "enable": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enable"
+        }
+      },
+      "title": "set_auto_combatArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_channels",
+    "description": "Lists current channel (line_id) and available channels on the active map.",
+    "inputSchema": {
+      "properties": {},
+      "title": "list_channelsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "switch_channel",
+    "description": "Switches channel (scene line) to an explicit line_id or to a player's channel via char_id/target. Automatically stops any active player-following.",
+    "inputSchema": {
+      "properties": {
+        "line_id": {
+          "default": 0,
+          "title": "Line Id",
+          "type": "integer"
+        },
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        },
+        "target": {
+          "default": "",
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "title": "switch_channelArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_places",
+    "description": "\nLists special hubs ('길드 이벤트 센터', '가든 주택' 마이홈) and open-world maps / warp points.\nProvide an optional query (e.g. '길드', '아스텔리즈', '개척국', '바하마르') to filter destinations.\n",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "title": "list_placesArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "teleport_to_place",
+    "description": "\nImmediately enters or teleports to a destination by name, alias, or ID:\n- Guild Hall: '길드 홈', '길드홀', '길드 이벤트 센터'\n- Personal Home: '마이홈', '내 집', '가든 주택'\n- Exit current hub: '나가기', '퇴장'\n- Any map or warp point name: '아스텔리즈', '개척국', '타륜 주점', '아스테리아 평원', '바하마르 고원', etc.\n",
+    "inputSchema": {
+      "properties": {
+        "destination": {
+          "title": "Destination",
+          "type": "string"
+        },
+        "wait_until_loaded": {
+          "default": true,
+          "title": "Wait Until Loaded",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "destination"
+      ],
+      "title": "teleport_to_placeArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "leave_special_scene",
+    "description": "Exits Guild Hall ('길드 이벤트 센터') or Personal Home ('가든 주택') back to the open world.",
+    "inputSchema": {
+      "properties": {
+        "wait_until_loaded": {
+          "default": true,
+          "title": "Wait Until Loaded",
+          "type": "boolean"
+        }
+      },
+      "title": "leave_special_sceneArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "inspect_skill_slots",
+    "description": "Inspects currently equipped skill slots, names, and cooldown states on the character.",
+    "inputSchema": {
+      "properties": {},
+      "title": "inspect_skill_slotsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "configure_locomotion",
+    "description": "Updates 3-tier locomotion ('E' mobility skill, bunnyhop, combat tether) thresholds dynamically.",
+    "inputSchema": {
+      "properties": {
+        "enable_mobility_skill": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enable Mobility Skill"
+        },
+        "mobility_skill_slot": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mobility Skill Slot"
+        },
+        "mobility_skill_name_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mobility Skill Name Hint"
+        },
+        "mobility_skill_min_distance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mobility Skill Min Distance"
+        },
+        "enable_bunnyhop": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enable Bunnyhop"
+        },
+        "bunnyhop_min_distance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bunnyhop Min Distance"
+        },
+        "combat_tether_distance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Combat Tether Distance"
+        }
+      },
+      "title": "configure_locomotionArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "manage_party",
+    "description": "\nManages the character's party:\n- action='create': Creates a party (set auto_accept=True to automatically accept incoming join requests).\n- action='set_auto_accept': Enables or disables auto-accepting join requests on the current party (auto_accept=True/False).\n- action='set_member_type': Switches the party between 5-player and 20-player (raid) mode (size=5 or 20; leader only).\n- action='join': Applies to join another player's party by player name/char_id ('target') or 'team_id'.\n- action='merge': Party LEADER applies to merge into another player's party ('target' name/char_id or 'team_id'), keeping own party.\n- action='leave': Leaves the current party.\n- action='invite': Invites 'target' player to the party (creates a party first if solo).\n- action='accept_apply': Approves all pending incoming party join applications.\n- action='transfer_leader': Transfers party leadership to 'target' party member (name or UID; leader only).\n- action='kick': Kicks 'target' from the party (leader only).\n",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "target": {
+          "default": "",
+          "title": "Target",
+          "type": "string"
+        },
+        "auto_accept": {
+          "default": false,
+          "title": "Auto Accept",
+          "type": "boolean"
+        },
+        "leave_first": {
+          "default": true,
+          "title": "Leave First",
+          "type": "boolean"
+        },
+        "team_id": {
+          "default": 0,
+          "title": "Team Id",
+          "type": "integer"
+        },
+        "size": {
+          "default": 0,
+          "title": "Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "manage_partyArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "revive",
+    "description": "Revives the character if dead (free options only: nearby → revive point → main city). dry_run=True only reports the chosen option.",
+    "inputSchema": {
+      "properties": {
+        "revive_type": {
+          "default": 0,
+          "title": "Revive Type",
+          "type": "integer"
+        },
+        "dry_run": {
+          "default": false,
+          "title": "Dry Run",
+          "type": "boolean"
+        }
+      },
+      "title": "reviveArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "ride",
+    "description": "Mounts/dismounts the equipped Riding Imagine mount. action: 'mount' | 'dismount' | 'toggle'; ride_type: 'auto' | 'land' | 'water'.",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "default": "mount",
+          "title": "Action",
+          "type": "string"
+        },
+        "ride_type": {
+          "default": "auto",
+          "title": "Ride Type",
+          "type": "string"
+        }
+      },
+      "title": "rideArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "accept_interaction",
+    "description": "\nApproves requests sent by 'target' (name/UID) within window_sec seconds.\nkinds (comma list, empty = all): interaction (2-person action), ride (ride-together apply/invite), party (party invite).\n",
+    "inputSchema": {
+      "properties": {
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "window_sec": {
+          "default": 60,
+          "title": "Window Sec",
+          "type": "integer"
+        },
+        "kinds": {
+          "default": "",
+          "title": "Kinds",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "accept_interactionArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "request_ride",
+    "description": "Sends a ride-together request to a NEARBY player. mode='apply': ride THEIR mount; mode='invite': let them ride OUR mount.",
+    "inputSchema": {
+      "properties": {
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "mode": {
+          "default": "apply",
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "request_rideArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "request_interaction",
+    "description": "Sends a 2-person action request (default '손잡기') to a NEARBY player; they must accept it.",
+    "inputSchema": {
+      "properties": {
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "action": {
+          "default": "손잡기",
+          "title": "Action",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "request_interactionArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "query_player_location",
+    "description": "Looks up where a player is: map name/type, channel, coordinates, distance, and whether the map is enterable.",
+    "inputSchema": {
+      "properties": {
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "query_player_locationArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_presets",
+    "description": "Lists job/skill presets (loadouts) and outfit presets available to the current character.",
+    "inputSchema": {
+      "properties": {},
+      "title": "list_presetsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "switch_loadout",
+    "description": "Switches the job/skill/talent/gear preset by 1-based number, preset name, or profession (id or Korean name).",
+    "inputSchema": {
+      "properties": {
+        "number": {
+          "default": 0,
+          "title": "Number",
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        },
+        "profession": {
+          "default": "",
+          "title": "Profession",
+          "type": "string"
+        }
+      },
+      "title": "switch_loadoutArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "switch_outfit",
+    "description": "Switches to an outfit preset (from Stellar.WardrobeLoadout) by 1-based number or name; with neither, picks a random preset.",
+    "inputSchema": {
+      "properties": {
+        "number": {
+          "default": 0,
+          "title": "Number",
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "title": "switch_outfitArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "seek_monster",
+    "description": "Travels (across maps if needed) to the nearest spawn point of a monster by name or id. engage=True turns on auto-combat on arrival.",
+    "inputSchema": {
+      "properties": {
+        "monster": {
+          "title": "Monster",
+          "type": "string"
+        },
+        "engage": {
+          "default": false,
+          "title": "Engage",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "monster"
+      ],
+      "title": "seek_monsterArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "gather_resource",
+    "description": "\nIntegrates with Stellar.AutoGather to automatically teleport near the resource cluster, gather 'resource'\n(e.g. '사향 분말', '부채조개', '속삭임 난초', or '주변' for any nearby node) 'count' times, and stop automatically.\n",
+    "inputSchema": {
+      "properties": {
+        "resource": {
+          "title": "Resource",
+          "type": "string"
+        },
+        "count": {
+          "default": 20,
+          "title": "Count",
+          "type": "integer"
+        },
+        "use_focus": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Use Focus"
+        }
+      },
+      "required": [
+        "resource"
+      ],
+      "title": "gather_resourceArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_gatherable_resources",
+    "description": "Lists gatherable life-skill resources (name, ID, map area, focus cost) matching an optional Korean query.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "title": "list_gatherable_resourcesArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_fishing_spots",
+    "description": "Lists fishing areas, landmarks, and catchable fish species dynamically from game tables (optionally filtered by Korean query).",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "title": "list_fishing_spotsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "fish",
+    "description": "\nIntegrates with Stellar.AutoFishing to travel to a fishing spot (or nearest spot when spot=''),\nequip rod & compatible bait, enter fishing stance, and auto-fish ('count' fish or continuously when count=0).\n",
+    "inputSchema": {
+      "properties": {
+        "spot": {
+          "default": "",
+          "title": "Spot",
+          "type": "string"
+        },
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "title": "fishArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "configure_chat_monitor",
+    "description": "\nConfigures real-time in-game chat monitoring, wake triggers, and registered Admins.\n- enabled: True to activate chat monitoring, False to stop.\n- channels: Channels to watch, e.g. ['guild', 'party'] (also supports 'say', 'world', 'whisper').\n- trigger_words: Optional list of trigger keywords (empty responds to ALL chat in monitored channels; whisper always bypasses).\n- authorized_commanders: List of Admin character names or char_ids allowed to run Admin-Only (🔒) features and change locks.\n",
+    "inputSchema": {
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "channels": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Channels"
+        },
+        "use_local_agy": {
+          "default": true,
+          "title": "Use Local Agy",
+          "type": "boolean"
+        },
+        "extra_triggers": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extra Triggers"
+        },
+        "trigger_words": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger Words"
+        },
+        "trigger_words_customized": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger Words Customized"
+        },
+        "authorized_commanders": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authorized Admins"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "title": "configure_chat_monitorArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_chat_monitor_status",
+    "description": "Returns current chat monitor configuration, local AGY CLI readiness, and recent handled chat triggers.",
+    "inputSchema": {
+      "properties": {},
+      "title": "get_chat_monitor_statusArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_bot_goals",
+    "description": "Returns the per-bot GoalManager state (active goal, paused resume stack, queued goals, autonomous config).",
+    "inputSchema": {
+      "properties": {
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        }
+      },
+      "title": "get_bot_goalsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "cancel_bot_goal",
+    "description": "Cancels an active, paused, or queued goal on the selected bot (or all goals when cancel_all=True).",
+    "inputSchema": {
+      "properties": {
+        "goal_id": {
+          "default": "",
+          "title": "Goal Id",
+          "type": "string"
+        },
+        "cancel_all": {
+          "default": false,
+          "title": "Cancel All",
+          "type": "boolean"
+        },
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        }
+      },
+      "title": "cancel_bot_goalArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "set_autonomous_mode",
+    "description": "Toggles per-bot autonomous idle mode (default OFF) and optional manual-input grace window in seconds.",
+    "inputSchema": {
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        },
+        "manual_input_grace_sec": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manual Input Grace Sec"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "title": "set_autonomous_modeArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_rule_promotion_candidates",
+    "description": "Returns repeated LLM exception-consultation patterns eligible for promotion into deterministic rules.",
+    "inputSchema": {
+      "properties": {},
+      "title": "get_rule_promotion_candidatesArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_bot_memories",
+    "description": "Queries persistent SQLite memories and recent events partitioned by `char_id` (or the active client's character).",
+    "inputSchema": {
+      "properties": {
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        },
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "category": {
+          "default": "",
+          "title": "Category",
+          "type": "string"
+        },
+        "include_events": {
+          "default": true,
+          "title": "Include Events",
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 30,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "get_bot_memoriesArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "save_bot_memory",
+    "description": "Saves or updates a persistent memory entry (`preference`, `relationship`, `nickname_alias`, `habit`, `note`) for the selected bot character.",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "title": "Category",
+          "type": "string"
+        },
+        "mem_key": {
+          "title": "Mem Key",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        },
+        "subject_uid": {
+          "default": 0,
+          "title": "Subject Uid",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "category",
+        "mem_key",
+        "content"
+      ],
+      "title": "save_bot_memoryArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "delete_bot_memory",
+    "description": "Deletes stored memories matching `memory_id` or `mem_key` for the selected bot character.",
+    "inputSchema": {
+      "properties": {
+        "memory_id": {
+          "default": 0,
+          "title": "Memory Id",
+          "type": "integer"
+        },
+        "mem_key": {
+          "default": "",
+          "title": "Mem Key",
+          "type": "string"
+        },
+        "category": {
+          "default": "",
+          "title": "Category",
+          "type": "string"
+        },
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        }
+      },
+      "title": "delete_bot_memoryArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_known_users",
+    "description": "Lists shared player UID records and observed nickname change history across all bots.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "get_known_usersArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_item_count",
+    "description": "Queries live bag inventory counts (materials, consumables, currency, vitality) by Korean item name or item_id.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "item_id": {
+          "default": 0,
+          "title": "Item Id",
+          "type": "integer"
+        }
+      },
+      "title": "get_item_countArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_recipe",
+    "description": "Queries live recipe details across life crafting, cooking, alchemy, housing furniture, and equip forge.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "recipe_id": {
+          "default": 0,
+          "title": "Recipe Id",
+          "type": "integer"
+        }
+      },
+      "title": "get_recipeArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "plan_craft",
+    "description": "Deterministically expands a crafting dependency tree against live inventory and SQLite cached recipes without executing.",
+    "inputSchema": {
+      "properties": {
+        "item": {
+          "default": "",
+          "title": "Item",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "recipe_id": {
+          "default": 0,
+          "title": "Recipe Id",
+          "type": "integer"
+        },
+        "allow_monster_farm": {
+          "default": false,
+          "title": "Allow Monster Farm",
+          "type": "boolean"
+        },
+        "count_mode": {
+          "default": "additional",
+          "title": "Count Mode",
+          "type": "string"
+        },
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        }
+      },
+      "title": "plan_craftArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "start_craft_goal",
+    "description": "Plans and enqueues/starts a multi-stage crafting Goal (gather -> fish -> sub-craft -> final craft; asks before monster hunting unless allow_monster_farm=True).",
+    "inputSchema": {
+      "properties": {
+        "item": {
+          "default": "",
+          "title": "Item",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "recipe_id": {
+          "default": 0,
+          "title": "Recipe Id",
+          "type": "integer"
+        },
+        "allow_monster_farm": {
+          "default": false,
+          "title": "Allow Monster Farm",
+          "type": "boolean"
+        },
+        "count_mode": {
+          "default": "additional",
+          "title": "Count Mode",
+          "type": "string"
+        },
+        "priority": {
+          "default": "command",
+          "title": "Priority",
+          "type": "string"
+        },
+        "preempt": {
+          "default": false,
+          "title": "Preempt",
+          "type": "boolean"
+        },
+        "char_id": {
+          "default": 0,
+          "title": "Char Id",
+          "type": "integer"
+        }
+      },
+      "title": "start_craft_goalArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "wait_for_chat_trigger",
+    "description": "Waits for the next triggered chat message when chat monitor is running with use_local_agy=False.",
+    "inputSchema": {
+      "properties": {
+        "timeout_sec": {
+          "default": 60.0,
+          "title": "Timeout Sec",
+          "type": "number"
+        }
+      },
+      "title": "wait_for_chat_triggerArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "play_emote",
+    "description": "\nPlays a standalone emote/action on the active character (e.g. emote='박수', '댄스', '앉기', '인사', '죽은 척하기'),\nor stops any ongoing continuous emote when stop=True (or emote='중지'). Silently skips if unowned.\n",
+    "inputSchema": {
+      "properties": {
+        "emote": {
+          "default": "",
+          "title": "Emote",
+          "type": "string"
+        },
+        "emote_id": {
+          "default": 0,
+          "title": "Emote Id",
+          "type": "integer"
+        },
+        "stop": {
+          "default": false,
+          "title": "Stop",
+          "type": "boolean"
+        }
+      },
+      "title": "play_emoteArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_emotes",
+    "description": "Lists all unlocked emotes (ID, Korean name, looping flag) available on the active character.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "title": "list_emotesArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_dungeons",
+    "description": "\nLists enterable dungeons, Unstable Spaces ('unstable'), Master Mode dungeons ('master'), Raids ('raid'),\nand Boss activities matching an optional Korean query.\n",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "category": {
+          "default": "",
+          "title": "Category",
+          "type": "string"
+        }
+      },
+      "title": "list_dungeonsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "enter_dungeon",
+    "description": "\nStarts entry into a dungeon, Master Mode tier (e.g. difficulty='마스터 5'), Unstable Space ('불안정 공간'),\nRaid ('회귀'/'혈전'/'결전' or '이지'/'하드'/'나이트메어'; auto-converts 5-man party to 20-man raid when needed),\nSidimoon Tower, or World Boss ('월드 보스') when the character is solo or the party leader.\n",
+    "inputSchema": {
+      "properties": {
+        "dungeon": {
+          "default": "",
+          "title": "Dungeon",
+          "type": "string"
+        },
+        "difficulty": {
+          "default": "",
+          "title": "Difficulty",
+          "type": "string"
+        },
+        "dungeon_id": {
+          "default": 0,
+          "title": "Dungeon Id",
+          "type": "integer"
+        },
+        "single_ai": {
+          "default": false,
+          "title": "Single Ai",
+          "type": "boolean"
+        }
+      },
+      "title": "enter_dungeonArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "ready_check",
+    "description": "Manually confirms any active dungeon / raid / Unstable Space / World Boss ready-check popup immediately.",
+    "inputSchema": {
+      "properties": {},
+      "title": "ready_checkArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_stickers",
+    "description": "Lists owned in-game chat picture stickers and supported semantic mood tags ('greet', 'thanks', 'thumbsup', 'cheer', 'heart', 'laugh', 'cute', 'ok', 'think', 'sorry', 'sad', 'random').",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "group_id": {
+          "default": 0,
+          "title": "Group Id",
+          "type": "integer"
+        }
+      },
+      "title": "list_stickersArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "send_sticker",
+    "description": "\nSends an owned built-in picture sticker to an in-game chat channel ('party', 'guild', 'whisper', etc.).\n- sticker: Semantic mood tag ('greet', 'thanks', 'thumbsup', 'cheer', 'heart', 'laugh', 'cute', 'ok', 'think', 'sorry', 'sad', 'random'), resource substring, or ID string.\n",
+    "inputSchema": {
+      "properties": {
+        "sticker": {
+          "default": "random",
+          "title": "Sticker",
+          "type": "string"
+        },
+        "channel": {
+          "default": "party",
+          "title": "Channel",
+          "type": "string"
+        },
+        "sticker_id": {
+          "default": 0,
+          "title": "Sticker Id",
+          "type": "integer"
+        },
+        "target_char_id": {
+          "default": 0,
+          "title": "Target Char Id",
+          "type": "integer"
+        }
+      },
+      "title": "send_stickerArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_game_clients",
+    "description": "Lists all simultaneously connected game clients (e.g. E:\\ StarASIA and G:\\ StarASIA_STEAM) with character names.",
+    "inputSchema": {
+      "properties": {},
+      "title": "list_game_clientsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "select_game_client",
+    "description": "Selects which connected game client AGY controls (by character name e.g. '쵸로기', drive/path 'E:' or 'G:', PID, or conn_id).",
+    "inputSchema": {
+      "properties": {
+        "selector": {
+          "title": "Selector",
+          "type": "string"
+        }
+      },
+      "required": [
+        "selector"
+      ],
+      "title": "select_game_clientArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "leave_dungeon",
+    "description": "Immediately exits the current Dungeon, Master Mode, Unstable Space, 20-Man Raid, Sidimoon Tower, World Boss, Visual Layer, Guild Hall, or Personal Home.",
+    "inputSchema": {
+      "properties": {},
+      "title": "leave_dungeonArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_gimmicks",
+    "description": "Lists nearby interactive traversal field/dungeon gimmicks (Wind Tunnels, Glider Launches, Intra-map Teleporters) excluding dungeon exits, chests, seats, and fishing spots.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "radius": {
+          "default": 45.0,
+          "title": "Radius",
+          "type": "number"
+        }
+      },
+      "title": "list_gimmicksArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "use_gimmick",
+    "description": "Approaches and activates a nearby traversal field/dungeon gimmick (e.g. '바람의 통로', '순간 이동', or nearest available if query is empty).",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "title": "use_gimmickArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "set_eco_mode",
+    "description": "Switches in-game resource saving mode ('off' | 'standard' | 'ultra' black-screen + texture mipmap + OnDemandRendering throttle).",
+    "inputSchema": {
+      "properties": {
+        "mode": {
+          "default": "standard",
+          "title": "Mode",
+          "type": "string"
+        },
+        "auto_pause_on_focus": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auto Pause On Focus"
+        },
+        "persist": {
+          "default": true,
+          "title": "Persist",
+          "type": "boolean"
+        }
+      },
+      "title": "set_eco_modeArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "trim_memory",
+    "description": "Runs Unity Resources.UnloadUnusedAssets and Win32 EmptyWorkingSet inside the active game client.",
+    "inputSchema": {
+      "properties": {
+        "empty_working_set": {
+          "default": true,
+          "title": "Empty Working Set",
+          "type": "boolean"
+        },
+        "unload_assets": {
+          "default": true,
+          "title": "Unload Assets",
+          "type": "boolean"
+        }
+      },
+      "title": "trim_memoryArguments",
+      "type": "object"
+    }
+  }
+]

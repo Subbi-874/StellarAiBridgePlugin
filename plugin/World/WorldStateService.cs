@@ -1081,7 +1081,8 @@ public sealed class WorldStateService : IDisposable
         string text,
         long whisperTargetCharId,
         out string blockReason,
-        out double remainingCooldownSec)
+        out double remainingCooldownSec,
+        bool asAdmin = false)
     {
         blockReason = "";
         remainingCooldownSec = 0.0;
@@ -1093,7 +1094,7 @@ public sealed class WorldStateService : IDisposable
 
         string normCh = (channel ?? "party").Trim().ToLowerInvariant();
         string policyKey = FeaturePolicyKeys.FromSendChannel(normCh) ?? FeaturePolicyKeys.SendParty;
-        if (!_config.CheckFeatureExecution(policyKey, out string gateError))
+        if (!_config.CheckFeatureExecution(policyKey, out string gateError, asAdmin))
         {
             blockReason = gateError;
             _services.Log.Warning($"[AgyBridge][ChatGuard] Blocked SendChat on '{normCh}': {gateError}");
@@ -1124,7 +1125,8 @@ public sealed class WorldStateService : IDisposable
         int stickerConfigId,
         long whisperTargetCharId,
         out string blockReason,
-        out double remainingCooldownSec)
+        out double remainingCooldownSec,
+        bool asAdmin = false)
     {
         blockReason = "";
         remainingCooldownSec = 0.0;
@@ -1136,7 +1138,7 @@ public sealed class WorldStateService : IDisposable
 
         string normCh = (channel ?? "party").Trim().ToLowerInvariant();
         string policyKey = FeaturePolicyKeys.FromSendChannel(normCh) ?? FeaturePolicyKeys.SendParty;
-        if (!_config.CheckFeatureExecution(policyKey, out string gateError))
+        if (!_config.CheckFeatureExecution(policyKey, out string gateError, asAdmin))
         {
             blockReason = gateError;
             _services.Log.Warning($"[AgyBridge][ChatGuard] Blocked SendSticker on '{normCh}': {gateError}");

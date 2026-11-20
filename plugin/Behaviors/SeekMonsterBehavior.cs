@@ -165,7 +165,7 @@ public sealed class SeekMonsterBehavior : IBehavior
             return;
         }
 
-        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string gateErr))
+        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string gateErr, asAdmin: true))
         {
             Fail("admin_locked", gateErr);
             return;
@@ -357,7 +357,7 @@ public sealed class SeekMonsterBehavior : IBehavior
         _boost.Reset();
         _moveDriver.Uninstall(this);
         _autoCombat.SuppressForCatchup = false;
-        if (_engage && !_config.IsAdminLocked(FeaturePolicyKeys.AutoCombat)) _autoCombat.SetDesired(true);
+        if (_engage) _autoCombat.SetDesired(true);
         _phase = "arrived";
         _detail = _liveLocked ? $"'{_monsterName}' 근처에 도착했어요." : $"'{_monsterName}' 출현 위치에 도착했어요 (지금은 보이지 않아요).";
         IsFinished = true;

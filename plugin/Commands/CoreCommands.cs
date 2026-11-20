@@ -63,14 +63,21 @@ public static class CoreCommands
             ["move_inject_path"] = moveDriver.InjectPath
         }));
 
-        static JsonObject BlockedJson(BridgeConfig cfg, string policyKey, string err) => new()
+        static bool IsAdminParam(JsonObject? p) => p?["as_admin"]?.GetValue<bool>() ?? false;
+
+        static JsonObject BlockedJson(BridgeConfig cfg, string policyKey, string err)
         {
-            ["ok"] = false,
-            ["policy_key"] = policyKey,
-            ["mode"] = (int)cfg.GetFeatureMode(policyKey),
-            ["admin_locked"] = cfg.IsAdminLocked(policyKey),
-            ["error"] = err
-        };
+            var st = cfg.GetFeaturePolicy(policyKey);
+            return new JsonObject
+            {
+                ["ok"] = false,
+                ["policy_key"] = policyKey,
+                ["enabled"] = st.Enabled,
+                ["admin_only"] = st.AdminOnly,
+                ["admin_locked"] = st.AdminOnly,
+                ["error"] = err
+            };
+        }
 
         registry.Register(new DelegateBridgeCommand("get_status", _ => new JsonObject
         {
@@ -80,7 +87,7 @@ public static class CoreCommands
             ["auto_evade"] = combatEvade.GetStatusJson(),
             ["behavior"] = behaviors.GetStatusJson(),
             ["chat_settings"] = config.ToChatSettingsJson(includeSecrets: false),
-            ["feature_modes"] = config.ToFeaturePoliciesJson(),
+            ["feature_policies"] = config.ToFeaturePoliciesJson(),
             ["autogather_available"] = autoGather.IsAvailable,
             ["autofishing_available"] = autoFishing.IsAvailable,
             ["capabilities"] = capabilities.BuildStatusJson(),
@@ -105,28 +112,38 @@ public static class CoreCommands
         registry.Register(new DelegateBridgeCommand("get_feature_policies", _ => new JsonObject
         {
             ["ok"] = true,
-            ["feature_modes"] = config.ToFeaturePoliciesJson()
+            ["feature_policies"] = config.ToFeaturePoliciesJson()
         }));
 
         registry.Register(new DelegateBridgeCommand("set_feature_policy", p =>
         {
             string key = (p?["key"]?.GetValue<string>() ?? "").Trim();
-            int modeInt = p?["mode"]?.GetValue<int>() ?? -1;
-            if (string.IsNullOrEmpty(key) || modeInt is not (0 or 1))
-                return new JsonObject { ["ok"] = false, ["error"] = "Provide 'key' and 'mode' (0 or 1)" };
+            bool asAdmin = IsAdminParam(p);
+            var origin = asAdmin ? CommandOrigin.AdminRemote : CommandOrigin.ExternalBridge;
+            bool? enabled = p?["enabled"] != null ? p["enabled"]!.GetValue<bool>() : null;
+            bool? adminOnly = p?["admin_only"] != null ? p["admin_only"]!.GetValue<bool>() : null;
+            if (!enabled.HasValue && !adminOnly.HasValue && p?["mode"] != null)
+            {
+                int modeInt = p["mode"]!.GetValue<int>();
+                if (modeInt is 0 or 1) enabled = modeInt == 1;
+                else if (modeInt == 2) adminOnly = true;
+            }
+            if (string.IsNullOrEmpty(key) || (!enabled.HasValue && !adminOnly.HasValue))
+                return new JsonObject { ["ok"] = false, ["error"] = "Provide 'key' and 'enabled' (bool) and/or 'admin_only' (bool)" };
 
-            var targetMode = modeInt == 1 ? FeatureGateMode.Enabled : FeatureGateMode.Disabled;
-            if (!config.TrySetFeatureMode(key, targetMode, CommandOrigin.ExternalBridge, out string err))
+            if (!config.TrySetFeaturePolicy(key, enabled, adminOnly, origin, out string err))
                 return BlockedJson(config, key, err);
 
             config.SaveAndNotifyChatSettings();
             onUiStateChanged?.Invoke();
+            var nextSt = config.GetFeaturePolicy(key);
             return new JsonObject
             {
                 ["ok"] = true,
                 ["key"] = key,
-                ["mode"] = (int)config.GetFeatureMode(key),
-                ["feature_modes"] = config.ToFeaturePoliciesJson()
+                ["enabled"] = nextSt.Enabled,
+                ["admin_only"] = nextSt.AdminOnly,
+                ["feature_policies"] = config.ToFeaturePoliciesJson()
             };
         }));
 
@@ -171,7 +188,8 @@ public static class CoreCommands
             string channel = p?["channel"]?.GetValue<string>() ?? "party";
             string text = p?["text"]?.GetValue<string>() ?? "";
             long targetCharId = p?["target_char_id"]?.GetValue<long>() ?? 0;
-            bool sent = world.SendChat(channel, text, targetCharId, out string blockReason, out double remCooldown);
+            bool asAdmin = IsAdminParam(p);
+            bool sent = world.SendChat(channel, text, targetCharId, out string blockReason, out double remCooldown, asAdmin);
             string policyKey = FeaturePolicyKeys.FromSendChannel(channel) ?? FeaturePolicyKeys.SendParty;
             var resp = new JsonObject
             {
@@ -182,7 +200,8 @@ public static class CoreCommands
             };
             if (!sent)
             {
-                resp["admin_locked"] = config.IsAdminLocked(policyKey);
+                resp["admin_only"] = config.IsAdminOnly(policyKey);
+                resp["admin_locked"] = config.IsAdminOnly(policyKey);
                 resp["error"] = blockReason;
             }
             return resp;
@@ -205,7 +224,7 @@ public static class CoreCommands
 
         Func<JsonObject?, JsonObject> startFollowHandler = p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.FollowMove, gateErr);
 
             string target = p?["target"]?.GetValue<string>() ?? "leader";
@@ -300,7 +319,7 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("move_to", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.FollowMove, gateErr);
 
             if (p == null || p["x"] == null || p["z"] == null)
@@ -326,6 +345,18 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("stop", p =>
         {
+            bool asAdmin = IsAdminParam(p);
+            string? activeGateKey = behaviors.Current switch
+            {
+                FollowPartyBehavior or MoveToBehavior or SeekMonsterBehavior or UseGimmickBehavior or FarmMonsterItemBehavior => FeaturePolicyKeys.FollowMove,
+                GatherResourceBehavior => FeaturePolicyKeys.AutoGather,
+                FishAtSpotBehavior => FeaturePolicyKeys.AutoFish,
+                CraftItemBehavior => FeaturePolicyKeys.AutoCraft,
+                _ => null
+            };
+            if (!string.IsNullOrEmpty(activeGateKey) && !config.CheckAdminOnlyGate(activeGateKey, out string gateErr, asAdmin))
+                return BlockedJson(config, activeGateKey, gateErr);
+
             string reason = p?["reason"]?.GetValue<string>() ?? "user_stop";
             var snap = behaviors.StopCurrent(reason);
             return new JsonObject
@@ -339,7 +370,7 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("switch_channel", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.TeleportChannel, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.TeleportChannel, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.TeleportChannel, gateErr);
 
             long charId = p?["char_id"]?.GetValue<long>() ?? 0;
@@ -386,7 +417,7 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("teleport_scene", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.TeleportChannel, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.TeleportChannel, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.TeleportChannel, gateErr);
 
             int sceneId = p?["scene_id"]?.GetValue<int>() ?? 0;
@@ -409,7 +440,7 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("teleport_place", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.TeleportChannel, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.TeleportChannel, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.TeleportChannel, gateErr);
 
             string destination = p?["destination"]?.GetValue<string>() ?? "";
@@ -421,9 +452,9 @@ public static class CoreCommands
             return navigator.RequestTeleportByQuery(destination, world.GetLocalSceneId(), leaveFirst);
         }));
 
-        registry.Register(new DelegateBridgeCommand("leave_hub", _ =>
+        registry.Register(new DelegateBridgeCommand("leave_hub", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.TeleportChannel, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.TeleportChannel, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.TeleportChannel, gateErr);
 
             behaviors.StopCurrent("leave_hub");
@@ -431,9 +462,9 @@ public static class CoreCommands
             return navigator.RequestLeaveSpecialScene(world.GetLocalSceneId());
         }));
 
-        registry.Register(new DelegateBridgeCommand("leave_dungeon", _ =>
+        registry.Register(new DelegateBridgeCommand("leave_dungeon", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.DungeonEnter, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.DungeonEnter, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.DungeonEnter, gateErr);
 
             behaviors.StopCurrent("leave_dungeon");
@@ -459,16 +490,16 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("set_auto_combat", p =>
         {
-            if (config.IsAdminLocked(FeaturePolicyKeys.AutoCombat))
-                return BlockedJson(config, FeaturePolicyKeys.AutoCombat, "'자동전투 지속 유지' 기능은 어드민락(2)으로 잠겨 있어 변경할 수 없습니다.");
+            bool asAdmin = IsAdminParam(p);
+            if (!config.CheckAdminOnlyGate(FeaturePolicyKeys.AutoCombat, out string gateErr, asAdmin))
+                return BlockedJson(config, FeaturePolicyKeys.AutoCombat, gateErr);
 
             bool? enable = p?["enable"] != null ? p["enable"]!.GetValue<bool>() : null;
             bool nextVal = enable ?? !autoCombat.DesiredEnabled;
-            config.TrySetFeatureMode(
-                FeaturePolicyKeys.AutoCombat,
-                nextVal ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                CommandOrigin.ExternalBridge,
-                out _);
+            var origin = asAdmin ? CommandOrigin.AdminRemote : CommandOrigin.ExternalBridge;
+            if (!config.TrySetFeaturePolicy(FeaturePolicyKeys.AutoCombat, nextVal, null, origin, out string setErr))
+                return BlockedJson(config, FeaturePolicyKeys.AutoCombat, setErr);
+
             var res = autoCombat.SetDesired(nextVal);
             onUiStateChanged?.Invoke();
             return res;
@@ -494,7 +525,9 @@ public static class CoreCommands
         {
             if (p != null)
             {
-                if (!config.IsAdminLocked(FeaturePolicyKeys.BoostMove))
+                bool asAdmin = IsAdminParam(p);
+                var origin = asAdmin ? CommandOrigin.AdminRemote : CommandOrigin.ExternalBridge;
+                if (!config.IsAdminOnly(FeaturePolicyKeys.BoostMove) || asAdmin)
                 {
                     if (p["enable_mobility_skill"] != null) config.EnableMobilitySkill = p["enable_mobility_skill"]!.GetValue<bool>();
                     if (p["enable_bunnyhop"] != null) config.EnableBunnyhop = p["enable_bunnyhop"]!.GetValue<bool>();
@@ -502,11 +535,7 @@ public static class CoreCommands
                     {
                         bool anyBoost = (p["enable_mobility_skill"]?.GetValue<bool>() ?? config.EnableMobilitySkill)
                                         || (p["enable_bunnyhop"]?.GetValue<bool>() ?? config.EnableBunnyhop);
-                        config.TrySetFeatureMode(
-                            FeaturePolicyKeys.BoostMove,
-                            anyBoost ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                            CommandOrigin.ExternalBridge,
-                            out _);
+                        config.TrySetFeaturePolicy(FeaturePolicyKeys.BoostMove, anyBoost, null, origin, out _);
                     }
                 }
                 if (p["mobility_skill_slot"] != null) config.MobilitySkillSlot = p["mobility_skill_slot"]!.GetValue<int>();
@@ -536,20 +565,12 @@ public static class CoreCommands
                 if (p["enable_emote_mimic"] != null)
                 {
                     bool em = p["enable_emote_mimic"]!.GetValue<bool>();
-                    config.TrySetFeatureMode(
-                        FeaturePolicyKeys.Emote,
-                        em ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                        CommandOrigin.ExternalBridge,
-                        out _);
+                    config.TrySetFeaturePolicy(FeaturePolicyKeys.Emote, em, null, origin, out _);
                 }
                 if (p["enable_closest_teleport"] != null)
                 {
                     bool ctp = p["enable_closest_teleport"]!.GetValue<bool>();
-                    config.TrySetFeatureMode(
-                        FeaturePolicyKeys.ClosestPortal,
-                        ctp ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                        CommandOrigin.ExternalBridge,
-                        out _);
+                    config.TrySetFeaturePolicy(FeaturePolicyKeys.ClosestPortal, ctp, null, origin, out _);
                 }
                 if (p["intra_map_tp_min_distance"] != null) config.IntraMapTeleportMinDistance = p["intra_map_tp_min_distance"]!.GetValue<float>();
                 if (p["intra_map_tp_min_gain"] != null) config.IntraMapTeleportMinGain = p["intra_map_tp_min_gain"]!.GetValue<float>();
@@ -585,7 +606,7 @@ public static class CoreCommands
                 ["enable_closest_teleport"] = config.EnableClosestTeleport,
                 ["intra_map_tp_min_distance"] = config.IntraMapTeleportMinDistance,
                 ["intra_map_tp_min_gain"] = config.IntraMapTeleportMinGain,
-                ["feature_modes"] = config.ToFeaturePoliciesJson()
+                ["feature_policies"] = config.ToFeaturePoliciesJson()
             };
         }));
 
@@ -614,7 +635,7 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("party_action", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.PartyManage, gateErr);
 
             var res = party.ExecuteAction(p);
@@ -624,7 +645,7 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("gather_resource", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.AutoGather, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.AutoGather, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.AutoGather, gateErr);
 
             string resource = p?["resource"]?.GetValue<string>() ?? "";
@@ -684,8 +705,16 @@ public static class CoreCommands
             string? emote = p?["emote"]?.GetValue<string>() ?? p?["query"]?.GetValue<string>();
             int emoteId = p?["emote_id"]?.GetValue<int>() ?? p?["id"]?.GetValue<int>() ?? 0;
             bool stop = p?["stop"]?.GetValue<bool>() ?? false;
-            if (!stop && !config.CheckFeatureExecution(FeaturePolicyKeys.Emote, out string gateErr))
+            bool asAdmin = IsAdminParam(p);
+            if (stop)
+            {
+                if (!config.CheckAdminOnlyGate(FeaturePolicyKeys.Emote, out string stopGateErr, asAdmin))
+                    return BlockedJson(config, FeaturePolicyKeys.Emote, stopGateErr);
+            }
+            else if (!config.CheckFeatureExecution(FeaturePolicyKeys.Emote, out string gateErr, asAdmin))
+            {
                 return BlockedJson(config, FeaturePolicyKeys.Emote, gateErr);
+            }
             return world.PlayStandaloneEmote(emote, emoteId, stop);
         }));
 
@@ -697,7 +726,7 @@ public static class CoreCommands
 
         registry.Register(new DelegateBridgeCommand("lua_eval", p =>
         {
-            if (!config.CheckFeatureExecution(FeaturePolicyKeys.LuaEval, out string gateErr))
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.LuaEval, out string gateErr, IsAdminParam(p)))
                 return BlockedJson(config, FeaturePolicyKeys.LuaEval, gateErr);
 
             string code = p?["code"]?.GetValue<string>() ?? "";

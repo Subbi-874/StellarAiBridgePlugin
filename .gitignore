@@ -1,12 +1,4 @@
-# Python virtual environment & caches
-mcp_bridge/.venv/
-.venv/
-**/__pycache__/
-*.py[cod]
-*.pyo
-
 # Runtime logs, local databases, and secrets
-mcp_bridge/bridge.log*
 *.log
 *.db
 *.sqlite
@@ -21,8 +13,11 @@ plugin/obj/
 bin/
 obj/
 
-# Local pre-refactor backups & IDE files
-_backup_pre_v080/
+# Local tests and deployment script (not tracked in Git)
+/plugin.tests/
+/deploy.ps1
+
+# IDE files
 .vs/
 .idea/
 *.user
@@ -31,8 +26,3 @@ _backup_pre_v080/
 # Local planning notes
 /TODO.md
 /개선점.md
-
-# Portable embedded Python runtime & packaged release bundles
-runtime/
-mcp_bridge/runtime/
-dist/

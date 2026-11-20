@@ -45,21 +45,28 @@ public static class ExtendedCommands
         LuaBridge lua,
         Action? onUiStateChanged = null)
     {
-        static JsonObject Blocked(BridgeConfig cfg, string key, string err) => new()
+        static bool IsAdminParam(JsonObject? p) => p?["as_admin"]?.GetValue<bool>() ?? false;
+
+        static JsonObject Blocked(BridgeConfig cfg, string key, string err)
         {
-            ["ok"] = false,
-            ["policy_key"] = key,
-            ["mode"] = (int)cfg.GetFeatureMode(key),
-            ["admin_locked"] = cfg.IsAdminLocked(key),
-            ["error"] = err
-        };
+            var st = cfg.GetFeaturePolicy(key);
+            return new JsonObject
+            {
+                ["ok"] = false,
+                ["policy_key"] = key,
+                ["enabled"] = st.Enabled,
+                ["admin_only"] = st.AdminOnly,
+                ["admin_locked"] = st.AdminOnly,
+                ["error"] = err
+            };
+        }
 
         // Wraps a handler with a feature-gate check so every gated command is guarded identically.
         void Gated(string method, string policyKey, Func<JsonObject?, JsonObject> handler)
         {
             registry.Register(new DelegateBridgeCommand(method, p =>
             {
-                if (!config.CheckFeatureExecution(policyKey, out string gateErr))
+                if (!config.CheckFeatureExecution(policyKey, out string gateErr, IsAdminParam(p)))
                     return Blocked(config, policyKey, gateErr);
                 return handler(p);
             }));
@@ -68,11 +75,11 @@ public static class ExtendedCommands
         void Open(string method, Func<JsonObject?, JsonObject> handler)
             => registry.Register(new DelegateBridgeCommand(method, handler));
 
-        // 1. Revive (passive auto-revive checks IsFeatureEnabled(AutoRevive); explicit command only blocked by AdminLock)
+        // 1. Revive (passive auto-revive checks IsFeatureEnabled(AutoRevive); explicit command checks AdminOnly gate)
         registry.Register(new DelegateBridgeCommand("revive", p =>
         {
-            if (config.IsAdminLocked(FeaturePolicyKeys.AutoRevive))
-                return Blocked(config, FeaturePolicyKeys.AutoRevive, "'사망 시 자동 부활 (무료)' 기능은 어드민락(2)으로 잠겨 있습니다.");
+            if (!config.CheckAdminOnlyGate(FeaturePolicyKeys.AutoRevive, out string gateErr, IsAdminParam(p)))
+                return Blocked(config, FeaturePolicyKeys.AutoRevive, gateErr);
             return revive.RequestRevive(
                 p?["type"]?.GetValue<int>(),
                 p?["dry_run"]?.GetValue<bool>() ?? false);
@@ -139,11 +146,11 @@ public static class ExtendedCommands
             return res;
         });
 
-        // 10. Auto Ready-Check (passive auto-ready checks IsFeatureEnabled(AutoReady); explicit command only blocked by AdminLock)
-        registry.Register(new DelegateBridgeCommand("ready_check", _ =>
+        // 10. Auto Ready-Check (passive auto-ready checks IsFeatureEnabled(AutoReady); explicit command checks AdminOnly gate)
+        registry.Register(new DelegateBridgeCommand("ready_check", p =>
         {
-            if (config.IsAdminLocked(FeaturePolicyKeys.AutoReady))
-                return Blocked(config, FeaturePolicyKeys.AutoReady, "'던전·레이드·월드보스 자동 준비' 기능은 어드민락(2)으로 잠겨 있습니다.");
+            if (!config.CheckAdminOnlyGate(FeaturePolicyKeys.AutoReady, out string gateErr, IsAdminParam(p)))
+                return Blocked(config, FeaturePolicyKeys.AutoReady, gateErr);
             return autoReady.ConfirmNow();
         }));
         Open("get_ready_status", _ => autoReady.GetStatusJson().WithOk());
@@ -306,8 +313,8 @@ public static class ExtendedCommands
 
         Gated("farm_monster_item", FeaturePolicyKeys.FollowMove, p =>
         {
-            if (config.IsAdminLocked(FeaturePolicyKeys.AutoCombat))
-                return Blocked(config, FeaturePolicyKeys.AutoCombat, "'자동전투 지속 유지' 기능이 어드민락(2)으로 잠겨 있습니다.");
+            if (!config.CheckAdminOnlyGate(FeaturePolicyKeys.AutoCombat, out string acGateErr, IsAdminParam(p)))
+                return Blocked(config, FeaturePolicyKeys.AutoCombat, acGateErr);
 
             string monster = (p?["monster"]?.GetValue<string>() ?? p?["query"]?.GetValue<string>() ?? "").Trim();
             int itemId = p?["item_id"]?.GetValue<int>() ?? 0;
