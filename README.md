@@ -100,12 +100,9 @@ Antigravity / Claude Code / Cursor 등의 MCP 설정(`mcp_config.json`, `.mcp.js
 
 ---
 
-## 5. 빌드 및 테스트
+## 5. 빌드
 
 ```powershell
 # 플러그인 Release 빌드 (단일 DLL 생성)
 dotnet build plugin/Stellar.AgyBridge.csproj -c Release --nologo -v minimal
-
-# 전체 xUnit 단위 및 통합 테스트 실행
-dotnet test plugin.tests/Stellar.AgyBridge.Tests.csproj --nologo -v minimal
 ```

@@ -10,10 +10,12 @@
 # .NET build artifacts
 plugin/bin/
 plugin/obj/
-plugin.tests/bin/
-plugin.tests/obj/
 bin/
 obj/
+
+# Local tests and deployment script (not tracked in Git)
+/plugin.tests/
+/deploy.ps1
 
 # IDE files
 .vs/

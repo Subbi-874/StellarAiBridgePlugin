@@ -19,6 +19,3 @@ jobs:
 
       - name: Build C# Plugin (Release)
         run: dotnet build plugin/Stellar.AgyBridge.csproj -c Release
-
-      - name: Run Embedded Bridge & Plugin Tests
-        run: dotnet test plugin.tests/Stellar.AgyBridge.Tests.csproj --nologo -v minimal
