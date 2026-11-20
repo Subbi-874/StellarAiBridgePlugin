@@ -380,7 +380,7 @@ public sealed class FollowPartyBehavior : IBehavior
             }
         }
 
-        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string followGateErr))
+        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string followGateErr, asAdmin: true))
         {
             CancelTracking("cancelled_admin_lock", followGateErr);
             return;

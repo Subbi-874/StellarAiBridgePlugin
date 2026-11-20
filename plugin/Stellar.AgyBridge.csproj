@@ -16,9 +16,21 @@
   <ItemGroup>
     <PackageReference Include="Stellar.Abstractions" Version="$(StellarVersion)" />
     <PackageReference Include="Stellar.Plugin.InteropRefs" Version="$(StellarVersion)" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" PrivateAssets="all" ExcludeAssets="runtime;build;buildTransitive;native" GeneratePathProperty="true" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="Lang\*.json" />
+    <EmbeddedResource Include="Bridge\Assets\*.json" />
+    <EmbeddedResource Include="Bridge\Assets\*.sql" />
+    <EmbeddedResource Include="Bridge\Prompts\*.md">
+      <LogicalName>Stellar.AgyBridge.Prompts.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Bridge\Prompts\response_schema.json">
+      <LogicalName>Stellar.AgyBridge.Prompts.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="$(PkgSQLitePCLRaw_lib_e_sqlite3)\runtimes\win-x64\native\e_sqlite3.dll" Condition="Exists('$(PkgSQLitePCLRaw_lib_e_sqlite3)\runtimes\win-x64\native\e_sqlite3.dll')">
+      <LogicalName>Stellar.AgyBridge.Native.e_sqlite3.dll</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

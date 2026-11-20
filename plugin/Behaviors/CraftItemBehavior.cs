@@ -204,7 +204,7 @@ public sealed class CraftItemBehavior : IBehavior
             return;
         }
 
-        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.AutoCraft, out string gateErr))
+        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.AutoCraft, out string gateErr, asAdmin: true))
         {
             Fail("admin_locked", gateErr);
             return;

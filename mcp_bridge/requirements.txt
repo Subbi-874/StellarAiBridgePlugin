@@ -1,7 +1,0 @@
-mcp>=2.3.0
-starlette>=1.0.0
-sse-starlette>=3.0.0
-uvicorn>=0.50.0
-websockets>=17.0
-pydantic>=2.10.0
-pywin32>=310; sys_platform == "win32"

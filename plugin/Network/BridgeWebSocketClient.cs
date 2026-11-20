@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Bridge.Server;
 using Stellar.AgyBridge.Commands;
 using Stellar.AgyBridge.Core;
 
@@ -19,6 +20,7 @@ public sealed class BridgeWebSocketClient : IDisposable
     private readonly CommandRegistry _commands;
     private readonly Func<JsonObject>? _capabilitiesProvider;
     private readonly Func<JsonObject>? _identityProvider;
+    private readonly LeaderBridgeHost? _bridgeHost;
 
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _sendLock = new(1, 1);
@@ -26,6 +28,8 @@ public sealed class BridgeWebSocketClient : IDisposable
     private Task? _loopTask;
 
     public bool IsConnected => _ws?.State == WebSocketState.Open;
+    public BridgeHostRole HostRole => _bridgeHost?.Role ?? BridgeHostRole.External;
+    public int HostPort => _bridgeHost?.Port ?? 0;
 
     public BridgeWebSocketClient(
         IPluginLog log,
@@ -33,7 +37,8 @@ public sealed class BridgeWebSocketClient : IDisposable
         MainThreadDispatcher dispatcher,
         CommandRegistry commands,
         Func<JsonObject>? capabilitiesProvider = null,
-        Func<JsonObject>? identityProvider = null)
+        Func<JsonObject>? identityProvider = null,
+        LeaderBridgeHost? bridgeHost = null)
     {
         _log = log;
         _config = config;
@@ -41,6 +46,7 @@ public sealed class BridgeWebSocketClient : IDisposable
         _commands = commands;
         _capabilitiesProvider = capabilitiesProvider;
         _identityProvider = identityProvider;
+        _bridgeHost = bridgeHost;
     }
 
     public void Start()
@@ -59,6 +65,9 @@ public sealed class BridgeWebSocketClient : IDisposable
     {
         while (!ct.IsCancellationRequested)
         {
+            // Ensure an embedded Leader hub (or detect existing Leader/Follower) before connecting.
+            _bridgeHost?.EnsureLeaderOrFollower();
+
             using var ws = new ClientWebSocket();
             _ws = ws;
 
@@ -69,12 +78,15 @@ public sealed class BridgeWebSocketClient : IDisposable
                     ws.Options.SetRequestHeader("Authorization", $"Bearer {_config.AuthToken}");
                 }
 
-                var uri = new Uri(_config.BridgeUrl);
+                var rawUri = new Uri(_config.BridgeUrl);
+                var uri = rawUri.Host == "0.0.0.0"
+                    ? new UriBuilder(rawUri) { Host = "127.0.0.1" }.Uri
+                    : rawUri;
                 using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 connectCts.CancelAfter(TimeSpan.FromSeconds(5));
 
                 await ws.ConnectAsync(uri, connectCts.Token).ConfigureAwait(false);
-                _log.Info($"[AgyBridge][WS] Connected to {_config.BridgeUrl}");
+                _log.Info($"[AgyBridge][WS] Connected to {uri} ({HostRole})");
 
                 // Send hello handshake with supported methods
                 var methodsArr = new JsonArray();
@@ -104,8 +116,7 @@ public sealed class BridgeWebSocketClient : IDisposable
             }
             catch (Exception)
             {
-                // Auto-start local background bridge daemon if not running yet
-                BridgeDaemonSpawner.TryEnsureRunning(_config, _log);
+                // Transient disconnect or Follower failover; next iteration retries Leader election + connect.
             }
             finally
             {

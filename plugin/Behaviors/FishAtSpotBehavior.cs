@@ -138,7 +138,7 @@ public sealed class FishAtSpotBehavior : IBehavior
     {
         if (IsFinished || CurrentSpot == null) return;
 
-        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.AutoFish, out string gateErr))
+        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.AutoFish, out string gateErr, asAdmin: true))
         {
             Fail("admin_locked", gateErr);
             return;

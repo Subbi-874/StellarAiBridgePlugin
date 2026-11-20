@@ -8,6 +8,7 @@ using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters;
 using Stellar.AgyBridge.Behaviors;
+using Stellar.AgyBridge.Bridge.Server;
 using Stellar.AgyBridge.Core;
 using Stellar.AgyBridge.Gathering;
 using Stellar.AgyBridge.Locomotion;
@@ -33,13 +34,6 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private const float AdminMinHeight = 500f;
 
     private static readonly float[] OpacitySteps = { 0.96f, 1.00f, 0.88f, 0.75f };
-
-    private static readonly string[] PermissionCodes =
-    {
-        "party_or_whitelist",
-        "whitelist_only",
-        "everyone"
-    };
 
     private static readonly string[] LlmBackendCodes =
     {
@@ -103,6 +97,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private string _activeTab = "control";
     private string _adminTab = "all";
     private string _emoteInput = "";
+    private string _triggerWordInput = "";
     private string _blockedWordInput = "";
 
     // Shared cached social roster for UI pickers
@@ -138,7 +133,6 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private bool _adminExpandedOnce;
 
     // Localized dropdown label caches rebuilt on language switch
-    private IReadOnlyList<string> _permissionLabels = Array.Empty<string>();
     private IReadOnlyList<string> _llmBackendLabels = Array.Empty<string>();
     private IReadOnlyList<string> _cliFlavorLabels = Array.Empty<string>();
 
@@ -190,12 +184,6 @@ public sealed class AgyBridgeUiWindow : IDisposable
 
     private void RebuildLocalizedCaches()
     {
-        _permissionLabels = new[]
-        {
-            T("perm.scope.party_or_whitelist"),
-            T("perm.scope.whitelist_only"),
-            T("perm.scope.everyone")
-        };
         _llmBackendLabels = new[]
         {
             T("ai.backend.local"),
@@ -737,16 +725,18 @@ public sealed class AgyBridgeUiWindow : IDisposable
             : T(labelKey);
         bool IsAdminEditable() => adminPanelMode || _services.Windows.IsLayoutEditing;
 
-        void ApplyStage(FeatureGateMode target)
+        void ToggleEnabled()
         {
-            if (IsAdminEditable())
-            {
-                _config.TrySetFeatureMode(policyKey, target, CommandOrigin.AdminLayoutUi, out _);
-                MarkDirty();
-                return;
-            }
+            FeaturePolicyState cur = _config.GetFeaturePolicy(policyKey);
+            CommandOrigin origin = IsAdminEditable() ? CommandOrigin.AdminLayoutUi : CommandOrigin.LocalUi;
+            if (!_config.TrySetFeaturePolicy(policyKey, !cur.Enabled, null, origin, out string err) && !string.IsNullOrEmpty(err))
+                _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
+            MarkDirty();
+        }
 
-            if (target == FeatureGateMode.AdminLock || _config.IsAdminLocked(policyKey))
+        void ToggleAdminOnly()
+        {
+            if (!IsAdminEditable())
             {
                 if (_adminWindow != null)
                 {
@@ -761,22 +751,21 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 return;
             }
 
-            if (!_config.TrySetFeatureMode(policyKey, target, CommandOrigin.LocalUi, out string err) && !string.IsNullOrEmpty(err))
-            {
-                _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
-            }
+            FeaturePolicyState cur = _config.GetFeaturePolicy(policyKey);
+            _config.TrySetFeaturePolicy(policyKey, null, !cur.AdminOnly, CommandOrigin.AdminLayoutUi, out _);
             MarkDirty();
         }
 
         return new RowElement(new HudElement[]
         {
             new TextElement(
-                () => _config.IsAdminLocked(policyKey) ? $"🔒 {GetRowLabel()}" : GetRowLabel(),
-                () => _config.GetFeatureMode(policyKey) switch
+                () => _config.IsAdminOnly(policyKey) ? $"🔒 {GetRowLabel()}" : GetRowLabel(),
+                () =>
                 {
-                    FeatureGateMode.AdminLock => DangerColor,
-                    FeatureGateMode.Enabled => SuccessColor,
-                    _ => MutedColor
+                    FeaturePolicyState st = _config.GetFeaturePolicy(policyKey);
+                    if (!st.Enabled)
+                        return MutedColor;
+                    return st.AdminOnly ? CautionColor : SuccessColor;
                 },
                 false,
                 0f,
@@ -784,30 +773,22 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 false),
             new SpacerElement(0f, 0f),
             new ButtonElement(
-                () => T("gate.btn.off"),
-                () => ApplyStage(FeatureGateMode.Disabled),
-                () => IsAdminEditable() || !_config.IsAdminLocked(policyKey),
+                () => _config.IsFeatureEnabled(policyKey) ? T("gate.btn.enabled_on") : T("gate.btn.enabled_off"),
+                ToggleEnabled,
+                null,
                 MenuButtonStyle.Glass,
-                () => _config.GetFeatureMode(policyKey) == FeatureGateMode.Disabled,
-                52f,
+                () => _config.IsFeatureEnabled(policyKey),
+                64f,
                 null),
             new ButtonElement(
-                () => T("gate.btn.on"),
-                () => ApplyStage(FeatureGateMode.Enabled),
-                () => IsAdminEditable() || !_config.IsAdminLocked(policyKey),
-                MenuButtonStyle.Glass,
-                () => _config.GetFeatureMode(policyKey) == FeatureGateMode.Enabled,
-                50f,
-                null),
-            new ButtonElement(
-                () => T("gate.btn.lock"),
-                () => ApplyStage(FeatureGateMode.AdminLock),
+                () => _config.IsAdminOnly(policyKey) ? T("gate.btn.admin_locked") : T("gate.btn.admin_open"),
+                ToggleAdminOnly,
                 null,
                 MenuButtonStyle.Outline,
-                () => _config.GetFeatureMode(policyKey) == FeatureGateMode.AdminLock,
-                52f,
+                () => _config.IsAdminOnly(policyKey),
+                90f,
                 null)
-        }, 4f, RowJustify.Left);
+        }, 6f, RowJustify.Left);
     }
 
     private HudElement BuildCategoryTabRow(Func<string> getCat, Action<string> setCat, bool includeRefresh = false)
@@ -900,12 +881,26 @@ public sealed class AgyBridgeUiWindow : IDisposable
         return TF("eco.status_fmt", modeDesc, stateNote, wsMb, privMb);
     }
 
+    private string FormatBridgePillLabel()
+    {
+        if (!_wsClient.IsConnected)
+            return T("header.bridge_starting");
+        if (_wsClient.HostPort > 0)
+        {
+            if (_wsClient.HostRole == BridgeHostRole.Leader)
+                return TF("header.bridge_leader_fmt", _wsClient.HostPort);
+            if (_wsClient.HostRole == BridgeHostRole.Follower)
+                return TF("header.bridge_follower_fmt", _wsClient.HostPort);
+        }
+        return T("header.bridge_connected");
+    }
+
     private HudElement BuildHeaderBar()
     {
         var topRow = new RowElement(new HudElement[]
         {
             new PillElement(
-                () => _wsClient.IsConnected ? T("header.bridge_connected") : T("header.bridge_starting"),
+                FormatBridgePillLabel,
                 () => _wsClient.IsConnected ? SuccessColor : CautionColor),
             new CellElement(
                 new TextElement(GetActiveBehaviorSummary, () => AccentColor, true, 0f, TextAlign.Left, false)
@@ -1120,14 +1115,14 @@ public sealed class AgyBridgeUiWindow : IDisposable
                         () => T("control.btn.create_party"),
                         () =>
                         {
-                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string err))
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string err, asAdmin: true))
                             {
                                 _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
                                 return;
                             }
                             _party.CreateParty(autoAccept: true, leaveFirst: false);
                         },
-                        () => !_config.IsAdminLocked(FeaturePolicyKeys.PartyManage),
+                        () => _config.IsFeatureEnabled(FeaturePolicyKeys.PartyManage),
                         MenuButtonStyle.Outline,
                         null,
                         152f,
@@ -1136,14 +1131,14 @@ public sealed class AgyBridgeUiWindow : IDisposable
                         () => T("control.btn.leave_party"),
                         () =>
                         {
-                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string err))
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.PartyManage, out string err, asAdmin: true))
                             {
                                 _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
                                 return;
                             }
                             _party.LeaveParty();
                         },
-                        () => !_config.IsAdminLocked(FeaturePolicyKeys.PartyManage),
+                        () => _config.IsFeatureEnabled(FeaturePolicyKeys.PartyManage),
                         MenuButtonStyle.Glass,
                         null,
                         104f,
@@ -1152,7 +1147,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                         () => T("control.btn.leave_dungeon"),
                         () =>
                         {
-                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.DungeonEnter, out string err))
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.DungeonEnter, out string err, asAdmin: true))
                             {
                                 _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
                                 return;
@@ -1166,7 +1161,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                                 2.5f);
                             MarkDirty();
                         },
-                        () => !_config.IsAdminLocked(FeaturePolicyKeys.DungeonEnter),
+                        () => _config.IsFeatureEnabled(FeaturePolicyKeys.DungeonEnter),
                         MenuButtonStyle.Glass,
                         null,
                         122f,
@@ -1213,7 +1208,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
             new ButtonElement(
                 () => T("control.picker.btn_follow"),
                 () => SubmitManualFollowInput(_followSearch),
-                () => !_config.IsAdminLocked(FeaturePolicyKeys.FollowMove),
+                () => _config.IsFeatureEnabled(FeaturePolicyKeys.FollowMove),
                 MenuButtonStyle.Outline,
                 null,
                 72f,
@@ -1314,7 +1309,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 string q = (submitted ?? "").Trim();
                 if (!string.IsNullOrEmpty(q))
                 {
-                    if (!_config.CheckFeatureExecution(FeaturePolicyKeys.Emote, out string err))
+                    if (!_config.CheckFeatureExecution(FeaturePolicyKeys.Emote, out string err, asAdmin: true))
                     {
                         _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
                         return;
@@ -1342,7 +1337,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                         () => T("control.emote.btn_play"),
                         () =>
                         {
-                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.Emote, out string err))
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.Emote, out string err, asAdmin: true))
                             {
                                 _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
                                 return;
@@ -1351,7 +1346,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                                 _world.PlayStandaloneEmote(_emoteInput);
                             MarkDirty();
                         },
-                        () => !_config.IsAdminLocked(FeaturePolicyKeys.Emote),
+                        () => _config.IsFeatureEnabled(FeaturePolicyKeys.Emote),
                         MenuButtonStyle.Outline,
                         null,
                         72f,
@@ -1518,6 +1513,94 @@ public sealed class AgyBridgeUiWindow : IDisposable
         return new ColumnElement(new HudElement[] { combatCard, movementCard, socialCraftCard }, 10f);
     }
 
+    private string GetCurrentCharacterName()
+    {
+        try
+        {
+            if (_services.ClientState.Phase == GamePhase.World && _services.PlayerState.IsAvailable)
+                return (_services.PlayerState.Name ?? "").Trim();
+        }
+        catch
+        {
+            // Ignore when player state is unavailable during transitions.
+        }
+        return "";
+    }
+
+    private List<string> GetEditableTriggerSeed()
+    {
+        var list = new List<string>();
+        if (_config.ChatTriggerWordsCustomized)
+        {
+            list.AddRange(_config.ChatTriggerWords);
+        }
+        else
+        {
+            string curName = GetCurrentCharacterName();
+            if (!string.IsNullOrEmpty(curName))
+                list.Add(curName);
+        }
+        return list;
+    }
+
+    private void AddTriggerWordsFromInput(string? rawInput)
+    {
+        List<string> added = BridgeConfig.ParseTriggerWords(rawInput);
+        if (added.Count == 0)
+            return;
+
+        List<string> next = GetEditableTriggerSeed();
+        next.AddRange(added);
+        _config.SetTriggerWords(next, customized: true);
+        _config.SaveAndNotifyChatSettings();
+        _triggerWordInput = "";
+        MarkDirty();
+    }
+
+    private void RemoveTriggerWordsFromInput(string? rawInput)
+    {
+        var removed = new HashSet<string>(BridgeConfig.ParseTriggerWords(rawInput), StringComparer.OrdinalIgnoreCase);
+        if (removed.Count == 0)
+            return;
+
+        List<string> next = GetEditableTriggerSeed();
+        next.RemoveAll(w => removed.Contains(w));
+        _config.SetTriggerWords(next, customized: true);
+        _config.SaveAndNotifyChatSettings();
+        _triggerWordInput = "";
+        MarkDirty();
+    }
+
+    private void ClearTriggerWords()
+    {
+        _config.SetTriggerWords(Array.Empty<string>(), customized: true);
+        _config.SaveAndNotifyChatSettings();
+        _triggerWordInput = "";
+        MarkDirty();
+    }
+
+    private void ResetTriggerWordsToNickname()
+    {
+        _config.ResetTriggerWordsToDefault();
+        _config.SaveAndNotifyChatSettings();
+        _triggerWordInput = "";
+        MarkDirty();
+    }
+
+    private string FormatTriggerStatusText()
+    {
+        if (!_config.ChatTriggerWordsCustomized)
+        {
+            string curName = GetCurrentCharacterName();
+            return !string.IsNullOrEmpty(curName)
+                ? TF("chat.trigger.default_fmt", curName)
+                : T("chat.trigger.default_pending");
+        }
+        if (_config.ChatTriggerWords.Count == 0)
+            return T("chat.trigger.empty_warning");
+        return TF("chat.trigger.list_fmt", string.Join(", ", _config.ChatTriggerWords));
+    }
+
     private HudElement BuildChatTab()
     {
         var masterCard = MakeSectionCard(
@@ -1526,6 +1609,68 @@ public sealed class AgyBridgeUiWindow : IDisposable
             new HudElement[]
             {
                 MakeFeatureGateRow(FeaturePolicyKeys.ChatMonitor)
+            });
+
+        var triggerInput = new InputElement(
+            Get: () => _triggerWordInput,
+            Submit: submitted => AddTriggerWordsFromInput(submitted),
+            Width: 210f,
+            OnChange: v => _triggerWordInput = v ?? "")
+        {
+            SingleLine = true,
+            Placeholder = () => T("chat.trigger.placeholder")
+        };
+
+        var triggerCard = MakeSectionCard(
+            "chat.trigger.title",
+            "chat.trigger.subtitle",
+            new HudElement[]
+            {
+                new TextElement(
+                    FormatTriggerStatusText,
+                    () => (_config.ChatTriggerWordsCustomized && _config.ChatTriggerWords.Count == 0)
+                        ? CautionColor
+                        : PrimaryTextColor,
+                    false,
+                    0f,
+                    TextAlign.Left,
+                    true),
+                new RowElement(new HudElement[]
+                {
+                    triggerInput,
+                    new ButtonElement(
+                        () => T("chat.trigger.btn_add"),
+                        () => AddTriggerWordsFromInput(_triggerWordInput),
+                        null,
+                        MenuButtonStyle.Outline,
+                        null,
+                        62f,
+                        null),
+                    new ButtonElement(
+                        () => T("chat.trigger.btn_remove"),
+                        () => RemoveTriggerWordsFromInput(_triggerWordInput),
+                        null,
+                        MenuButtonStyle.Glass,
+                        null,
+                        62f,
+                        null),
+                    new ButtonElement(
+                        () => T("chat.trigger.btn_clear"),
+                        ClearTriggerWords,
+                        null,
+                        MenuButtonStyle.Glass,
+                        () => _config.ChatTriggerWordsCustomized && _config.ChatTriggerWords.Count == 0,
+                        70f,
+                        null),
+                    new ButtonElement(
+                        () => T("chat.trigger.btn_reset"),
+                        ResetTriggerWordsToNickname,
+                        null,
+                        MenuButtonStyle.Glass,
+                        () => !_config.ChatTriggerWordsCustomized,
+                        76f,
+                        null)
+                }, 6f, RowJustify.Left)
             });
 
         var recvCard = MakeSectionCard(
@@ -1571,7 +1716,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 }, 8f, RowJustify.Left)
             });
 
-        return new ColumnElement(new HudElement[] { masterCard, recvCard, sendCard }, 10f);
+        return new ColumnElement(new HudElement[] { masterCard, triggerCard, recvCard, sendCard }, 10f);
     }
 
     private HudElement BuildAiTab()
@@ -1820,31 +1965,6 @@ public sealed class AgyBridgeUiWindow : IDisposable
             null,
             new HudElement[]
             {
-                MakeLabeledFieldRow(
-                    () => T("perm.field.scope"),
-                    new DropdownElement(
-                        GetPermissionIndex,
-                        () => _permissionLabels,
-                        idx =>
-                        {
-                            if (idx >= 0 && idx < PermissionCodes.Length)
-                            {
-                                _config.CommandPermissionMode = PermissionCodes[idx];
-                                _config.SaveAndNotifyChatSettings();
-                                _window?.MarkDirty();
-                            }
-                        },
-                        310f)),
-                MakeToggleRow(
-                    "perm.toggle.non_commander_reply",
-                    () => _config.AllowNonCommanderChatReply,
-                    v =>
-                    {
-                        _config.AllowNonCommanderChatReply = v;
-                        _config.SaveAndNotifyChatSettings();
-                        _window?.MarkDirty();
-                    }),
-                new SeparatorElement(false),
                 new RowElement(new HudElement[]
                 {
                     new TextElement(
@@ -2320,7 +2440,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
 
     private void StartFollowFromUi(string target)
     {
-        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string err))
+        if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string err, asAdmin: true))
         {
             _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
             return;
@@ -2341,16 +2461,6 @@ public sealed class AgyBridgeUiWindow : IDisposable
             continuous: true,
             traversal: _traversal);
         _behaviors.StartBehavior(behavior);
-    }
-
-    private int GetPermissionIndex()
-    {
-        for (int i = 0; i < PermissionCodes.Length; i++)
-        {
-            if (string.Equals(_config.CommandPermissionMode, PermissionCodes[i], StringComparison.OrdinalIgnoreCase))
-                return i;
-        }
-        return 0;
     }
 
     private string GetActiveBehaviorSummary()

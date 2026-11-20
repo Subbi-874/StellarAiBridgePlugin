@@ -48,7 +48,6 @@ public sealed class BridgeConfig
     public string AuthToken { get; private set; }
     public int ReconnectDelayMs { get; private set; }
     public bool AutoStartLocalBridge { get; set; }
-    public string LocalBridgeDir { get; set; }
     public float DefaultFollowDistance { get; private set; }
     public float FollowResumeHysteresis { get; private set; }
     public float DefaultArrivalRadius { get; private set; }
@@ -112,14 +111,11 @@ public sealed class BridgeConfig
     public bool MonitorWhisper => IsFeatureEnabled(FeaturePolicyKeys.RecvWhisper);
     public bool MonitorSay => IsFeatureEnabled(FeaturePolicyKeys.RecvSay);
 
-    private readonly Dictionary<string, FeatureGateMode> _featureModes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, FeaturePolicyState> _featurePolicies = new(StringComparer.OrdinalIgnoreCase);
     public List<string> BlockedChatWords { get; private set; } = new();
+    public bool ChatTriggerWordsCustomized { get; set; }
+    public List<string> ChatTriggerWords { get; private set; } = new();
 
-    /// <summary>
-    /// "party_or_whitelist" | "whitelist_only" | "everyone"
-    /// </summary>
-    public string CommandPermissionMode { get; set; }
-    public bool AllowNonCommanderChatReply { get; set; }
     public List<CommanderRecord> CommanderEntries { get; private set; } = new();
     public IReadOnlyList<string> AuthorizedCommanders => CommanderEntries.Select(c => c.ToConfigToken()).ToList();
 
@@ -141,7 +137,7 @@ public sealed class BridgeConfig
     public bool EcoAutoPauseOnFocus { get; set; }
 
     public event Action? ChatSettingsChanged;
-    public event Action<string, FeatureGateMode>? FeatureModeChanged;
+    public event Action<string, FeaturePolicyState>? FeaturePolicyChanged;
 
     public BridgeConfig(IPluginConfig config, ILocalization? localization = null)
     {
@@ -151,7 +147,6 @@ public sealed class BridgeConfig
         AuthToken = _cfg.Get<string>("auth_token", "") ?? "";
         ReconnectDelayMs = _cfg.Get<int>("reconnect_delay_ms", 2000);
         AutoStartLocalBridge = _cfg.Get<bool>("auto_start_local_bridge", true);
-        LocalBridgeDir = _cfg.Get<string>("local_bridge_dir", "") ?? "";
         DefaultFollowDistance = _cfg.Get<float>("default_follow_distance", 2.5f);
         FollowResumeHysteresis = _cfg.Get<float>("follow_resume_hysteresis", 1.0f);
         DefaultArrivalRadius = _cfg.Get<float>("default_arrival_radius", 1.8f);
@@ -201,37 +196,58 @@ public sealed class BridgeConfig
         bool legacyParty = _cfg.Get<bool>("monitor_party", true);
         bool legacyWhisper = _cfg.Get<bool>("monitor_whisper", false);
         bool legacySay = _cfg.Get<bool>("monitor_say", false);
+        bool migratedV2 = _cfg.Get<bool>("policy_v2_orthogonal_migrated", false);
 
         foreach (var desc in FeaturePolicyCatalog.All)
         {
-            int saved = _cfg.Get<int>($"policy.{desc.Key}", -1);
-            if (saved is 0 or 1 or 2)
+            if (migratedV2)
             {
-                _featureModes[desc.Key] = (FeatureGateMode)saved;
+                bool en = _cfg.Get<bool>($"policy.{desc.Key}.enabled", desc.DefaultEnabled);
+                bool ad = _cfg.Get<bool>($"policy.{desc.Key}.admin_only", desc.DefaultAdminOnly);
+                _featurePolicies[desc.Key] = new FeaturePolicyState(en, ad);
+                continue;
+            }
+
+            int savedLegacy = _cfg.Get<int>($"policy.{desc.Key}", -1);
+            if (savedLegacy == 0)
+            {
+                _featurePolicies[desc.Key] = new FeaturePolicyState(false, false);
+            }
+            else if (savedLegacy == 1)
+            {
+                _featurePolicies[desc.Key] = new FeaturePolicyState(true, false);
+            }
+            else if (savedLegacy == 2)
+            {
+                _featurePolicies[desc.Key] = new FeaturePolicyState(desc.DefaultEnabled, true);
             }
             else
             {
-                _featureModes[desc.Key] = desc.Key switch
+                bool legacyEnabled = desc.Key switch
                 {
-                    FeaturePolicyKeys.BoostMove => (_enableMobilitySkill || _enableBunnyhop) ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                    FeaturePolicyKeys.ClosestPortal => legacyClosestTp ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                    FeaturePolicyKeys.Emote => legacyEmoteMimic ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                    FeaturePolicyKeys.ChatMonitor => legacyChatMon ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                    FeaturePolicyKeys.RecvGuild => legacyGuild ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                    FeaturePolicyKeys.RecvParty => legacyParty ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                    FeaturePolicyKeys.RecvWhisper => legacyWhisper ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                    FeaturePolicyKeys.RecvSay => legacySay ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                    _ => desc.DefaultMode
+                    FeaturePolicyKeys.BoostMove => _enableMobilitySkill || _enableBunnyhop,
+                    FeaturePolicyKeys.ClosestPortal => legacyClosestTp,
+                    FeaturePolicyKeys.Emote => legacyEmoteMimic,
+                    FeaturePolicyKeys.ChatMonitor => legacyChatMon,
+                    FeaturePolicyKeys.RecvGuild => legacyGuild,
+                    FeaturePolicyKeys.RecvParty => legacyParty,
+                    FeaturePolicyKeys.RecvWhisper => legacyWhisper,
+                    FeaturePolicyKeys.RecvSay => legacySay,
+                    _ => desc.DefaultEnabled
                 };
+                _featurePolicies[desc.Key] = new FeaturePolicyState(legacyEnabled, desc.DefaultAdminOnly);
             }
         }
 
+        if (!migratedV2)
+            _cfg.Set("policy_v2_orthogonal_migrated", true);
+
         if (!_cfg.Get<bool>("v091_passive_defaults_migrated", false))
         {
-            if (_featureModes.TryGetValue(FeaturePolicyKeys.AutoReady, out var arMode) && arMode == FeatureGateMode.Enabled)
-                _featureModes[FeaturePolicyKeys.AutoReady] = FeatureGateMode.Disabled;
-            if (_featureModes.TryGetValue(FeaturePolicyKeys.AutoRevive, out var rvMode) && rvMode == FeatureGateMode.Enabled)
-                _featureModes[FeaturePolicyKeys.AutoRevive] = FeatureGateMode.Disabled;
+            if (_featurePolicies.TryGetValue(FeaturePolicyKeys.AutoReady, out var arState) && arState.Enabled)
+                _featurePolicies[FeaturePolicyKeys.AutoReady] = arState with { Enabled = false };
+            if (_featurePolicies.TryGetValue(FeaturePolicyKeys.AutoRevive, out var rvState) && rvState.Enabled)
+                _featurePolicies[FeaturePolicyKeys.AutoRevive] = rvState with { Enabled = false };
             _cfg.Set("v091_passive_defaults_migrated", true);
         }
 
@@ -241,8 +257,8 @@ public sealed class BridgeConfig
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        CommandPermissionMode = _cfg.Get<string>("command_permission_mode", "party_or_whitelist") ?? "party_or_whitelist";
-        AllowNonCommanderChatReply = _cfg.Get<bool>("allow_non_commander_chat_reply", true);
+        ChatTriggerWordsCustomized = _cfg.Get<bool>("chat_trigger_words_customized", false);
+        ChatTriggerWords = ParseTriggerWords(_cfg.Get<string>("chat_trigger_words", ""));
 
         string rawCommanders = _cfg.Get<string>("authorized_commanders", "") ?? "";
         CommanderEntries = ParseCommanderList(rawCommanders);
@@ -296,15 +312,17 @@ public sealed class BridgeConfig
         Save();
     }
 
-    public FeatureGateMode GetFeatureMode(string key)
+    public FeaturePolicyState GetFeaturePolicy(string key)
     {
-        if (_featureModes.TryGetValue(key ?? "", out var m))
-            return m;
-        return FeaturePolicyCatalog.Find(key ?? "")?.DefaultMode ?? FeatureGateMode.Enabled;
+        if (_featurePolicies.TryGetValue(key ?? "", out var state))
+            return state;
+        var desc = FeaturePolicyCatalog.Find(key ?? "");
+        return desc != null ? new FeaturePolicyState(desc.DefaultEnabled, desc.DefaultAdminOnly) : new FeaturePolicyState(true, false);
     }
 
-    public bool IsFeatureEnabled(string key) => GetFeatureMode(key) == FeatureGateMode.Enabled;
-    public bool IsAdminLocked(string key) => GetFeatureMode(key) == FeatureGateMode.AdminLock;
+    public bool IsFeatureEnabled(string key) => GetFeaturePolicy(key).Enabled;
+    public bool IsAdminOnly(string key) => GetFeaturePolicy(key).AdminOnly;
+    public bool IsAdminLocked(string key) => IsAdminOnly(key);
 
     private string LocFormat(string key, string fallbackTemplate, params object[] args)
     {
@@ -317,22 +335,38 @@ public sealed class BridgeConfig
         return args.Length == 0 ? fallbackTemplate : string.Format(CultureInfo.InvariantCulture, fallbackTemplate, args);
     }
 
-    public bool CheckFeatureExecution(string key, out string error)
+    public bool CheckAdminOnlyGate(string key, out string error, bool asAdmin = false)
     {
-        var mode = GetFeatureMode(key);
-        if (mode == FeatureGateMode.Enabled)
+        var state = GetFeaturePolicy(key);
+        if (state.AdminOnly && !asAdmin)
         {
-            error = "";
-            return true;
+            string label = FeaturePolicyCatalog.GetLocalizedLabel(key, _loc);
+            error = LocFormat("policy.err.admin_locked_fmt", "'{0}' 기능은 관리자 전용(🔒) 기능입니다. 관리자만 실행할 수 있습니다.", label);
+            return false;
         }
-        string label = FeaturePolicyCatalog.GetLocalizedLabel(key, _loc);
-        error = mode == FeatureGateMode.AdminLock
-            ? LocFormat("policy.err.admin_locked_fmt", "'{0}' 기능은 어드민락(2) 잠금 상태이므로 실행할 수 없습니다.", label)
-            : LocFormat("policy.err.disabled_fmt", "'{0}' 기능이 비활성(0) 상태입니다.", label);
-        return false;
+        error = "";
+        return true;
     }
 
-    public bool TrySetFeatureMode(string key, FeatureGateMode nextMode, CommandOrigin origin, out string error)
+    public bool CheckFeatureExecution(string key, out string error, bool asAdmin = false)
+    {
+        var state = GetFeaturePolicy(key);
+        string label = FeaturePolicyCatalog.GetLocalizedLabel(key, _loc);
+        if (state.AdminOnly && !asAdmin)
+        {
+            error = LocFormat("policy.err.admin_locked_fmt", "'{0}' 기능은 관리자 전용(🔒) 기능입니다. 관리자만 실행할 수 있습니다.", label);
+            return false;
+        }
+        if (!state.Enabled)
+        {
+            error = LocFormat("policy.err.disabled_fmt", "'{0}' 기능이 꺼져(OFF) 있습니다. 먼저 켜고 실행해 주세요.", label);
+            return false;
+        }
+        error = "";
+        return true;
+    }
+
+    public bool TrySetFeaturePolicy(string key, bool? enabled, bool? adminOnly, CommandOrigin origin, out string error)
     {
         var desc = FeaturePolicyCatalog.Find(key);
         if (desc == null)
@@ -341,31 +375,34 @@ public sealed class BridgeConfig
             return false;
         }
 
+        bool isAdminOrigin = origin is CommandOrigin.LocalUi or CommandOrigin.AdminLayoutUi or CommandOrigin.AdminRemote;
         string label = FeaturePolicyCatalog.GetLocalizedLabel(desc.Key, _loc);
-        var cur = GetFeatureMode(desc.Key);
-        if (cur == FeatureGateMode.AdminLock && origin != CommandOrigin.AdminLayoutUi)
+        var cur = GetFeaturePolicy(desc.Key);
+
+        if (adminOnly.HasValue && adminOnly.Value != cur.AdminOnly && !isAdminOrigin)
         {
-            error = LocFormat("policy.err.locked_change_fmt", "'{0}' 기능은 어드민락(2)으로 잠겨 있어 변경할 수 없습니다. (스텔라 어드민락/레이아웃 설정창에서만 해제 가능)", label);
+            error = LocFormat("policy.err.lock_only_admin", "관리자 전용(🔒) 설정 및 해제는 관리자만 할 수 있습니다.");
             return false;
         }
-        if (nextMode == FeatureGateMode.AdminLock && origin != CommandOrigin.AdminLayoutUi)
+        if (enabled.HasValue && enabled.Value != cur.Enabled && cur.AdminOnly && !isAdminOrigin)
         {
-            error = LocFormat("policy.err.lock_only_admin", "어드민락(2) 지정은 인게임 스텔라 어드민락/레이아웃 설정창에서만 가능합니다.");
+            error = LocFormat("policy.err.locked_change_fmt", "'{0}' 기능은 관리자 전용(🔒)으로 잠겨 있어 관리자만 ON/OFF를 변경할 수 있습니다.", label);
             return false;
         }
 
+        var next = new FeaturePolicyState(enabled ?? cur.Enabled, adminOnly ?? cur.AdminOnly);
         error = "";
-        if (cur == nextMode) return true;
+        if (next == cur) return true;
 
-        _featureModes[desc.Key] = nextMode;
-        if (desc.Key == FeaturePolicyKeys.BoostMove && nextMode == FeatureGateMode.Enabled && !_enableMobilitySkill && !_enableBunnyhop)
+        _featurePolicies[desc.Key] = next;
+        if (desc.Key == FeaturePolicyKeys.BoostMove && next.Enabled && !_enableMobilitySkill && !_enableBunnyhop)
         {
             _enableMobilitySkill = true;
             _enableBunnyhop = true;
         }
 
         Save();
-        FeatureModeChanged?.Invoke(desc.Key, nextMode);
+        FeaturePolicyChanged?.Invoke(desc.Key, next);
         ChatSettingsChanged?.Invoke();
         return true;
     }
@@ -402,7 +439,14 @@ public sealed class BridgeConfig
     {
         var obj = new JsonObject();
         foreach (var desc in FeaturePolicyCatalog.All)
-            obj[desc.Key] = (int)GetFeatureMode(desc.Key);
+        {
+            var st = GetFeaturePolicy(desc.Key);
+            obj[desc.Key] = new JsonObject
+            {
+                ["enabled"] = st.Enabled,
+                ["admin_only"] = st.AdminOnly
+            };
+        }
         return obj;
     }
 
@@ -429,6 +473,7 @@ public sealed class BridgeConfig
         return list;
     }
 
+    public bool IsAdminUid(long uid) => IsCommanderUid(uid);
     public bool IsCommanderUid(long uid) => uid > 0 && CommanderEntries.Any(c => c.Uid == uid);
 
     public void AddOrUpdateCommander(long uid, string name)
@@ -617,17 +662,20 @@ public sealed class BridgeConfig
             });
         }
 
+        var trigArr = new JsonArray();
+        foreach (var tw in ChatTriggerWords) trigArr.Add(tw);
+
         return new JsonObject
         {
             ["ui_language"] = ActiveUiLanguage,
             ["enabled"] = ChatMonitorEnabled,
             ["channels"] = chArr,
-            ["permission_mode"] = CommandPermissionMode,
-            ["allow_non_commander_reply"] = AllowNonCommanderChatReply,
+            ["trigger_words_customized"] = ChatTriggerWordsCustomized,
+            ["trigger_words"] = trigArr,
             ["authorized_commanders"] = cmdArr,
             ["authorized_commander_uids"] = uidArr,
             ["authorized_commander_entries"] = entriesArr,
-            ["feature_modes"] = ToFeaturePoliciesJson(),
+            ["feature_policies"] = ToFeaturePoliciesJson(),
             ["llm_settings"] = new JsonObject
             {
                 ["backend"] = LlmBackend,
@@ -647,14 +695,13 @@ public sealed class BridgeConfig
     public void ApplyChatSettingsFromBridge(JsonObject? obj, bool notifyBridge = false)
     {
         if (obj == null) return;
+        bool asAdmin = obj["as_admin"]?.GetValue<bool>() ?? false;
+        CommandOrigin origin = asAdmin ? CommandOrigin.AdminRemote : CommandOrigin.ExternalBridge;
+
         if (obj["enabled"] != null)
         {
             bool wantEnabled = obj["enabled"]!.GetValue<bool>();
-            TrySetFeatureMode(
-                FeaturePolicyKeys.ChatMonitor,
-                wantEnabled ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                CommandOrigin.ExternalBridge,
-                out _);
+            TrySetFeaturePolicy(FeaturePolicyKeys.ChatMonitor, wantEnabled, null, origin, out _);
         }
         if (obj["channels"] is JsonArray chArr)
         {
@@ -664,19 +711,33 @@ public sealed class BridgeConfig
                 string? s = item?.GetValue<string>();
                 if (!string.IsNullOrWhiteSpace(s)) set.Add(s.Trim());
             }
-            TrySetFeatureMode(FeaturePolicyKeys.RecvGuild, (set.Contains("guild") || set.Contains("union")) ? FeatureGateMode.Enabled : FeatureGateMode.Disabled, CommandOrigin.ExternalBridge, out _);
-            TrySetFeatureMode(FeaturePolicyKeys.RecvParty, (set.Contains("party") || set.Contains("team")) ? FeatureGateMode.Enabled : FeatureGateMode.Disabled, CommandOrigin.ExternalBridge, out _);
-            TrySetFeatureMode(FeaturePolicyKeys.RecvWhisper, (set.Contains("whisper") || set.Contains("private")) ? FeatureGateMode.Enabled : FeatureGateMode.Disabled, CommandOrigin.ExternalBridge, out _);
-            TrySetFeatureMode(FeaturePolicyKeys.RecvSay, (set.Contains("say") || set.Contains("local")) ? FeatureGateMode.Enabled : FeatureGateMode.Disabled, CommandOrigin.ExternalBridge, out _);
+            TrySetFeaturePolicy(FeaturePolicyKeys.RecvGuild, set.Contains("guild") || set.Contains("union"), null, origin, out _);
+            TrySetFeaturePolicy(FeaturePolicyKeys.RecvParty, set.Contains("party") || set.Contains("team"), null, origin, out _);
+            TrySetFeaturePolicy(FeaturePolicyKeys.RecvWhisper, set.Contains("whisper") || set.Contains("private"), null, origin, out _);
+            TrySetFeaturePolicy(FeaturePolicyKeys.RecvSay, set.Contains("say") || set.Contains("local"), null, origin, out _);
         }
-        if (obj["permission_mode"] != null)
+
+        if (obj["trigger_words"] is JsonArray trigArr)
         {
-            string m = obj["permission_mode"]!.GetValue<string>();
-            if (m is "whitelist_only" or "party_or_whitelist" or "everyone")
-                CommandPermissionMode = m;
+            var words = new List<string>();
+            foreach (var item in trigArr)
+            {
+                string? s = item?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(s)) words.Add(s.Trim());
+            }
+            bool customized = obj["trigger_words_customized"] != null
+                ? obj["trigger_words_customized"]!.GetValue<bool>()
+                : true;
+            SetTriggerWords(words, customized);
         }
-        if (obj["allow_non_commander_reply"] != null)
-            AllowNonCommanderChatReply = obj["allow_non_commander_reply"]!.GetValue<bool>();
+        else if (obj["trigger_words_customized"] != null)
+        {
+            bool customized = obj["trigger_words_customized"]!.GetValue<bool>();
+            if (!customized)
+                ResetTriggerWordsToDefault();
+            else
+                ChatTriggerWordsCustomized = true;
+        }
 
         if (obj["authorized_commander_entries"] is JsonArray entArr)
         {
@@ -704,19 +765,34 @@ public sealed class BridgeConfig
             CommanderEntries = ParseCommanderList(string.Join(",", tokens));
         }
 
-        if (obj["feature_modes"] is JsonObject fmObj)
+        if (obj["feature_policies"] is JsonObject fpObj)
+        {
+            foreach (var kv in fpObj)
+            {
+                if (kv.Value is not JsonObject entryObj) continue;
+                bool? en = entryObj["enabled"] != null ? entryObj["enabled"]!.GetValue<bool>() : null;
+                bool? ad = entryObj["admin_only"] != null ? entryObj["admin_only"]!.GetValue<bool>() : null;
+                TrySetFeaturePolicy(kv.Key, en, ad, origin, out _);
+            }
+        }
+        else if (obj["feature_modes"] is JsonObject fmObj)
         {
             foreach (var kv in fmObj)
             {
                 if (kv.Value == null) continue;
-                int mv = kv.Value.GetValue<int>();
-                if (mv is 0 or 1)
+                if (kv.Value is JsonObject entryObj)
                 {
-                    TrySetFeatureMode(
-                        kv.Key,
-                        mv == 1 ? FeatureGateMode.Enabled : FeatureGateMode.Disabled,
-                        CommandOrigin.ExternalBridge,
-                        out _);
+                    bool? en = entryObj["enabled"] != null ? entryObj["enabled"]!.GetValue<bool>() : null;
+                    bool? ad = entryObj["admin_only"] != null ? entryObj["admin_only"]!.GetValue<bool>() : null;
+                    TrySetFeaturePolicy(kv.Key, en, ad, origin, out _);
+                }
+                else
+                {
+                    int mv = kv.Value.GetValue<int>();
+                    if (mv is 0 or 1)
+                        TrySetFeaturePolicy(kv.Key, mv == 1, null, origin, out _);
+                    else if (mv == 2 && asAdmin)
+                        TrySetFeaturePolicy(kv.Key, null, true, origin, out _);
                 }
             }
         }
@@ -784,13 +860,44 @@ public sealed class BridgeConfig
         ChatSettingsChanged?.Invoke();
     }
 
+    public static List<string> ParseTriggerWords(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return new List<string>();
+
+        return raw
+            .Split(new[] { ',', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(w => !string.IsNullOrWhiteSpace(w))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    public void SetTriggerWords(IEnumerable<string> words, bool customized = true)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var next = new List<string>();
+        foreach (var raw in words)
+        {
+            string w = (raw ?? "").Trim();
+            if (!string.IsNullOrEmpty(w) && seen.Add(w))
+                next.Add(w);
+        }
+        ChatTriggerWords = next;
+        ChatTriggerWordsCustomized = customized;
+    }
+
+    public void ResetTriggerWordsToDefault()
+    {
+        ChatTriggerWordsCustomized = false;
+        ChatTriggerWords.Clear();
+    }
+
     public void Save()
     {
         _cfg.Set("bridge_url", BridgeUrl);
         _cfg.Set("auth_token", AuthToken);
         _cfg.Set("reconnect_delay_ms", ReconnectDelayMs);
         _cfg.Set("auto_start_local_bridge", AutoStartLocalBridge);
-        _cfg.Set("local_bridge_dir", LocalBridgeDir);
         _cfg.Set("default_follow_distance", DefaultFollowDistance);
         _cfg.Set("follow_resume_hysteresis", FollowResumeHysteresis);
         _cfg.Set("default_arrival_radius", DefaultArrivalRadius);
@@ -838,10 +945,10 @@ public sealed class BridgeConfig
         _cfg.Set("monitor_party", MonitorParty);
         _cfg.Set("monitor_whisper", MonitorWhisper);
         _cfg.Set("monitor_say", MonitorSay);
-        _cfg.Set("command_permission_mode", CommandPermissionMode);
-        _cfg.Set("allow_non_commander_chat_reply", AllowNonCommanderChatReply);
         _cfg.Set("authorized_commanders", string.Join(",", CommanderEntries.Select(c => c.ToConfigToken())));
         _cfg.Set("blocked_chat_words", string.Join(",", BlockedChatWords));
+        _cfg.Set("chat_trigger_words_customized", ChatTriggerWordsCustomized);
+        _cfg.Set("chat_trigger_words", string.Join(",", ChatTriggerWords));
 
         _cfg.Set("llm_backend", LlmBackend);
         _cfg.Set("llm_cli_flavor", LlmCliFlavor);
@@ -859,7 +966,9 @@ public sealed class BridgeConfig
 
         foreach (var desc in FeaturePolicyCatalog.All)
         {
-            _cfg.Set($"policy.{desc.Key}", (int)GetFeatureMode(desc.Key));
+            var st = GetFeaturePolicy(desc.Key);
+            _cfg.Set($"policy.{desc.Key}.enabled", st.Enabled);
+            _cfg.Set($"policy.{desc.Key}.admin_only", st.AdminOnly);
         }
 
         _cfg.Save();

@@ -208,7 +208,8 @@ public sealed class StickerService
         if (picked == null)
             return new JsonObject { ["ok"] = false, ["error"] = $"요청한 이모티콘('{query}')을 보유 목록에서 찾지 못했어요" };
 
-        bool sent = _world.SendSticker(channel, picked.ConfigId, targetCid, out string blockReason, out double remCd);
+        bool asAdmin = p?["as_admin"]?.GetValue<bool>() ?? false;
+        bool sent = _world.SendSticker(channel, picked.ConfigId, targetCid, out string blockReason, out double remCd, asAdmin);
         var resp = new JsonObject
         {
             ["ok"] = sent,

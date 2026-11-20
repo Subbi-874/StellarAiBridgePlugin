@@ -1,0 +1,282 @@
+{
+  "type": "object",
+  "properties": {
+    "reply_text": {
+      "type": "string",
+      "description": "Natural Korean reply for in-game chat (plain text without markdown; can be short or detailed — automatically split into 140-character chat messages when long)."
+    },
+    "sticker": {
+      "type": "string",
+      "description": "Optional built-in game picture sticker mood tag or ID to send in chat (e.g. 'greet', 'thanks', 'thumbsup', 'cheer', 'heart', 'laugh', 'cute', 'ok', 'think', 'sorry', 'sad', or '' to omit)."
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_auto_combat",
+              "set_feature_policy",
+              "send_chat",
+              "follow_player",
+              "stop",
+              "teleport_to_place",
+              "disable_chat_monitor",
+              "gather_resource",
+              "party_action",
+              "play_emote",
+              "stop_emote",
+              "revive",
+              "ride",
+              "accept_interaction",
+              "query_player_location",
+              "switch_loadout",
+              "switch_outfit",
+              "seek_monster",
+              "request_ride",
+              "request_interaction",
+              "enter_dungeon",
+              "ready_check",
+              "send_sticker",
+              "switch_channel",
+              "fish",
+              "leave_dungeon",
+              "use_gimmick",
+              "set_goal",
+              "cancel_goal",
+              "list_goals",
+              "craft_goal",
+              "remember",
+              "forget"
+            ]
+          },
+          "enable": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "admin_only": {
+            "type": "boolean"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "target_char_id": {
+            "type": "integer"
+          },
+          "target": {
+            "type": "string"
+          },
+          "continuous": {
+            "type": "boolean"
+          },
+          "destination": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "use_focus": {
+            "type": "boolean"
+          },
+          "emote": {
+            "type": "string"
+          },
+          "party_op": {
+            "type": "string",
+            "enum": [
+              "create",
+              "set_auto_accept",
+              "join",
+              "leave",
+              "invite",
+              "accept_apply",
+              "merge",
+              "set_member_type",
+              "kick",
+              "transfer_leader"
+            ]
+          },
+          "auto_accept": {
+            "type": "boolean"
+          },
+          "leave_first": {
+            "type": "boolean"
+          },
+          "ride_op": {
+            "type": "string",
+            "enum": [
+              "mount",
+              "dismount",
+              "toggle"
+            ]
+          },
+          "ride_type": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "land",
+              "water"
+            ]
+          },
+          "window_sec": {
+            "type": "integer"
+          },
+          "number": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "profession": {
+            "type": "string"
+          },
+          "monster": {
+            "type": "string"
+          },
+          "engage": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "interaction",
+                "ride",
+                "party",
+                "leader"
+              ]
+            }
+          },
+          "ride_mode": {
+            "type": "string",
+            "enum": [
+              "apply",
+              "invite"
+            ]
+          },
+          "action": {
+            "type": "string"
+          },
+          "dungeon": {
+            "type": "string"
+          },
+          "difficulty": {
+            "type": "string"
+          },
+          "single_ai": {
+            "type": "boolean"
+          },
+          "sticker": {
+            "type": "string"
+          },
+          "line_id": {
+            "type": "integer"
+          },
+          "spot": {
+            "type": "string"
+          },
+          "gimmick": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "goal_id": {
+            "type": "string"
+          },
+          "goal_kind": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string"
+          },
+          "preempt": {
+            "type": "boolean"
+          },
+          "replace_active": {
+            "type": "boolean"
+          },
+          "force_abort": {
+            "type": "boolean"
+          },
+          "confirm_preemption": {
+            "type": "boolean"
+          },
+          "resumable": {
+            "type": "boolean"
+          },
+          "failure_policy": {
+            "type": "string"
+          },
+          "cancel_all": {
+            "type": "boolean"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "preference",
+              "relationship",
+              "nickname_alias",
+              "habit",
+              "note"
+            ]
+          },
+          "mem_key": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "subject_uid": {
+            "type": "integer"
+          },
+          "memory_id": {
+            "type": "integer"
+          },
+          "item": {
+            "type": "string"
+          },
+          "recipe_id": {
+            "type": "integer"
+          },
+          "allow_monster_farm": {
+            "type": "boolean"
+          },
+          "confirm_monster_farm": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      }
+    }
+  },
+  "required": [
+    "reply_text",
+    "actions"
+  ]
+}

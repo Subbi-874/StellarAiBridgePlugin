@@ -259,19 +259,9 @@ public sealed class InteractionInviteService
 
     private bool IsAuthorizedPartyCommander(long senderId)
     {
-        if (string.Equals(_config.CommandPermissionMode, "everyone", StringComparison.OrdinalIgnoreCase))
+        if (!_config.IsAdminOnly(FeaturePolicyKeys.InteractionAccept) && !_config.IsAdminOnly(FeaturePolicyKeys.PartyManage))
             return true;
-        var entries = _config.CommanderEntries;
-        if (entries.Count == 0)
-            return true;
-        if (senderId > 0 && entries.Any(c => c.Uid == senderId))
-            return true;
-        if (string.Equals(_config.CommandPermissionMode, "party_or_whitelist", StringComparison.OrdinalIgnoreCase) && senderId > 0)
-        {
-            foreach (var m in _services.PartyRoster.Members)
-                if (m.CharId == senderId) return true;
-        }
-        return false;
+        return _config.IsAdminUid(senderId);
     }
 
     private static long FpLong(JsonNode? fp, string name, int index)

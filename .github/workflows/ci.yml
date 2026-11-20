@@ -8,7 +8,7 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -20,39 +20,5 @@ jobs:
       - name: Build C# Plugin (Release)
         run: dotnet build plugin/Stellar.AgyBridge.csproj -c Release
 
-      - name: Setup Python 3.13
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r mcp_bridge/requirements.txt
-
-      - name: Verify Python Syntax
-        run: |
-          python -m py_compile \
-            mcp_bridge/config.py \
-            mcp_bridge/i18n.py \
-            mcp_bridge/hub.py \
-            mcp_bridge/llm_backends.py \
-            mcp_bridge/api_tool_loop.py \
-            mcp_bridge/policy.py \
-            mcp_bridge/prompt_builder.py \
-            mcp_bridge/chat_output.py \
-            mcp_bridge/action_executor.py \
-            mcp_bridge/bot_agent.py \
-            mcp_bridge/goal_manager.py \
-            mcp_bridge/event_router.py \
-            mcp_bridge/memory_store.py \
-            mcp_bridge/craft_planner.py \
-            mcp_bridge/chat_monitor.py \
-            mcp_bridge/legacy_compat.py \
-            mcp_bridge/server.py \
-            mcp_bridge/bot_sandbox/tool_guard.py \
-            mcp_bridge/prompts/linux_bpsr_workspace/bpsr_guard.py \
-            mcp_bridge/prompts/linux_bpsr_workspace/bridge_cli.py
-
-      - name: Run Python Bridge Tests
-        run: python -m unittest discover -s mcp_bridge/tests -v
+      - name: Run Embedded Bridge & Plugin Tests
+        run: dotnet test plugin.tests/Stellar.AgyBridge.Tests.csproj --nologo -v minimal

@@ -165,7 +165,6 @@ public sealed class CombatEvadeService : IDisposable
     private bool IsCollectionNeeded =>
         _config.EnableAutoEvade
         && _autoCombat.DesiredEnabled
-        && !_config.IsAdminLocked(FeaturePolicyKeys.AutoCombat)
         && _services.ClientState.Phase == GamePhase.World
         && ReadLiveInCombat();
 
@@ -197,7 +196,6 @@ public sealed class CombatEvadeService : IDisposable
         bool inCombat = ReadLiveInCombat();
         bool activeCondition = _config.EnableAutoEvade
             && _autoCombat.DesiredEnabled
-            && !_config.IsAdminLocked(FeaturePolicyKeys.AutoCombat)
             && _services.PlayerState.Health > 0
             && inCombat
             && IsCompatibleWithBehavior();
