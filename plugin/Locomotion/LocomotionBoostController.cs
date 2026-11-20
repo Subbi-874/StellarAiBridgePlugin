@@ -76,6 +76,7 @@ public sealed class LocomotionBoostController
     private int _stuckCounter;
     private float _rapidJumpActiveTimer;
     private float _rapidJumpPulseCooldown;
+    private float _gapDoubleJumpTimer;
     private float _sidestepFlipTimer;
     private float _sidestepSign = 1f;
 
@@ -115,6 +116,7 @@ public sealed class LocomotionBoostController
         _stuckCounter = 0;
         _rapidJumpActiveTimer = 0f;
         _rapidJumpPulseCooldown = 0f;
+        _gapDoubleJumpTimer = 0f;
         _sidestepFlipTimer = 0f;
         _activeBoostMode = "walk";
 
@@ -188,7 +190,10 @@ public sealed class LocomotionBoostController
                 PathNavigator.IsClimbableStepAhead,
                 PathNavigator.IsDetouring,
                 PathNavigator.IsCliffAhead,
-                PathNavigator.IsDropVaultAhead);
+                PathNavigator.IsDropVaultAhead,
+                PathNavigator.IsGapJumpAhead,
+                PathNavigator.GapJumpDistance,
+                PathNavigator.GapJumpHeightDelta);
         }
         else
         {
@@ -210,7 +215,12 @@ public sealed class LocomotionBoostController
             return _activeBoostMode;
         }
 
-        float scale = IsRapidJumping ? 1.0f : baseSpeedScale;
+        float scale = (IsRapidJumping
+            || PathNavigator.IsGapJumpAhead
+            || PathNavigator.IsAirborneCommitted
+            || PathNavigator.IsDropVaultAhead)
+            ? 1.0f
+            : baseSpeedScale;
         moveDriver.TryDrive(owner, localPos, steerTarget, scale, SuggestedSteerYawOffset);
         return _activeBoostMode;
     }
@@ -258,7 +268,10 @@ public sealed class LocomotionBoostController
         bool stepAhead = false,
         bool isDetouring = false,
         bool cliffAhead = false,
-        bool dropVaultAhead = false)
+        bool dropVaultAhead = false,
+        bool gapJumpAhead = false,
+        float gapJumpDist = 0f,
+        float gapJumpDy = 0f)
     {
         EnsureResolved();
         TickPendingReleases(dt);
@@ -267,6 +280,8 @@ public sealed class LocomotionBoostController
         if (_postMobilityGraceTimer > 0f) _postMobilityGraceTimer -= dt;
         if (_bunnyhopCooldownTimer > 0f) _bunnyhopCooldownTimer -= dt;
         if (_rapidJumpPulseCooldown > 0f) _rapidJumpPulseCooldown -= dt;
+        if (!gapJumpAhead && _gapDoubleJumpTimer > 0f)
+            _gapDoubleJumpTimer = Math.Max(0f, _gapDoubleJumpTimer - dt);
 
         UpdateStaminaAndState(dt);
 
@@ -283,6 +298,7 @@ public sealed class LocomotionBoostController
         {
             _jumpTriggerTimer = 0f;
             _rapidJumpActiveTimer = 0f;
+            _gapDoubleJumpTimer = 0f;
             _stuckCounter = 0;
             _hasProgressAnchor = false;
             _progressWindowTimer = 0f;
@@ -311,6 +327,7 @@ public sealed class LocomotionBoostController
         {
             _jumpTriggerTimer = 0f;
             _rapidJumpActiveTimer = 0f;
+            _gapDoubleJumpTimer = 0f;
             _stuckCounter = 0;
             _hasProgressAnchor = false;
             _progressWindowTimer = 0f;
@@ -324,6 +341,7 @@ public sealed class LocomotionBoostController
         {
             _jumpTriggerTimer = 0f;
             _rapidJumpActiveTimer = 0f;
+            _gapDoubleJumpTimer = 0f;
             _stuckCounter = 0;
             _hasProgressAnchor = false;
             _progressWindowTimer = 0f;
@@ -340,6 +358,51 @@ public sealed class LocomotionBoostController
             }
 
             _activeBoostMode = "jump_drop_vault";
+            return _activeBoostMode;
+        }
+
+        // Priority Gate C.6: Stepping-stone / air-gap crossing (launch Jump + timed double-jump across verified landing)
+        if (gapJumpAhead)
+        {
+            _jumpTriggerTimer = 0f;
+            _rapidJumpActiveTimer = 0f;
+            _stuckCounter = 0;
+            _hasProgressAnchor = false;
+            _progressWindowTimer = 0f;
+
+            if (_gapDoubleJumpTimer > 0f)
+            {
+                _gapDoubleJumpTimer -= dt;
+                if (_gapDoubleJumpTimer <= 0f
+                    && _config.EnableObstacleJump
+                    && !_jumpHeld
+                    && InvokeJump(true))
+                {
+                    _jumpHeld = true;
+                    _jumpReleaseTimer = 0.08f;
+                }
+            }
+            else if (_config.EnableObstacleJump
+                && _rapidJumpPulseCooldown <= 0f
+                && !_jumpHeld)
+            {
+                if (gapJumpDist >= 5.0f && HasStaminaForBoost() && !_rushHeld && InvokeRush(true))
+                {
+                    _rushHeld = true;
+                    _rushReleaseTimer = 0.06f;
+                }
+
+                if (InvokeJump(true))
+                {
+                    _jumpHeld = true;
+                    _jumpReleaseTimer = 0.08f;
+                    _rapidJumpPulseCooldown = 0.70f;
+                    if (gapJumpDist >= 3.3f || gapJumpDy >= 0.70f)
+                        _gapDoubleJumpTimer = 0.27f;
+                }
+            }
+
+            _activeBoostMode = $"gap_jump({gapJumpDist:F1}m)";
             return _activeBoostMode;
         }
 
@@ -728,6 +791,7 @@ public sealed class LocomotionBoostController
         InvokeSwimSprint(false);
         _jumpTriggerTimer = 0f;
         _rapidJumpActiveTimer = 0f;
+        _gapDoubleJumpTimer = 0f;
         _stuckCounter = 0;
         _hasProgressAnchor = false;
         _progressWindowTimer = 0f;

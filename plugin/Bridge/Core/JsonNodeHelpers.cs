@@ -208,6 +208,9 @@ public static class JsonNodeHelpers
     {
         if (obj == null || !obj.TryGetPropertyValue(key, out JsonNode? node) || node == null)
             return fallback;
+        bool? parsed = GetNullableBool(obj, key);
+        if (parsed.HasValue)
+            return parsed.Value;
         return IsTruthy(node);
     }
 
@@ -224,12 +227,49 @@ public static class JsonNodeHelpers
         if (jv.TryGetValue(out string? s))
         {
             string trimmed = (s ?? "").Trim().ToLowerInvariant();
-            if (trimmed is "true" or "1" or "yes")
+            if (trimmed is "true" or "1" or "yes" or "on")
                 return true;
-            if (trimmed is "false" or "0" or "no")
+            if (trimmed is "false" or "0" or "no" or "off")
                 return false;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Returns the first key present in <paramref name="obj"/> that parses to a boolean value,
+    /// supporting canonical and alias parameter names uniformly.
+    /// </summary>
+    public static bool? GetFirstNullableBool(JsonObject? obj, params string[] keys)
+    {
+        if (obj == null || keys == null)
+            return null;
+        foreach (string key in keys)
+        {
+            if (string.IsNullOrEmpty(key))
+                continue;
+            bool? val = GetNullableBool(obj, key);
+            if (val.HasValue)
+                return val.Value;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Returns the first non-empty trimmed string value across the given <paramref name="keys"/>.
+    /// </summary>
+    public static string GetFirstString(JsonObject? obj, params string[] keys)
+    {
+        if (obj == null || keys == null)
+            return "";
+        foreach (string key in keys)
+        {
+            if (string.IsNullOrEmpty(key))
+                continue;
+            string val = GetString(obj, key, "").Trim();
+            if (!string.IsNullOrEmpty(val))
+                return val;
+        }
+        return "";
     }
 
     public static JsonObject? GetObject(JsonObject? obj, string key)

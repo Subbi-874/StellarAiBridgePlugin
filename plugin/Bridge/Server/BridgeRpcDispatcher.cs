@@ -720,7 +720,7 @@ public sealed class BridgeRpcDispatcher
             case "set_auto_combat":
             {
                 var p = new JsonObject();
-                bool? enable = JsonNodeHelpers.GetNullableBool(args, "enable");
+                bool? enable = JsonNodeHelpers.GetFirstNullableBool(args, "enable", "enabled");
                 if (enable.HasValue)
                     p["enable"] = enable.Value;
                 return await DispatchMcpRpc("set_auto_combat", p, ct: ct).ConfigureAwait(false);
@@ -788,7 +788,7 @@ public sealed class BridgeRpcDispatcher
 
             case "manage_party":
             {
-                bool autoAccept = JsonNodeHelpers.GetBool(args, "auto_accept", false);
+                bool autoAccept = JsonNodeHelpers.GetFirstNullableBool(args, "auto_accept", "enable", "enabled") ?? false;
                 var p = new JsonObject
                 {
                     ["action"] = JsonNodeHelpers.GetString(args, "action", ""),
@@ -1161,7 +1161,7 @@ public sealed class BridgeRpcDispatcher
             case "use_gimmick":
                 return await DispatchMcpRpc("use_gimmick", new JsonObject
                 {
-                    ["gimmick"] = JsonNodeHelpers.GetString(args, "query", ""),
+                    ["gimmick"] = JsonNodeHelpers.GetFirstString(args, "query", "gimmick"),
                 }, ct: ct).ConfigureAwait(false);
 
             case "set_eco_mode":
@@ -1369,7 +1369,7 @@ public sealed class BridgeRpcDispatcher
                         ["serverInfo"] = new JsonObject
                         {
                             ["name"] = "stellar-agy-bridge",
-                            ["version"] = "1.0.3",
+                            ["version"] = "1.0.5",
                         },
                         ["instructions"] = McpInstructions,
                     });

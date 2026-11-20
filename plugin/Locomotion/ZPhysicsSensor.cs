@@ -383,7 +383,7 @@ public sealed class ZPhysicsSensor : IPhysicsWalkabilityProbe
         if (!EnsureResolved())
             return false;
 
-        float clampedMax = Math.Clamp(maxDropDepth, 1.5f, 12.0f);
+        float clampedMax = Math.Clamp(maxDropDepth, 1.5f, 30.0f);
         if (!TrySampleGroundHeight(x, refY, z, out groundY, upOffset: 0.45f, downDepth: clampedMax, radius: radius))
             return false;
 

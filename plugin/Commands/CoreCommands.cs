@@ -5,6 +5,7 @@ using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters;
 using Stellar.AgyBridge.Behaviors;
+using Stellar.AgyBridge.Bridge.Core;
 using Stellar.AgyBridge.Core;
 using Stellar.AgyBridge.Fishing;
 using Stellar.AgyBridge.Gathering;
@@ -120,8 +121,8 @@ public static class CoreCommands
             string key = (p?["key"]?.GetValue<string>() ?? "").Trim();
             bool asAdmin = IsAdminParam(p);
             var origin = asAdmin ? CommandOrigin.AdminRemote : CommandOrigin.ExternalBridge;
-            bool? enabled = p?["enabled"] != null ? p["enabled"]!.GetValue<bool>() : null;
-            bool? adminOnly = p?["admin_only"] != null ? p["admin_only"]!.GetValue<bool>() : null;
+            bool? enabled = JsonNodeHelpers.GetFirstNullableBool(p, "enabled", "enable");
+            bool? adminOnly = JsonNodeHelpers.GetNullableBool(p, "admin_only");
             if (!enabled.HasValue && !adminOnly.HasValue && p?["mode"] != null)
             {
                 int modeInt = p["mode"]!.GetValue<int>();
@@ -494,13 +495,12 @@ public static class CoreCommands
             if (!config.CheckAdminOnlyGate(FeaturePolicyKeys.AutoCombat, out string gateErr, asAdmin))
                 return BlockedJson(config, FeaturePolicyKeys.AutoCombat, gateErr);
 
-            bool? enable = p?["enable"] != null ? p["enable"]!.GetValue<bool>() : null;
+            bool? enable = JsonNodeHelpers.GetFirstNullableBool(p, "enable", "enabled");
             bool nextVal = enable ?? !autoCombat.DesiredEnabled;
             var origin = asAdmin ? CommandOrigin.AdminRemote : CommandOrigin.ExternalBridge;
-            if (!config.TrySetFeaturePolicy(FeaturePolicyKeys.AutoCombat, nextVal, null, origin, out string setErr))
-                return BlockedJson(config, FeaturePolicyKeys.AutoCombat, setErr);
 
             var res = autoCombat.SetDesired(nextVal);
+            config.TrySetFeaturePolicy(FeaturePolicyKeys.AutoCombat, nextVal, null, origin, out _);
             onUiStateChanged?.Invoke();
             return res;
         }));

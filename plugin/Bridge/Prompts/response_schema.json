@@ -53,13 +53,15 @@
             ]
           },
           "enable": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Boolean on/off toggle for set_auto_combat (true=on, false=off)"
           },
           "key": {
             "type": "string"
           },
           "enabled": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Boolean enabled state for set_feature_policy (also accepted by set_auto_combat)"
           },
           "admin_only": {
             "type": "boolean"

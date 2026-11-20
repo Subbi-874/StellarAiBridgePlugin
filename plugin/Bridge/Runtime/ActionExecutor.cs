@@ -165,8 +165,8 @@ public sealed class ActionExecutor
             method = "ride";
             wait = true;
             defaultErr = "탈것 조작에 실패했어요";
-            string rideOp = JsonNodeHelpers.GetString(act, "ride_op", "");
-            string rideType = JsonNodeHelpers.GetString(act, "ride_type", "");
+            string rideOp = JsonNodeHelpers.GetFirstString(act, "ride_op", "action", "op", "mode");
+            string rideType = JsonNodeHelpers.GetFirstString(act, "ride_type", "mount_type");
             parameters["action"] = !string.IsNullOrEmpty(rideOp) ? rideOp : "mount";
             parameters["type"] = !string.IsNullOrEmpty(rideType) ? rideType : "auto";
         }
@@ -188,7 +188,7 @@ public sealed class ActionExecutor
             defaultErr = "상호작용 요청을 보내지 못했어요";
             string tgt = JsonNodeHelpers.GetString(act, "target", "");
             parameters["target"] = !string.IsNullOrEmpty(tgt) ? tgt : sender;
-            string reqAct = JsonNodeHelpers.GetString(act, "action", "");
+            string reqAct = JsonNodeHelpers.GetFirstString(act, "action", "interaction_name", "emote", "name");
             if (!string.IsNullOrEmpty(reqAct))
                 parameters["action"] = reqAct;
         }
@@ -198,7 +198,7 @@ public sealed class ActionExecutor
             wait = true;
             defaultErr = "동승 요청을 보내지 못했어요";
             string tgt = JsonNodeHelpers.GetString(act, "target", "");
-            string mode = JsonNodeHelpers.GetString(act, "ride_mode", "");
+            string mode = JsonNodeHelpers.GetFirstString(act, "ride_mode", "mode");
             parameters["target"] = !string.IsNullOrEmpty(tgt) ? tgt : sender;
             parameters["mode"] = !string.IsNullOrEmpty(mode) ? mode : "apply";
         }
@@ -206,7 +206,7 @@ public sealed class ActionExecutor
         {
             method = "query_player_location";
             defaultErr = "위치 조회에 실패했어요";
-            string tgt = JsonNodeHelpers.GetString(act, "target", "");
+            string tgt = JsonNodeHelpers.GetFirstString(act, "target", "name", "query");
             parameters["target"] = !string.IsNullOrEmpty(tgt) ? tgt : sender;
         }
         else if (atype == "switch_loadout")
@@ -268,9 +268,11 @@ public sealed class ActionExecutor
             int lineVal = JsonNodeHelpers.GetInt(act, "line_id", 0);
             if (lineVal <= 0)
                 lineVal = JsonNodeHelpers.GetInt(act, "number", 0);
+            if (lineVal <= 0)
+                lineVal = JsonNodeHelpers.GetInt(act, "channel", 0);
             if (lineVal > 0)
                 parameters["line_id"] = lineVal;
-            string tgt = JsonNodeHelpers.GetString(act, "target", "");
+            string tgt = JsonNodeHelpers.GetFirstString(act, "target", "name");
             if (!string.IsNullOrEmpty(tgt))
                 parameters["target"] = tgt;
             if (lineVal <= 0 && string.IsNullOrEmpty(tgt))
@@ -336,9 +338,7 @@ public sealed class ActionExecutor
         {
             method = "farm_monster_item";
             defaultErr = "몬스터 재료 파밍을 시작하지 못했어요";
-            string mon = FirstNonEmpty(
-                JsonNodeHelpers.GetString(act, "monster", ""),
-                JsonNodeHelpers.GetString(act, "query", "")).Trim();
+            string mon = JsonNodeHelpers.GetFirstString(act, "monster", "query", "name", "target");
             int tc = JsonNodeHelpers.GetInt(act, "target_count", 0);
             if (tc <= 0)
                 tc = JsonNodeHelpers.GetInt(act, "count", 1);
@@ -351,7 +351,7 @@ public sealed class ActionExecutor
         {
             method = "seek_monster";
             defaultErr = "몬스터를 찾아가지 못했어요";
-            string mon = JsonNodeHelpers.GetString(act, "monster", "");
+            string mon = JsonNodeHelpers.GetFirstString(act, "monster", "query", "name", "target");
             parameters["monster"] = mon;
             parameters["engage"] = JsonNodeHelpers.GetBool(act, "engage", false);
             if (string.IsNullOrEmpty(mon))
@@ -641,21 +641,28 @@ public sealed class ActionExecutor
 
             if (atype == "set_auto_combat")
             {
-                bool enable = !act.TryGetPropertyValue("enable", out JsonNode? enNode) || JsonNodeHelpers.IsTruthy(enNode);
+                bool? requestedEnable = JsonNodeHelpers.GetFirstNullableBool(act, "enable", "enabled");
+                var rpcParams = new JsonObject { ["as_admin"] = isAdmin };
+                if (requestedEnable.HasValue)
+                    rpcParams["enable"] = requestedEnable.Value;
                 JsonObject r = await _dispatch(
                     "set_auto_combat",
-                    new JsonObject { ["enable"] = enable, ["as_admin"] = isAdmin },
+                    rpcParams,
                     connId,
                     ct).ConfigureAwait(false);
                 batch.Executed.Add(new JsonObject { ["action"] = atype, ["res"] = JsonNodeHelpers.CloneObject(r) });
-                if (!JsonNodeHelpers.GetBool(r, "ok", false) && !JsonNodeHelpers.GetBool(r, "desired_enabled", false))
+                bool rpcOk = JsonNodeHelpers.GetBool(r, "ok", false);
+                bool? finalDesired = JsonNodeHelpers.GetNullableBool(r, "desired_enabled");
+                bool desiredApplied = finalDesired.HasValue && (!requestedEnable.HasValue || finalDesired.Value == requestedEnable.Value);
+                if (!rpcOk && !desiredApplied)
                 {
                     string err = JsonNodeHelpers.GetString(r, "error", "");
                     batch.ActionErrors.Add(!string.IsNullOrEmpty(err) ? err : "자동전투 전환에 실패했어요");
                 }
                 else
                 {
-                    BridgePolicy.GetPolicyEntry(cfg.FeaturePolicies, "auto_combat").Enabled = enable;
+                    bool effectiveEnabled = finalDesired ?? requestedEnable ?? true;
+                    BridgePolicy.GetPolicyEntry(cfg.FeaturePolicies, "auto_combat").Enabled = effectiveEnabled;
                     batch.SucceededActions++;
                 }
             }
@@ -664,7 +671,7 @@ public sealed class ActionExecutor
                 string tgt = JsonNodeHelpers.GetString(act, "target", "");
                 if (string.IsNullOrEmpty(tgt))
                     tgt = TrigSenderOrName(trig);
-                bool cont = !act.TryGetPropertyValue("continuous", out JsonNode? cNode) || JsonNodeHelpers.IsTruthy(cNode);
+                bool cont = JsonNodeHelpers.GetNullableBool(act, "continuous") ?? true;
                 JsonObject? chk = await PrecheckFollowAsync(tgt, connId, ct).ConfigureAwait(false);
                 if (chk != null && chk.TryGetPropertyValue("reachable", out JsonNode? reachNode) && !JsonNodeHelpers.IsTruthy(reachNode))
                 {
@@ -730,10 +737,15 @@ public sealed class ActionExecutor
                     batch.ActionErrors.Add(!string.IsNullOrEmpty(err) ? err : "중지 실행이 차단되었어요");
                 }
             }
-            else if (atype == "teleport_to_place" && !string.IsNullOrEmpty(JsonNodeHelpers.GetString(act, "destination", "")))
+            else if (atype == "teleport_to_place")
             {
+                string dest = JsonNodeHelpers.GetFirstString(act, "destination", "place", "target", "name", "query");
+                if (string.IsNullOrEmpty(dest))
+                {
+                    batch.ActionErrors.Add("이동할 장소 이름이 없어요.");
+                    continue;
+                }
                 onClearKinds?.Invoke(new[] { "follow" });
-                string dest = JsonNodeHelpers.GetString(act, "destination", "");
                 JsonObject r = await _dispatch(
                     "teleport_place",
                     new JsonObject { ["destination"] = dest, ["as_admin"] = isAdmin },
@@ -792,8 +804,14 @@ public sealed class ActionExecutor
                 });
                 batch.SucceededActions++;
             }
-            else if (atype == "gather_resource" && !string.IsNullOrEmpty(JsonNodeHelpers.GetString(act, "resource", "")))
+            else if (atype == "gather_resource")
             {
+                string resource = JsonNodeHelpers.GetFirstString(act, "resource", "item", "name", "query", "target");
+                if (string.IsNullOrEmpty(resource))
+                {
+                    batch.ActionErrors.Add("채집할 자원 이름이 없어요.");
+                    continue;
+                }
                 onClearKinds?.Invoke(new[] { "follow" });
                 act.TryGetPropertyValue("count", out JsonNode? rawCount);
                 int gCount = 20;
@@ -802,12 +820,13 @@ public sealed class ActionExecutor
 
                 var gParams = new JsonObject
                 {
-                    ["resource"] = JsonNodeHelpers.GetString(act, "resource", ""),
+                    ["resource"] = resource,
                     ["count"] = gCount,
                     ["as_admin"] = isAdmin,
                 };
-                if (act.TryGetPropertyValue("use_focus", out JsonNode? ufNode) && ufNode != null)
-                    gParams["use_focus"] = JsonNodeHelpers.IsTruthy(ufNode);
+                bool? uf = JsonNodeHelpers.GetNullableBool(act, "use_focus");
+                if (uf.HasValue)
+                    gParams["use_focus"] = uf.Value;
 
                 JsonObject r = await _dispatch("gather_resource", gParams, connId, ct).ConfigureAwait(false);
                 batch.Executed.Add(new JsonObject
@@ -831,11 +850,16 @@ public sealed class ActionExecutor
                     batch.ActionErrors.Add(err);
                 }
             }
-            else if (atype == "party_action" && !string.IsNullOrEmpty(JsonNodeHelpers.GetString(act, "party_op", "")))
+            else if (atype == "party_action")
             {
-                string pOp = JsonNodeHelpers.GetString(act, "party_op", "");
-                bool autoAccept = JsonNodeHelpers.GetBool(act, "auto_accept", false);
-                bool leaveFirst = !act.TryGetPropertyValue("leave_first", out JsonNode? lfNode) || JsonNodeHelpers.IsTruthy(lfNode);
+                string pOp = JsonNodeHelpers.GetFirstString(act, "party_op", "action", "op");
+                if (string.IsNullOrEmpty(pOp))
+                {
+                    batch.ActionErrors.Add("파티 명령(party_op)이 비어 있어요.");
+                    continue;
+                }
+                bool autoAccept = JsonNodeHelpers.GetFirstNullableBool(act, "auto_accept", "enable", "enabled") ?? false;
+                bool leaveFirst = JsonNodeHelpers.GetNullableBool(act, "leave_first") ?? true;
                 var pParams = new JsonObject
                 {
                     ["action"] = pOp,
@@ -854,8 +878,9 @@ public sealed class ActionExecutor
                     pParams["size"] = pSize;
                 if (pOp == "set_auto_accept")
                 {
-                    bool enableAuto = !act.TryGetPropertyValue("auto_accept", out JsonNode? aaNode) || JsonNodeHelpers.IsTruthy(aaNode);
+                    bool enableAuto = JsonNodeHelpers.GetFirstNullableBool(act, "auto_accept", "enable", "enabled") ?? true;
                     pParams["enable"] = enableAuto;
+                    pParams["auto_accept"] = enableAuto;
                 }
 
                 JsonObject r = BridgeConstants.PartyOpsAwaitResult.Contains(pOp)
@@ -878,9 +903,14 @@ public sealed class ActionExecutor
                     batch.SucceededActions++;
                 }
             }
-            else if (atype == "play_emote" && !string.IsNullOrEmpty(JsonNodeHelpers.GetString(act, "emote", "")))
+            else if (atype == "play_emote")
             {
-                string emName = JsonNodeHelpers.GetString(act, "emote", "").Trim();
+                string emName = JsonNodeHelpers.GetFirstString(act, "emote", "name", "query");
+                if (string.IsNullOrEmpty(emName))
+                {
+                    batch.ActionErrors.Add("실행할 감정표현 이름이 없어요.");
+                    continue;
+                }
                 JsonObject r = await _dispatch(
                     "play_emote",
                     new JsonObject { ["emote"] = emName, ["as_admin"] = isAdmin },

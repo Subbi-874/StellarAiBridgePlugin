@@ -234,14 +234,15 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v1.0.3. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v1.0.5. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeaturePolicyChanged(string key, FeaturePolicyState policy)
     {
         if (key == FeaturePolicyKeys.AutoCombat)
         {
-            _autoCombat.SetDesired(policy.Enabled);
+            if (_autoCombat.DesiredEnabled != policy.Enabled)
+                _autoCombat.SetDesired(policy.Enabled);
             if (!policy.Enabled && _behaviors.Current is FarmMonsterItemBehavior)
                 _behaviors.StopCurrent("policy_disabled");
         }

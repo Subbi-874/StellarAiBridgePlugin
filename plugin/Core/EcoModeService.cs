@@ -50,6 +50,12 @@ public sealed class EcoModeService : IDisposable
     private bool _trimmedForCurrentUltraEntry;
     private bool _disposed;
 
+    // Capability latches prevent repeated Method unstripping warnings on IL2CPP builds
+    private bool _vSyncSupported = true;
+    private bool _targetFpsSupported = true;
+    private bool _onDemandSupported = true;
+    private bool _shadowDistanceSupported = true;
+
     // Baseline engine state captured once before any eco override
     private bool _hasBaseline;
     private int _origTargetFrameRate = -1;
@@ -154,7 +160,7 @@ public sealed class EcoModeService : IDisposable
             if (EffectiveMode == ModeUltra && !focused && (_services.ClientState.UiState & GameUIState.Loading) == 0)
             {
                 _trimmedForCurrentUltraEntry = true;
-                _trimTimer = effectiveActivity ? 45.0f : 60.0f;
+                _trimTimer = effectiveActivity ? 120.0f : 180.0f;
                 TrimMemoryNow(emptyWorkingSet: true, unloadAssets: !effectiveActivity);
             }
             else
@@ -248,7 +254,7 @@ public sealed class EcoModeService : IDisposable
             if (!_trimmedForCurrentUltraEntry)
             {
                 _trimmedForCurrentUltraEntry = true;
-                _trimTimer = effectiveActivity ? 45.0f : 60.0f;
+                _trimTimer = effectiveActivity ? 120.0f : 180.0f;
                 TrimMemoryNow(emptyWorkingSet: true, unloadAssets: !effectiveActivity);
             }
             else
@@ -256,7 +262,7 @@ public sealed class EcoModeService : IDisposable
                 _trimTimer -= deltaTime;
                 if (_trimTimer <= 0f)
                 {
-                    _trimTimer = effectiveActivity ? 45.0f : 60.0f;
+                    _trimTimer = effectiveActivity ? 120.0f : 180.0f;
                     TrimMemoryNow(emptyWorkingSet: true, unloadAssets: !effectiveActivity);
                 }
             }
@@ -271,6 +277,20 @@ public sealed class EcoModeService : IDisposable
     {
         try { return Application.isFocused; }
         catch { return false; }
+    }
+
+    private void TryRunRenderOp(ref bool supported, string opName, Action action)
+    {
+        if (!supported) return;
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            supported = false;
+            _services.Log.Warning($"[AgyBridge][Eco] {opName} unsupported ({ex.Message}); skipping future calls.");
+        }
     }
 
     private void ApplyImmediately(bool activityActive, bool focused, bool inWorld)
@@ -289,33 +309,26 @@ public sealed class EcoModeService : IDisposable
         _lastAppliedFocused = focused;
         _lastAppliedActivity = activityActive;
 
-        try
-        {
-            int targetFps = mode == ModeUltra
-                ? (activityActive ? 25 : 10)
-                : (activityActive ? 30 : 15);
-            if (focused)
-                targetFps = Math.Max(targetFps, 20);
+        int targetFps = mode == ModeUltra
+            ? (activityActive ? 25 : 10)
+            : (activityActive ? 30 : 15);
+        if (focused)
+            targetFps = Math.Max(targetFps, 20);
 
-            // Never skip frames while window has focus or combat/behavior activity is running
-            int renderInterval = (focused || activityActive)
-                ? 1
-                : (mode == ModeUltra ? 8 : 4);
+        // Never skip frames while window has focus or combat/behavior activity is running
+        int renderInterval = (focused || activityActive)
+            ? 1
+            : (mode == ModeUltra ? 8 : 4);
 
-            QualitySettings.vSyncCount = 0;
-            Application.targetFrameRate = targetFps;
-            OnDemandRendering.renderFrameInterval = renderInterval;
-            QualitySettings.shadowDistance = 0f;
+        TryRunRenderOp(ref _vSyncSupported, "QualitySettings.vSyncCount", () => QualitySettings.vSyncCount = 0);
+        TryRunRenderOp(ref _targetFpsSupported, "Application.targetFrameRate", () => Application.targetFrameRate = targetFps);
+        TryRunRenderOp(ref _onDemandSupported, "OnDemandRendering.renderFrameInterval", () => OnDemandRendering.renderFrameInterval = renderInterval);
+        TryRunRenderOp(ref _shadowDistanceSupported, "QualitySettings.shadowDistance", () => QualitySettings.shadowDistance = 0f);
 
-            if (mode == ModeUltra)
-                SetTextureMipmapLimit(3);
-            else
-                SetTextureMipmapLimit(_origMipmapLimit);
-        }
-        catch (Exception ex)
-        {
-            _services.Log.Warning($"[AgyBridge][Eco] Apply render settings warning: {ex.Message}");
-        }
+        if (mode == ModeUltra)
+            SetTextureMipmapLimit(3);
+        else
+            SetTextureMipmapLimit(_origMipmapLimit);
 
         SetAudioMuted(true);
         SetProcessEcoPriority(true);
@@ -334,18 +347,11 @@ public sealed class EcoModeService : IDisposable
 
         if (_hasBaseline)
         {
-            try
-            {
-                Application.targetFrameRate = _origTargetFrameRate;
-                QualitySettings.vSyncCount = _origVSyncCount;
-                OnDemandRendering.renderFrameInterval = Math.Max(1, _origRenderFrameInterval);
-                QualitySettings.shadowDistance = _origShadowDistance;
-                SetTextureMipmapLimit(_origMipmapLimit);
-            }
-            catch (Exception ex)
-            {
-                _services.Log.Warning($"[AgyBridge][Eco] Restore settings warning: {ex.Message}");
-            }
+            TryRunRenderOp(ref _targetFpsSupported, "Application.targetFrameRate(restore)", () => Application.targetFrameRate = _origTargetFrameRate);
+            TryRunRenderOp(ref _vSyncSupported, "QualitySettings.vSyncCount(restore)", () => QualitySettings.vSyncCount = _origVSyncCount);
+            TryRunRenderOp(ref _onDemandSupported, "OnDemandRendering.renderFrameInterval(restore)", () => OnDemandRendering.renderFrameInterval = Math.Max(1, _origRenderFrameInterval));
+            TryRunRenderOp(ref _shadowDistanceSupported, "QualitySettings.shadowDistance(restore)", () => QualitySettings.shadowDistance = _origShadowDistance);
+            SetTextureMipmapLimit(_origMipmapLimit);
             _hasBaseline = false;
         }
 
@@ -359,20 +365,13 @@ public sealed class EcoModeService : IDisposable
     private void CaptureBaselineIfNeeded()
     {
         if (_hasBaseline) return;
-        try
-        {
-            _origTargetFrameRate = Application.targetFrameRate;
-            _origVSyncCount = QualitySettings.vSyncCount;
-            _origRenderFrameInterval = OnDemandRendering.renderFrameInterval;
-            _origShadowDistance = QualitySettings.shadowDistance;
-            _origMipmapLimit = GetTextureMipmapLimit();
-            _origAudioVolume = GetAudioVolume();
-            _hasBaseline = true;
-        }
-        catch (Exception ex)
-        {
-            _services.Log.Warning($"[AgyBridge][Eco] Capture baseline warning: {ex.Message}");
-        }
+        TryRunRenderOp(ref _targetFpsSupported, "Application.targetFrameRate(capture)", () => _origTargetFrameRate = Application.targetFrameRate);
+        TryRunRenderOp(ref _vSyncSupported, "QualitySettings.vSyncCount(capture)", () => _origVSyncCount = QualitySettings.vSyncCount);
+        TryRunRenderOp(ref _onDemandSupported, "OnDemandRendering.renderFrameInterval(capture)", () => _origRenderFrameInterval = OnDemandRendering.renderFrameInterval);
+        TryRunRenderOp(ref _shadowDistanceSupported, "QualitySettings.shadowDistance(capture)", () => _origShadowDistance = QualitySettings.shadowDistance);
+        _origMipmapLimit = GetTextureMipmapLimit();
+        _origAudioVolume = GetAudioVolume();
+        _hasBaseline = true;
     }
 
     private void BlankWorldCameras()

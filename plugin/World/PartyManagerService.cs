@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters.Social;
+using Stellar.AgyBridge.Bridge.Core;
 
 namespace Stellar.AgyBridge.World;
 
@@ -36,11 +37,11 @@ public sealed class PartyManagerService
         return action switch
         {
             "create" or "create_party" => CreateParty(
-                autoAccept: p?["auto_accept"]?.GetValue<bool>() ?? false,
-                leaveFirst: p?["leave_first"]?.GetValue<bool>() ?? false,
+                autoAccept: JsonNodeHelpers.GetFirstNullableBool(p, "auto_accept", "enable", "enabled") ?? false,
+                leaveFirst: JsonNodeHelpers.GetNullableBool(p, "leave_first") ?? false,
                 targetActivityId: p?["target_id"]?.GetValue<int>() ?? 1000,
                 desc: p?["desc"]?.GetValue<string>() ?? ""),
-            "set_auto_accept" or "auto_accept" => SetAutoAccept(p?["enable"]?.GetValue<bool>() ?? true),
+            "set_auto_accept" or "auto_accept" => SetAutoAccept(JsonNodeHelpers.GetFirstNullableBool(p, "enable", "auto_accept", "enabled") ?? true),
             "set_member_type" or "member_type" or "set_size" => SetMemberType(p?["size"]?.GetValue<int>() ?? p?["member_type"]?.GetValue<int>() ?? 0),
             "merge" or "merge_party" => JoinParty(
                 targetQuery: p?["target"]?.GetValue<string>() ?? "",
@@ -50,7 +51,7 @@ public sealed class PartyManagerService
             "join" or "join_party" or "apply" => JoinParty(
                 targetQuery: p?["target"]?.GetValue<string>() ?? "",
                 explicitTeamId: p?["team_id"]?.GetValue<long>() ?? 0L,
-                leaveFirst: p?["leave_first"]?.GetValue<bool>() ?? true),
+                leaveFirst: JsonNodeHelpers.GetNullableBool(p, "leave_first") ?? true),
             "leave" or "quit" or "leave_party" => LeaveParty(),
             "invite" or "invite_player" => InvitePlayer(p?["target"]?.GetValue<string>() ?? ""),
             "accept_apply" or "approve_all" => AcceptIncomingApplications(),

@@ -90,6 +90,7 @@ public sealed class FollowPartyBehavior : IBehavior
     private float _gimmickApproachTotalTimer;
     private TraversalGimmickCandidate? _approachGimmick;
     private readonly List<(int SceneId, int TpId, double UsedAtSec)> _recentIntraWarps = new();
+    private readonly FollowTrailBuffer _targetTrail = new();
 
     public string Kind => "follow_player";
     public bool IsFinished { get; private set; }
@@ -139,6 +140,7 @@ public sealed class FollowPartyBehavior : IBehavior
         _dungeonExitConfirmTimer = 0f;
         _unenterableVerifyTimer = 0f;
         _recentIntraWarps.Clear();
+        _targetTrail.Clear();
         _lastAttemptTargetSceneId = 0;
         _moveDriver.Install(this);
 
@@ -292,6 +294,7 @@ public sealed class FollowPartyBehavior : IBehavior
                 _dungeonExitConfirmTimer = 0f;
                 _pendingAsyncId = null;
                 _recentIntraWarps.Clear();
+                _targetTrail.Clear();
                 _world.ResetSocialRefreshThrottle(target.CharId);
                 target = _world.FindAnyPlayerTarget(
                     _initialTargetQuery,
@@ -313,6 +316,7 @@ public sealed class FollowPartyBehavior : IBehavior
             _teleportAttempts = 0;
             _transferWaitTimer = 0f;
             _hasLastTargetPos = false;
+            _targetTrail.Clear();
             _boost.PathNavigator.Reset();
             _minRequiredSocialTickMs = Environment.TickCount64;
             _awaitFreshSocialTimer = 3.0f;
@@ -516,6 +520,7 @@ public sealed class FollowPartyBehavior : IBehavior
                 _lastAttemptTargetSceneId = target.SceneId;
                 bool leaveFirst = _teleportAttempts >= 2;
                 _phase = "requesting_map_teleport";
+                _targetTrail.Clear();
                 var tpRes = _navigator.RequestTeleportToSceneOrMember(
                     target.SceneId,
                     target.Position,
@@ -578,6 +583,7 @@ public sealed class FollowPartyBehavior : IBehavior
                     _intraMapTpCooldown = MathF.Min(_intraMapTpCooldown, PostJumpMinWarpCooldownSec);
                     _intraMapEvalTimer = 0f;
                     _holdingInRange = false;
+                    _targetTrail.Clear();
                     _boost.PathNavigator.Reset();
                 }
             }
@@ -785,6 +791,7 @@ public sealed class FollowPartyBehavior : IBehavior
                     _outOfAoiCloseTimer = 0f;
                     _world.ResetSocialRefreshThrottle(target.CharId);
                     _phase = "requesting_channel_switch";
+                    _targetTrail.Clear();
                     var chRes = _navigator.RequestSwitchChannelForMember(target.CharId, target.LineId);
                     _pendingAsyncId = chRes["async_id"]?.GetValue<string>();
                     _detail = chRes.ToJsonString();
@@ -830,6 +837,11 @@ public sealed class FollowPartyBehavior : IBehavior
         _lastDistance = MathF.Sqrt(dx * dx + dz * dz);
 
         bool hasTargetElevation = target.InAoi || MathF.Abs(targetVec.y) > 0.01f;
+        if (target.InAoi && hasTargetElevation)
+        {
+            bool targetGrounded = _boost.PathNavigator.SensorHasGroundNear(targetVec);
+            _targetTrail.RecordTargetSample(targetVec.x, targetVec.y, targetVec.z, targetGrounded);
+        }
         float heightDiff = hasTargetElevation ? (targetVec.y - localVec.y) : 0f;
         float elevThresh = MathF.Max(0.6f, _config.ElevationJumpThresholdMeters);
         bool targetAboveUs = _config.EnableObstacleJump && !_boost.IsConservingStamina && !_boost.IsSwimming && hasTargetElevation && heightDiff >= elevThresh;
@@ -906,6 +918,7 @@ public sealed class FollowPartyBehavior : IBehavior
             _approachGimmick = null;
             _gimmickApproachStallTimer = 0f;
             _gimmickApproachTotalTimer = 0f;
+            _targetTrail.Clear();
             _boost.Reset();
             _moveDriver.Stop(this);
             _phase = "traversal_flight";
@@ -1050,6 +1063,21 @@ public sealed class FollowPartyBehavior : IBehavior
             _phase = _catchingUpToTarget
                 ? "catching_up_from_combat"
                 : (target.InAoi ? "following_live_aoi" : "approaching_far_same_scene");
+
+            _targetTrail.AdvancePassed(localVec.x, localVec.y, localVec.z);
+            bool trailHelpful = _lastDistance > 7.0f
+                || MathF.Abs(heightDiff) >= 2.2f
+                || _boost.PathNavigator.IsCliffAhead
+                || _boost.PathNavigator.IsDetouring
+                || _boost.PathNavigator.ActiveNavMode == "cliff_hold";
+            if (_targetTrail.TryGetNextStep(localVec.x, localVec.y, localVec.z, targetVec.x, targetVec.y, targetVec.z, trailHelpful, out var crumb))
+            {
+                navGoal = new Vector3(crumb.X, crumb.Y, crumb.Z);
+                float cdx = crumb.X - localVec.x;
+                float cdz = crumb.Z - localVec.z;
+                navDist = MathF.Sqrt(cdx * cdx + cdz * cdz);
+                extraDetail = $", trail({_targetTrail.Count})";
+            }
         }
 
         float baseScale = (_approachGimmick == null && (!sameFloorForStop || climbOverrideActive || _lastDistance >= _stopDistance + 2.2f)) ? 1.0f : 0.65f;
@@ -1105,6 +1133,7 @@ public sealed class FollowPartyBehavior : IBehavior
         _approachGimmick = null;
         _gimmickApproachStallTimer = 0f;
         _gimmickApproachTotalTimer = 0f;
+        _targetTrail.Clear();
         _traversal?.ResetFlightState();
         _boost.Reset();
         _autoCombat.SuppressForCatchup = false;
@@ -1122,6 +1151,7 @@ public sealed class FollowPartyBehavior : IBehavior
         _approachGimmick = null;
         _gimmickApproachStallTimer = 0f;
         _gimmickApproachTotalTimer = 0f;
+        _targetTrail.Clear();
         _traversal?.ResetFlightState();
         _boost.Reset();
         _autoCombat.SuppressForCatchup = false;

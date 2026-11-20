@@ -663,16 +663,18 @@ public sealed class ChatMonitorService
         if (eventMsg["data"] is not JsonObject msgData || JsonNodeHelpers.GetBool(msgData, "is_history", false))
             return;
 
-        string msgIdKey = msgData.TryGetPropertyValue("msg_id", out JsonNode? msgIdNode) && msgIdNode != null
-            ? JsonNodeHelpers.AsString(msgIdNode, "")
-            : "";
-        if (!string.IsNullOrEmpty(msgIdKey) && !TryMarkMsgSeen(connId ?? "", msgIdKey))
-            return;
-
         long senderId = JsonNodeHelpers.GetLong(msgData, "sender_id", 0);
         string senderName = JsonNodeHelpers.GetString(msgData, "sender_name", "").Trim();
         string text = JsonNodeHelpers.GetString(msgData, "text", "").Trim();
         if (string.IsNullOrEmpty(text))
+            return;
+
+        string normCh = BridgePolicy.NormalizeChannel(JsonNodeHelpers.GetString(msgData, "channel", ""));
+        string tsKey = JsonNodeHelpers.GetString(msgData, "timestamp", "").Trim();
+        string msgIdKey = msgData.TryGetPropertyValue("msg_id", out JsonNode? msgIdNode) && msgIdNode != null
+            ? JsonNodeHelpers.AsString(msgIdNode, "")
+            : "";
+        if (!string.IsNullOrEmpty(msgIdKey) && !TryMarkMsgSeen(connId ?? "", normCh, msgIdKey, tsKey, senderId, text))
             return;
 
         if (senderId > 0 && !string.IsNullOrEmpty(senderName))
@@ -680,8 +682,6 @@ public sealed class ChatMonitorService
 
         if (_echoGuard.IsRecent(text))
             return;
-
-        string normCh = BridgePolicy.NormalizeChannel(JsonNodeHelpers.GetString(msgData, "channel", ""));
         if (normCh == "unknown" && senderId > 0)
         {
             if (cfg.Channels.Contains("party"))
@@ -1910,6 +1910,7 @@ public sealed class ChatMonitorService
                 category = "note";
             string memKey = FirstNonEmpty(
                 JsonNodeHelpers.GetString(act, "mem_key", ""),
+                JsonNodeHelpers.GetString(act, "key", ""),
                 JsonNodeHelpers.GetString(act, "title", ""),
                 JsonNodeHelpers.GetString(act, "name", "")).Trim();
             string content = FirstNonEmpty(
@@ -1938,6 +1939,7 @@ public sealed class ChatMonitorService
         long rawMid = JsonNodeHelpers.GetLong(act, "memory_id", 0);
         string delKey = FirstNonEmpty(
             JsonNodeHelpers.GetString(act, "mem_key", ""),
+            JsonNodeHelpers.GetString(act, "key", ""),
             JsonNodeHelpers.GetString(act, "title", ""),
             JsonNodeHelpers.GetString(act, "name", "")).Trim();
         string delCat = JsonNodeHelpers.GetString(act, "category", "").Trim().ToLowerInvariant();
@@ -2453,7 +2455,7 @@ public sealed class ChatMonitorService
                     new JsonObject
                     {
                         ["action"] = "craft_goal",
-                        ["target"] = JsonNodeHelpers.GetString(pending, "query", ""),
+                        ["target"] = JsonNodeHelpers.GetFirstString(pending, "item", "query"),
                         ["result"] = new JsonObject
                         {
                             ["cancelled"] = true,
@@ -3083,9 +3085,11 @@ public sealed class ChatMonitorService
         return 0L;
     }
 
-    private bool TryMarkMsgSeen(string connId, string msgIdKey)
+    private bool TryMarkMsgSeen(string connId, string channel, string msgIdKey, string timestamp, long senderId, string text)
     {
-        string composite = $"{connId}\0{msgIdKey}";
+        string composite = !string.IsNullOrEmpty(timestamp)
+            ? $"{connId}\0{channel}\0{msgIdKey}\0{timestamp}\0{senderId}"
+            : $"{connId}\0{channel}\0{msgIdKey}\0{senderId}\0{text}";
         lock (_stateLock)
         {
             if (!_seenMsgKeysSet.Add(composite))

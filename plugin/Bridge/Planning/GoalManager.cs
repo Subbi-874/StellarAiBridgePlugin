@@ -45,6 +45,18 @@ public static class GoalHelpers
         "spot",
         "gimmick",
         "enable",
+        "enabled",
+        "admin_only",
+        "key",
+        "policy_key",
+        "channel",
+        "text",
+        "target_char_id",
+        "dungeon_id",
+        "interaction_name",
+        "op",
+        "mode",
+        "place",
         "continuous",
         "recipe_id",
         "query",
@@ -176,10 +188,11 @@ public static class GoalHelpers
         }
 
         bool continuous;
-        if (raw.TryGetPropertyValue("continuous", out JsonNode? contNode) && contNode != null)
-            continuous = JsonNodeHelpers.IsTruthy(contNode);
+        bool? rawCont = JsonNodeHelpers.GetNullableBool(raw, "continuous");
+        if (rawCont.HasValue)
+            continuous = rawCont.Value;
         else if (atype == "follow_player")
-            continuous = !parameters.TryGetPropertyValue("continuous", out JsonNode? pCont) || JsonNodeHelpers.IsTruthy(pCont);
+            continuous = JsonNodeHelpers.GetNullableBool(parameters, "continuous") ?? true;
         else if (atype is "fish" or "gather_resource")
             continuous = targetCount == 0;
         else
@@ -222,9 +235,8 @@ public static class GoalHelpers
                 steps.Add(single);
         }
 
-        bool resumable = act.TryGetPropertyValue("resumable", out JsonNode? resNode) && resNode != null
-            ? JsonNodeHelpers.IsTruthy(resNode)
-            : !steps.Any(s => s.ActionType == "enter_dungeon");
+        bool resumable = JsonNodeHelpers.GetNullableBool(act, "resumable")
+            ?? !steps.Any(s => s.ActionType == "enter_dungeon");
 
         act.TryGetPropertyValue("priority", out JsonNode? prioNode);
         GoalPriority priority = ParsePriority(prioNode, GoalPriority.Command);
