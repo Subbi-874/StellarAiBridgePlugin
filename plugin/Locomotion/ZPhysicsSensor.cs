@@ -383,7 +383,7 @@ public sealed class ZPhysicsSensor : IPhysicsWalkabilityProbe
         if (!EnsureResolved())
             return false;
 
-        float clampedMax = Math.Clamp(maxDropDepth, 1.5f, 30.0f);
+        float clampedMax = Math.Clamp(maxDropDepth, 1.5f, 85.0f);
         if (!TrySampleGroundHeight(x, refY, z, out groundY, upOffset: 0.45f, downDepth: clampedMax, radius: radius))
             return false;
 
@@ -464,6 +464,103 @@ public sealed class ZPhysicsSensor : IPhysicsWalkabilityProbe
 
         float headDist = MathF.Min(checkDist, 2.6f);
         return IsBlocked(head, head + dir * headDist, 0.34f, ignoreStep: true);
+    }
+
+    /// <summary>
+    /// Probes straight up at the player and (unless <paramref name="verticalOnly"/>) just ahead along <paramref name="dir"/>
+    /// to reject wall-climbing when an overhanging ceiling / roof would trap or block ascent.
+    /// </summary>
+    public bool HasOverheadCeiling(Vector3 localPos, Vector3 dir, float forwardOffset = 0.85f, float checkHeight = 5.5f, bool verticalOnly = false)
+    {
+        if (!EnsureResolved())
+            return false;
+
+        Vector3 upFrom = new(localPos.x, localPos.y + 1.55f, localPos.z);
+        Vector3 upTo = new(localPos.x, localPos.y + checkHeight, localPos.z);
+        if (IsBlocked(upFrom, upTo, 0.26f, ignoreStep: true))
+            return true;
+
+        if (verticalOnly)
+            return false;
+
+        Vector3 flatDir = new(dir.x, 0f, dir.z);
+        if (flatDir.sqrMagnitude >= 1e-4f)
+        {
+            flatDir = flatDir.normalized;
+            Vector3 chestFrom = new(localPos.x, localPos.y + 1.30f, localPos.z);
+            float chestClear = ProbeClearDistance(chestFrom, flatDir, MathF.Max(forwardOffset + 0.40f, 1.25f), 0.28f, ignoreStep: true);
+            float safeAhead = MathF.Min(forwardOffset, chestClear - 0.10f);
+            if (safeAhead >= 0.22f)
+            {
+                Vector3 ahead = localPos + flatDir * safeAhead;
+                Vector3 aheadFrom = new(ahead.x, localPos.y + 1.55f, ahead.z);
+                Vector3 aheadTo = new(ahead.x, localPos.y + checkHeight, ahead.z);
+                if (IsBlocked(aheadFrom, aheadTo, 0.26f, ignoreStep: true))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Samples downward from elevated space in front of the player to estimate the vertical
+    /// height of a blocking wall/ledge above current feet elevation.
+    /// </summary>
+    public bool TryMeasureObstacleTopHeight(Vector3 localPos, Vector3 dir, float probeDist, float maxMeasureHeight, out float obstacleHeightAboveFeet)
+    {
+        obstacleHeightAboveFeet = 0f;
+        if (!EnsureResolved())
+            return false;
+
+        Vector3 flatDir = new(dir.x, 0f, dir.z);
+        if (flatDir.sqrMagnitude < 1e-6f)
+            return false;
+
+        flatDir = flatDir.normalized;
+        float maxProbe = Math.Clamp(probeDist, 0.8f, 2.6f);
+        Vector3 waistFrom = new(localPos.x, localPos.y + 0.65f, localPos.z);
+        Vector3 chestFrom = new(localPos.x, localPos.y + 1.30f, localPos.z);
+        float waistClear = ProbeClearDistance(waistFrom, flatDir, maxProbe, 0.30f, ignoreStep: true);
+        float chestClear = ProbeClearDistance(chestFrom, flatDir, maxProbe, 0.30f, ignoreStep: true);
+        float hitDist = MathF.Min(waistClear, chestClear);
+
+        float[] sampleDists = hitDist < maxProbe - 0.05f
+            ? new[]
+            {
+                Math.Clamp(hitDist + 0.32f, 0.45f, maxProbe + 0.35f),
+                Math.Clamp(hitDist + 0.65f, 0.45f, maxProbe + 0.35f),
+                Math.Clamp(hitDist + 1.15f, 0.45f, maxProbe + 0.35f)
+            }
+            : new[] { 0.85f, 1.45f, 2.15f };
+
+        float upOffset = Math.Clamp(maxMeasureHeight, 2.5f, 18.0f);
+        bool found = false;
+        float bestHeight = 0f;
+        for (int i = 0; i < sampleDists.Length; i++)
+        {
+            Vector3 sampleXZ = localPos + flatDir * sampleDists[i];
+            if (TrySampleGroundHeight(
+                sampleXZ.x,
+                localPos.y,
+                sampleXZ.z,
+                out float topY,
+                upOffset: upOffset,
+                downDepth: 0.4f,
+                radius: 0.24f)
+                && topY > localPos.y + 0.35f)
+            {
+                float h = topY - localPos.y;
+                if (!found || h > bestHeight)
+                {
+                    bestHeight = h;
+                    found = true;
+                }
+            }
+        }
+
+        obstacleHeightAboveFeet = bestHeight;
+        return found;
     }
 
     /// <summary>

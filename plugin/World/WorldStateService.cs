@@ -236,6 +236,11 @@ public sealed class WorldStateService : IDisposable
                 yaw = liveYaw;
                 inAoi = true;
             }
+            else if (_social.TryReadEntityAoiPosition(m.CharId, out var luaAoiPos))
+            {
+                pos = luaAoiPos;
+                inAoi = true;
+            }
 
             int sceneId = m.SceneId;
             int lineId = isSelf ? GetLocalLineId() : 0;
@@ -243,11 +248,16 @@ public sealed class WorldStateService : IDisposable
 
             if (inAoi)
             {
+                // A live AOI entity (or local player) is definitively online even if PartyRoster.Members still has stale IsOnline=false.
+                isOnline = true;
                 sceneId = GetLocalSceneId();
                 lineId = GetLocalLineId();
                 socialRxMs = Environment.TickCount64;
                 if (!isSelf)
+                {
                     PrimeEntityLocBaseline(m.CharId);
+                    RecordAoiOnlineObservation(m.CharId, sceneId, lineId, pos, socialRxMs);
+                }
             }
             else
             {
@@ -262,8 +272,9 @@ public sealed class WorldStateService : IDisposable
                     allowReturnFieldGuard: sceneId >= 1000);
             }
 
-            // Whenever a party member is NOT in our AOI, continuously refresh their live channel & position!
-            if (!isSelf && requestSocialIfMissingLine && m.IsOnline && !inAoi)
+            // Whenever a party member is NOT in our AOI, continuously refresh their live online/channel/position
+            // even if PartyRoster.Members currently reports stale m.IsOnline == false!
+            if (!isSelf && requestSocialIfMissingLine && !inAoi)
             {
                 bool fast = activeFollowCharId > 0 && m.CharId == activeFollowCharId;
                 TryRefreshSocialThrottled(m.CharId, fast);
@@ -469,15 +480,10 @@ public sealed class WorldStateService : IDisposable
         {
             var e = sorted[i];
             if (_luaSocialCache.TryGetValue(e.Uid, out var fresh)
-                && rosterNow - fresh.UpdatedTickMs <= SocialCacheTtlMs
-                && fresh.SceneId > 0)
+                && rosterNow - fresh.UpdatedTickMs <= SocialCacheTtlMs)
             {
-                sorted[i] = e with
-                {
-                    IsOnline = fresh.Online,
-                    SceneId = fresh.SceneId,
-                    SceneName = GetSceneName(fresh.SceneId)
-                };
+                string freshSceneName = fresh.SceneId > 0 ? GetSceneName(fresh.SceneId) : e.SceneName;
+                sorted[i] = ApplyFreshLuaSocialToRosterEntry(e, fresh.Online, fresh.SceneId, freshSceneName);
             }
         }
 
@@ -565,6 +571,44 @@ public sealed class WorldStateService : IDisposable
         return 0L;
     }
 
+    public static bool ShouldAcceptLuaSocialHarvest(int? existingSeq, int incomingSeq)
+        => !(existingSeq.HasValue && incomingSeq > 0 && existingSeq.Value == incomingSeq);
+
+    public static SocialRosterEntry ApplyFreshLuaSocialToRosterEntry(
+        SocialRosterEntry entry,
+        bool freshOnline,
+        int freshSceneId,
+        string freshSceneName)
+    {
+        return entry with
+        {
+            IsOnline = freshOnline,
+            SceneId = freshSceneId > 0 ? freshSceneId : entry.SceneId,
+            SceneName = freshSceneId > 0 ? freshSceneName : entry.SceneName
+        };
+    }
+
+    private void RecordAoiOnlineObservation(long charId, int sceneId, int lineId, Position3D pos, long now)
+    {
+        if (charId <= 0) return;
+        if (_luaSocialCache.TryGetValue(charId, out var existing))
+        {
+            if (!existing.Online || existing.Loading || (sceneId > 0 && existing.SceneId != sceneId) || (lineId > 0 && existing.LineId != lineId))
+            {
+                // Preserve existing.Seq so re-harvesting the same pre-login Lua RPC sequence cannot clobber live AOI truth back to offline.
+                _luaSocialCache[charId] = existing with
+                {
+                    Online = true,
+                    SceneId = sceneId > 0 ? sceneId : existing.SceneId,
+                    LineId = lineId > 0 ? lineId : existing.LineId,
+                    Pos = pos,
+                    Loading = false,
+                    UpdatedTickMs = now
+                };
+            }
+        }
+    }
+
     private CachedLuaSocial? GetFreshLuaSocial(long charId, bool forceHarvest = false)
     {
         if (charId <= 0) return null;
@@ -579,22 +623,22 @@ public sealed class WorldStateService : IDisposable
             if (cObj != null)
             {
                 int seq = cObj["seq"]?.GetValue<int>() ?? 0;
-                long updatedAt = now;
-                if (_luaSocialCache.TryGetValue(charId, out var existing) && seq > 0 && existing.Seq == seq)
-                    updatedAt = existing.UpdatedTickMs;
-
-                _luaSocialCache[charId] = new CachedLuaSocial(
-                    Name: cObj["name"]?.GetValue<string>() ?? "",
-                    Online: cObj["online"]?.GetValue<bool>() ?? true,
-                    SceneId: cObj["sceneId"]?.GetValue<int>() ?? 0,
-                    LineId: cObj["lineId"]?.GetValue<int>() ?? 0,
-                    Pos: new Position3D(
-                        cObj["x"]?.GetValue<float>() ?? 0f,
-                        cObj["y"]?.GetValue<float>() ?? 0f,
-                        cObj["z"]?.GetValue<float>() ?? 0f),
-                    Loading: cObj["loading"]?.GetValue<bool>() ?? false,
-                    UpdatedTickMs: updatedAt,
-                    Seq: seq);
+                int? existingSeq = _luaSocialCache.TryGetValue(charId, out var existing) ? existing.Seq : null;
+                if (ShouldAcceptLuaSocialHarvest(existingSeq, seq))
+                {
+                    _luaSocialCache[charId] = new CachedLuaSocial(
+                        Name: cObj["name"]?.GetValue<string>() ?? "",
+                        Online: cObj["online"]?.GetValue<bool>() ?? true,
+                        SceneId: cObj["sceneId"]?.GetValue<int>() ?? 0,
+                        LineId: cObj["lineId"]?.GetValue<int>() ?? 0,
+                        Pos: new Position3D(
+                            cObj["x"]?.GetValue<float>() ?? 0f,
+                            cObj["y"]?.GetValue<float>() ?? 0f,
+                            cObj["z"]?.GetValue<float>() ?? 0f),
+                        Loading: cObj["loading"]?.GetValue<bool>() ?? false,
+                        UpdatedTickMs: now,
+                        Seq: seq);
+                }
             }
         }
 
@@ -624,7 +668,7 @@ public sealed class WorldStateService : IDisposable
 
         freshestTick = Math.Max(hasValidLoc ? locTick : 0L, luaSoc?.UpdatedTickMs ?? 0L);
 
-        void ApplyLoc(ref int sid, ref int lid, ref Position3D p)
+        void ApplyLoc(ref bool online, ref int sid, ref int lid, ref Position3D p)
         {
             if (locOpt is not { } loc) return;
             int locScene = loc.LevelMapId > 0 ? loc.LevelMapId : loc.MapId;
@@ -635,6 +679,7 @@ public sealed class WorldStateService : IDisposable
 
             if (!ignoreReturnFieldMap && locScene > 0)
             {
+                online = true;
                 if (sid > 0 && sid != locScene)
                 {
                     p = default;
@@ -649,7 +694,10 @@ public sealed class WorldStateService : IDisposable
             }
 
             if (HasNonZeroPos(locPos) && (ignoreReturnFieldMap || locScene <= 0 || sid <= 0 || locScene == sid))
+            {
+                online = true;
                 p = locPos;
+            }
         }
 
         void ApplyLua(ref bool online, ref int sid, ref int lid, ref Position3D p)
@@ -686,13 +734,13 @@ public sealed class WorldStateService : IDisposable
         {
             if (luaSoc.UpdatedTickMs >= locTick)
             {
-                ApplyLoc(ref sceneId, ref lineId, ref pos);
+                ApplyLoc(ref isOnline, ref sceneId, ref lineId, ref pos);
                 ApplyLua(ref isOnline, ref sceneId, ref lineId, ref pos);
             }
             else
             {
                 ApplyLua(ref isOnline, ref sceneId, ref lineId, ref pos);
-                ApplyLoc(ref sceneId, ref lineId, ref pos);
+                ApplyLoc(ref isOnline, ref sceneId, ref lineId, ref pos);
             }
         }
         else if (luaSoc != null)
@@ -701,7 +749,7 @@ public sealed class WorldStateService : IDisposable
         }
         else if (hasValidLoc)
         {
-            ApplyLoc(ref sceneId, ref lineId, ref pos);
+            ApplyLoc(ref isOnline, ref sceneId, ref lineId, ref pos);
         }
     }
 
@@ -832,8 +880,15 @@ public sealed class WorldStateService : IDisposable
             socialRxMs = Environment.TickCount64;
         }
 
-        if (inAoi && resolvedCid != selfCharId)
-            PrimeEntityLocBaseline(resolvedCid);
+        if (inAoi)
+        {
+            isOnline = true;
+            if (resolvedCid != selfCharId)
+            {
+                PrimeEntityLocBaseline(resolvedCid);
+                RecordAoiOnlineObservation(resolvedCid, sceneId, lineId, pos, socialRxMs);
+            }
+        }
 
         if (!inAoi)
         {

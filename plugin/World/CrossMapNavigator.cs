@@ -5,6 +5,7 @@ using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters.Combat;
 using Stellar.AgyBridge.Adapters.Movement;
+using Stellar.AgyBridge.Locomotion;
 
 namespace Stellar.AgyBridge.World;
 
@@ -148,10 +149,11 @@ public sealed class CrossMapNavigator
             return TransferBusyJson(blockReason);
 
         float tx = useClosestWarp ? targetPos.X : 0f;
+        float ty = useClosestWarp ? targetPos.Y : 0f;
         float tz = useClosestWarp ? targetPos.Z : 0f;
 
         string? reqId = _movement.StartTeleportToSceneOrMemberCoroutine(
-            targetSceneId, tx, tz, targetCharId, localSceneId, leaveSpecialFirst);
+            targetSceneId, tx, ty, tz, targetCharId, localSceneId, leaveSpecialFirst);
 
         if (reqId == null)
         {
@@ -191,9 +193,7 @@ public sealed class CrossMapNavigator
         if (!_movement.IsLuaReady || sceneId <= 0) return false;
         if (MathF.Abs(targetPos.X) < 0.01f && MathF.Abs(targetPos.Z) < 0.01f) return false;
 
-        float ldx = targetPos.X - localPos.X;
-        float ldz = targetPos.Z - localPos.Z;
-        float myDist = MathF.Sqrt(ldx * ldx + ldz * ldz);
+        float myDist = LocomotionRules.ComputeWarpEffectiveDistance(localPos, targetPos);
         if (myDist < minDistance) return false;
 
         var obj = _movement.FindBestIntraMapWarpRaw(sceneId, targetPos, excludedTpIds);

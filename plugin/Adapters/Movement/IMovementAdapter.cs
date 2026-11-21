@@ -20,10 +20,12 @@ public interface IMovementAdapter : ICapabilityProbe
     string? StartTeleportToSceneOrMemberCoroutine(
         int targetSceneId,
         float targetX,
+        float targetY,
         float targetZ,
         long targetCharId,
         int localSceneId,
         bool leaveSpecialFirst);
+    int GetSceneType(int sceneId);
     JsonObject? FindBestIntraMapWarpRaw(int sceneId, Position3D targetPos, HashSet<int>? excludedTpIds);
     string? StartIntraMapTeleportCoroutine(int sceneId, int transferId);
     string? StartTeleportByQueryCoroutine(string trimmedQuery, int localSceneId, bool leaveSpecialFirst);

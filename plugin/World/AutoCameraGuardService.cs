@@ -7,6 +7,7 @@ using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Core;
+using Stellar.AgyBridge.Locomotion;
 using UnityEngine;
 
 namespace Stellar.AgyBridge.World;
@@ -85,6 +86,13 @@ public sealed class AutoCameraGuardService : IDisposable
     private bool _hasPrevPulseElev;
     private float _prevPulseElevDeg;
 
+    // Horizontal wall-climb yaw alignment (single-owner camera rotation)
+    private float _yawAlignSign = 1f;
+    private bool _hasPrevYawErr;
+    private float _prevAbsYawErrDeg;
+    private long _lastYawPulseMs;
+    private float _yawAlignActiveGrace;
+
     public AutoCameraGuardService(
         IPluginServices services,
         BridgeConfig config,
@@ -119,12 +127,16 @@ public sealed class AutoCameraGuardService : IDisposable
             _directApplyCooldown = MathF.Max(0f, _directApplyCooldown - dt);
         if (_pulseCooldown > 0f)
             _pulseCooldown = MathF.Max(0f, _pulseCooldown - dt);
+        if (_yawAlignActiveGrace > 0f)
+            _yawAlignActiveGrace = MathF.Max(0f, _yawAlignActiveGrace - dt);
 
         if (DetectManualCameraInput())
         {
             _manualYieldTimer = 3.5f;
             _pendingDelay = 0f;
             _restoreWindow = 0f;
+            _hasPrevYawErr = false;
+            _yawAlignActiveGrace = 0f;
             ResetPulseTracking();
         }
 
@@ -208,6 +220,9 @@ public sealed class AutoCameraGuardService : IDisposable
             return;
         }
 
+        if (_yawAlignActiveGrace > 0f)
+            return;
+
         _restoreWindow = MathF.Max(0f, _restoreWindow - dt);
         ExecuteCameraRestoreStep(camMgr, curZoom, zoomMax, curVert, elevDeg);
     }
@@ -236,6 +251,72 @@ public sealed class AutoCameraGuardService : IDisposable
             ["cur_vertical"] = MathF.Round(curVert, 3),
             ["elev_deg"] = elevDeg > -90f ? MathF.Round(elevDeg, 1) : null
         };
+    }
+
+    public void ResetHorizontalYawTracking()
+    {
+        _hasPrevYawErr = false;
+    }
+
+    /// <summary>
+    /// Smoothly aligns horizontal camera yaw toward <paramref name="worldDir"/> so forward stick input
+    /// presses cleanly into a cliff face for wall-climb latching. Shares the manual-input yield,
+    /// camera-state guards, and pitch pulse suppression with the main camera guard.
+    /// </summary>
+    public bool TryAlignHorizontalYaw(Vector3 worldDir, out float absYawErrDeg)
+    {
+        absYawErrDeg = 0f;
+        Vector3 flatDir = new(worldDir.x, 0f, worldDir.z);
+        if (flatDir.sqrMagnitude < 1e-4f)
+            return true;
+
+        EnsureResolved();
+        if (!_ready || _manualYieldTimer > 0f || DetectManualCameraInput())
+        {
+            _hasPrevYawErr = false;
+            return false;
+        }
+
+        ReadCameraRuntime(out object? camMgr, out int camState, out bool isCamAnim, out _, out _, out _, out _);
+        if (camMgr == null || camState != CameraStateDefault || isCamAnim)
+        {
+            _hasPrevYawErr = false;
+            return false;
+        }
+
+        Transform? camTr = (_piMainCamTrans?.GetValue(camMgr) as Transform) ?? Camera.main?.transform;
+        if (camTr == null)
+            return false;
+
+        float yawRightDeg = LocomotionRules.ComputeSignedYawRightDegrees(
+            camTr.forward.x, camTr.forward.z,
+            camTr.right.x, camTr.right.z,
+            flatDir.x, flatDir.z);
+        absYawErrDeg = MathF.Abs(yawRightDeg);
+
+        if (absYawErrDeg <= 12f)
+        {
+            _hasPrevYawErr = false;
+            return true;
+        }
+
+        _yawAlignActiveGrace = 0.20f;
+        long nowMs = Environment.TickCount64;
+        if (nowMs - _lastYawPulseMs >= 40)
+        {
+            if (_hasPrevYawErr && absYawErrDeg > _prevAbsYawErrDeg + 2.0f)
+                _yawAlignSign = -_yawAlignSign;
+
+            _prevAbsYawErrDeg = absYawErrDeg;
+            _hasPrevYawErr = true;
+            _lastYawPulseMs = nowMs;
+
+            float stepMag = Math.Clamp(absYawErrDeg * 0.22f, 1.8f, 12.0f);
+            float deltaX = stepMag * MathF.Sign(yawRightDeg) * _yawAlignSign;
+            InvokeRotation(new Vector2(deltaX, 0f));
+        }
+
+        return absYawErrDeg <= 28f;
     }
 
     public void Dispose()

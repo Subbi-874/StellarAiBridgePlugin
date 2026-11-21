@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Locomotion;
 
 namespace Stellar.AgyBridge.Core;
 
@@ -76,6 +77,7 @@ public sealed class BridgeConfig
     public float BunnyhopDashToJumpSec { get; set; }
     public float BunnyhopCycleCooldownSec { get; set; }
     public float BunnyhopMinStamina { get; set; }
+    public float MinStaminaFloor { get; set; }
     public float LowStaminaConserveRatio { get; set; }
     public float LowStaminaResumeRatio { get; set; }
 
@@ -164,6 +166,7 @@ public sealed class BridgeConfig
         BunnyhopDashToJumpSec = _cfg.Get<float>("bunnyhop_dash_to_jump_sec", 0.14f);
         BunnyhopCycleCooldownSec = _cfg.Get<float>("bunnyhop_cycle_cooldown_sec", 1.15f);
         BunnyhopMinStamina = _cfg.Get<float>("bunnyhop_min_stamina", 25.0f);
+        MinStaminaFloor = Math.Clamp(_cfg.Get<float>("min_stamina_floor", LocomotionRules.DefaultMinStaminaFloor), 0f, 1200f);
         LowStaminaConserveRatio = Math.Clamp(_cfg.Get<float>("low_stamina_conserve_ratio", 0.50f), 0.10f, 0.90f);
         LowStaminaResumeRatio = Math.Clamp(_cfg.Get<float>("low_stamina_resume_ratio", 0.56f), LowStaminaConserveRatio + 0.03f, 0.98f);
 
@@ -915,6 +918,7 @@ public sealed class BridgeConfig
         _cfg.Set("bunnyhop_dash_to_jump_sec", BunnyhopDashToJumpSec);
         _cfg.Set("bunnyhop_cycle_cooldown_sec", BunnyhopCycleCooldownSec);
         _cfg.Set("bunnyhop_min_stamina", BunnyhopMinStamina);
+        _cfg.Set("min_stamina_floor", MinStaminaFloor);
         _cfg.Set("low_stamina_conserve_ratio", LowStaminaConserveRatio);
         _cfg.Set("low_stamina_resume_ratio", LowStaminaResumeRatio);
 

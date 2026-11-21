@@ -173,6 +173,31 @@ public sealed class PlayerMoveDriver : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Injects an explicit camera-independent movement stick vector (e.g. climbing straight up a cliff).
+    /// </summary>
+    public bool TryDriveRawStick(object owner, Vector2 stick, Vector3 worldDirHint)
+    {
+        if (!_injectPatched)
+            InstallInject();
+
+        if (_owner != null && _owner != owner)
+            return false;
+
+        Vector3 flatHint = new(worldDirHint.x, 0f, worldDirHint.z);
+        flatHint = flatHint.sqrMagnitude >= 1e-6f ? flatHint.normalized : Vector3.forward;
+
+        _owner = owner;
+        InjectStick = stick;
+        InjectWorldDir = flatHint;
+        InjectActive = true;
+
+        if (_injectPath == "GetInputDir")
+            TryMove(InjectStick);
+
+        return true;
+    }
+
     public void Stop(object owner)
     {
         if (_owner != owner) return;

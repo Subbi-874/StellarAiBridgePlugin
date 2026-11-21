@@ -32,6 +32,7 @@ public sealed class LuaMovementAdapter : IMovementAdapter
     private MethodInfo? _miGetLuaMaxOriEnergy;
     private MethodInfo? _miGetLuaLocalAttrState;
     private MethodInfo? _miGetLuaAttrVirtualMoveType;
+    private readonly Dictionary<int, int> _sceneTypeCache = new();
 
     public string Domain => "movement";
     public bool IsLuaReady => _lua.IsReady;
@@ -244,7 +245,72 @@ return {
 
     // ─────────────────────── Cross-map / Channels / Teleport / Places ───────────────────────
 
-    private const string SharedSceneRouterLua = @"
+    public int GetSceneType(int sceneId)
+    {
+        if (sceneId <= 0)
+            return 1;
+        if (_sceneTypeCache.TryGetValue(sceneId, out int cached))
+            return cached;
+        if (!_lua.IsReady)
+            return 1;
+
+        var res = _lua.Eval(string.Create(CultureInfo.InvariantCulture, $@"
+local stm = Z.TableMgr and Z.TableMgr.GetTable('SceneTableMgr')
+if not stm or not stm.GetRow then return {{ valid = false, sceneType = 1 }} end
+local ok, r = pcall(function() return stm.GetRow({sceneId}, true) end)
+if not ok or not r then return {{ valid = false, sceneType = 1 }} end
+local st = tonumber(r.SceneType or 0) or 0
+if st == 2 then
+  return {{ valid = true, sceneType = 2 }}
+end
+return {{ valid = true, sceneType = 1 }}
+"));
+        bool valid = res["ok"]?.GetValue<bool>() == true
+            && res["result"] is JsonObject obj
+            && obj["valid"]?.GetValue<bool>() == true;
+        int resolved = valid
+            ? ((res["result"] as JsonObject)?["sceneType"]?.GetValue<int>() ?? 1)
+            : 1;
+        if (valid)
+            _sceneTypeCache[sceneId] = resolved;
+        return resolved;
+    }
+
+    private const string CollectSceneTransferEntitiesLua = @"
+local function collectSceneTransferEntities(sid, tm, mv)
+  local merged = {}
+  local seenTp = {}
+  if not mv or not mv.LoadEntityTableData then return merged end
+  local layers = { [0] = true }
+  if tm and tm.GetTable then
+    local okM, mit = pcall(function() return tm.GetTable('MapInfoTableMgr') end)
+    if okM and mit and mit.GetRow then
+      local okR, mr = pcall(function() return mit.GetRow(sid, true) end)
+      if okR and mr and type(mr.MapHierarchy) == 'table' then
+        for _, l in pairs(mr.MapHierarchy) do
+          local ln = tonumber(l)
+          if ln ~= nil then layers[ln] = true end
+        end
+      end
+    end
+  end
+  for layer, _ in pairs(layers) do
+    local okEnt, ents = pcall(function() return mv.LoadEntityTableData(sid, layer) end)
+    if okEnt and type(ents) == 'table' then
+      for _, e in pairs(ents) do
+        local tpId = tonumber(e.TpPointId or 0) or 0
+        if tpId > 0 and not seenTp[tpId] then
+          seenTp[tpId] = true
+          merged[#merged + 1] = { ent = e, layer = layer }
+        end
+      end
+    end
+  end
+  return merged
+end
+";
+
+    private const string SharedSceneRouterLua = CollectSceneTransferEntitiesLua + @"
 local TM = Z.TableMgr
 local mapVm = Z.VMMgr.GetVM('map')
 local teamVm = Z.VMMgr.GetVM('team')
@@ -447,50 +513,52 @@ local function enterHomeHub(targetScene, curSceneId, targetCharId)
   return { ok = false, error = 'house_vm.EnterHome unavailable' }
 end
 
-local function findUnlockedTransferForScene(targetScene, tx, tz)
+local function findUnlockedTransferForScene(targetScene, tx, ty, tz)
   if not TM or not mapVm then return nil end
   local okTbl, transferTbl = pcall(function() return TM.GetTable('TransferTableMgr') end)
 
   local hasTargetPos = (type(tx) == 'number' and type(tz) == 'number' and (math.abs(tx) > 0.01 or math.abs(tz) > 0.01))
+  local hasTargetY = (type(ty) == 'number' and math.abs(ty) > 0.01)
 
-  -- 1. Prefer closest unlocked warp point from LoadEntityTableData(targetScene, 0) (covers TypeId=105 & TypeId=501)
+  -- 1. Prefer closest unlocked warp point across all MapHierarchy layers (including underground Layer -1)
   if hasTargetPos and mapVm.LoadEntityTableData then
-    local okEnt, ents = pcall(function() return mapVm.LoadEntityTableData(targetScene, 0) end)
-    if okEnt and type(ents) == 'table' then
-      local bestDistSq = nil
-      local bestTpId = nil
-      local bestTpName = nil
-      for _, e in pairs(ents) do
-        local tpId = tonumber(e.TpPointId or 0) or 0
-        if tpId > 0 and e.Pos then
-          local unlocked = true
-          if mapVm.CheckTransferPointUnlock then
-            local okU, u = pcall(function() return mapVm.CheckTransferPointUnlock(tpId) end)
-            if okU then unlocked = (u == true) end
-          end
-          if unlocked then
-            local px = tonumber(e.Pos.x or e.Pos[1] or 0) or 0
-            local pz = tonumber(e.Pos.z or e.Pos[3] or 0) or 0
-            local dx = px - tx
-            local dz = pz - tz
-            local dsq = dx * dx + dz * dz
-            if bestDistSq == nil or dsq < bestDistSq then
-              bestDistSq = dsq
-              bestTpId = tpId
-              bestTpName = ''
-              if okTbl and transferTbl and transferTbl.GetRow then
-                pcall(function()
-                  local r = transferTbl.GetRow(tpId, true)
-                  if r and r.Name then bestTpName = tostring(r.Name) end
-                end)
-              end
+    local entries = collectSceneTransferEntities(targetScene, TM, mapVm)
+    local bestDistSq = nil
+    local bestTpId = nil
+    local bestTpName = nil
+    for _, item in ipairs(entries) do
+      local e = item.ent
+      local tpId = tonumber(e.TpPointId or 0) or 0
+      if tpId > 0 and e.Pos then
+        local unlocked = true
+        if mapVm.CheckTransferPointUnlock then
+          local okU, u = pcall(function() return mapVm.CheckTransferPointUnlock(tpId) end)
+          if okU then unlocked = (u == true) end
+        end
+        if unlocked then
+          local px = tonumber(e.Pos.x or e.Pos[1] or 0) or 0
+          local py = tonumber(e.Pos.y or e.Pos[2] or 0) or 0
+          local pz = tonumber(e.Pos.z or e.Pos[3] or 0) or 0
+          local dx = px - tx
+          local dz = pz - tz
+          local dy = (hasTargetY and math.abs(py) > 0.01) and ((py - ty) * 3.5) or 0
+          local dsq = dx * dx + dz * dz + dy * dy
+          if bestDistSq == nil or dsq < bestDistSq then
+            bestDistSq = dsq
+            bestTpId = tpId
+            bestTpName = ''
+            if okTbl and transferTbl and transferTbl.GetRow then
+              pcall(function()
+                local r = transferTbl.GetRow(tpId, true)
+                if r and r.Name then bestTpName = tostring(r.Name) end
+              end)
             end
           end
         end
       end
-      if bestTpId ~= nil then
-        return bestTpId, bestTpName
-      end
+    end
+    if bestTpId ~= nil then
+      return bestTpId, bestTpName
     end
   end
 
@@ -518,7 +586,7 @@ local function findUnlockedTransferForScene(targetScene, tx, tz)
   return bestId, bestName
 end
 
-local function routeToScene(targetScene, curSceneId, targetCharId, explicitTransferId, leaveSpecialFirst, tx, tz)
+local function routeToScene(targetScene, curSceneId, targetCharId, explicitTransferId, leaveSpecialFirst, tx, ty, tz)
   curSceneId = getLiveSceneId(curSceneId)
   explicitTransferId = explicitTransferId or 0
   targetCharId = targetCharId or 0
@@ -573,7 +641,7 @@ local function routeToScene(targetScene, curSceneId, targetCharId, explicitTrans
         if r then tpName = tostring(r.Name or '') end
       end)
     else
-      tpId, tpName = findUnlockedTransferForScene(targetScene, tx, tz)
+      tpId, tpName = findUnlockedTransferForScene(targetScene, tx, ty, tz)
     end
 
     if tpId ~= nil then
@@ -746,6 +814,7 @@ return {{ ok = true, method = 'AsyncReqSwitchSceneLineByLineId', line_id = targe
     public string? StartTeleportToSceneOrMemberCoroutine(
         int targetSceneId,
         float targetX,
+        float targetY,
         float targetZ,
         long targetCharId,
         int localSceneId,
@@ -755,10 +824,10 @@ return {{ ok = true, method = 'AsyncReqSwitchSceneLineByLineId', line_id = targe
 
         string header = string.Create(
             CultureInfo.InvariantCulture,
-            $"local targetScene = {targetSceneId}\nlocal curSceneId = {localSceneId}\nlocal targetCharId = {targetCharId}\nlocal leaveFirst = {LuaLiteral.Bool(leaveSpecialFirst)}\nlocal tx = {targetX:F2}\nlocal tz = {targetZ:F2}\n");
+            $"local targetScene = {targetSceneId}\nlocal curSceneId = {localSceneId}\nlocal targetCharId = {targetCharId}\nlocal leaveFirst = {LuaLiteral.Bool(leaveSpecialFirst)}\nlocal tx = {targetX:F2}\nlocal ty = {targetY:F2}\nlocal tz = {targetZ:F2}\n");
 
         return _lua.StartCoroutineRpc(
-            header + SharedSceneRouterLua + "\nreturn routeToScene(targetScene, curSceneId, targetCharId, 0, leaveFirst, tx, tz)\n");
+            header + SharedSceneRouterLua + "\nreturn routeToScene(targetScene, curSceneId, targetCharId, 0, leaveFirst, tx, ty, tz)\n");
     }
 
     public JsonObject? FindBestIntraMapWarpRaw(int sceneId, Position3D targetPos, HashSet<int>? excludedTpIds)
@@ -781,21 +850,25 @@ return {{ ok = true, method = 'AsyncReqSwitchSceneLineByLineId', line_id = targe
 
         string header = string.Create(
             CultureInfo.InvariantCulture,
-            $"local sid = {sceneId}\nlocal tx = {targetPos.X:F2}\nlocal tz = {targetPos.Z:F2}\n") + exclSb.ToString();
+            $"local sid = {sceneId}\nlocal tx = {targetPos.X:F2}\nlocal ty = {targetPos.Y:F2}\nlocal tz = {targetPos.Z:F2}\n") + exclSb.ToString();
 
-        const string body = @"
+        const string body = CollectSceneTransferEntitiesLua + @"
+local TM = Z.TableMgr
 local mapVm = Z.VMMgr.GetVM('map')
-local ttm = Z.TableMgr and Z.TableMgr.GetTable('TransferTableMgr')
+local ttm = TM and TM.GetTable('TransferTableMgr')
 if not mapVm or not mapVm.LoadEntityTableData then return { found = false } end
 
-local okEnt, ents = pcall(function() return mapVm.LoadEntityTableData(sid, 0) end)
-if not okEnt or type(ents) ~= 'table' then return { found = false } end
+local entries = collectSceneTransferEntities(sid, TM, mapVm)
+if #entries == 0 then return { found = false } end
 
+local hasTargetY = (type(ty) == 'number' and math.abs(ty) > 0.01)
 local bestDist = nil
 local bestId = 0
 local bestName = ''
+local bestLayer = 0
 
-for _, e in pairs(ents) do
+for _, item in ipairs(entries) do
+  local e = item.ent
   local tpId = tonumber(e.TpPointId or 0) or 0
   if tpId > 0 and not excl[tpId] and e.Pos then
     local unlocked = true
@@ -805,13 +878,16 @@ for _, e in pairs(ents) do
     end
     if unlocked then
       local px = tonumber(e.Pos.x or e.Pos[1] or 0) or 0
+      local py = tonumber(e.Pos.y or e.Pos[2] or 0) or 0
       local pz = tonumber(e.Pos.z or e.Pos[3] or 0) or 0
       local dx = px - tx
       local dz = pz - tz
-      local d = math.sqrt(dx * dx + dz * dz)
+      local dy = (hasTargetY and math.abs(py) > 0.01) and ((py - ty) * 3.5) or 0
+      local d = math.sqrt(dx * dx + dz * dz + dy * dy)
       if bestDist == nil or d < bestDist then
         bestDist = d
         bestId = tpId
+        bestLayer = item.layer
         bestName = ''
         if ttm and ttm.GetRow then
           pcall(function()
@@ -825,7 +901,7 @@ for _, e in pairs(ents) do
 end
 
 if bestId > 0 and bestDist ~= nil then
-  return { found = true, tpId = bestId, tpName = bestName, tpDist = bestDist }
+  return { found = true, tpId = bestId, tpName = bestName, tpDist = bestDist, tpLayer = bestLayer }
 end
 return { found = false }
 ";
@@ -845,7 +921,7 @@ return { found = false }
             $"local targetScene = {sceneId}\nlocal curSceneId = {sceneId}\nlocal tpId = {transferId}\n");
 
         return _lua.StartCoroutineRpc(
-            header + SharedSceneRouterLua + "\nreturn routeToScene(targetScene, curSceneId, 0, tpId, false, 0, 0)\n");
+            header + SharedSceneRouterLua + "\nreturn routeToScene(targetScene, curSceneId, 0, tpId, false, 0, 0, 0)\n");
     }
 
     public string? StartTeleportByQueryCoroutine(string trimmedQuery, int localSceneId, bool leaveSpecialFirst)

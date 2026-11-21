@@ -1090,36 +1090,52 @@ local function buildFishingCatalog()
   end
   for sobjId, _ in pairs(sobjToArea) do fishSobjSet[sobjId] = true end
 
-  -- Cache unlocked/available warp landmarks per scene
+  -- Cache unlocked/available warp landmarks across all MapHierarchy layers per scene
+  local mit = TM and TM.GetTable('MapInfoTableMgr')
   local warpsByScene = {}
   local function getSceneWarps(sid)
     if warpsByScene[sid] ~= nil then return warpsByScene[sid] end
     local wlist = {}
+    local seenTp = {}
     if mapVm and mapVm.LoadEntityTableData then
-      local okE, ents = pcall(function() return mapVm.LoadEntityTableData(sid, 0) end)
-      if okE and type(ents) == 'table' then
-        for _, e in pairs(ents) do
-          local tpId = tonumber(e.TpPointId or 0) or 0
-          if tpId > 0 and e.Pos then
-            local unlocked = true
-            if mapVm.CheckTransferPointUnlock then
-              local okU, u = pcall(function() return mapVm.CheckTransferPointUnlock(tpId) end)
-              if okU then unlocked = (u == true) end
+      local layers = { [0] = true }
+      if mit and mit.GetRow then
+        local okM, mr = pcall(function() return mit.GetRow(sid, true) end)
+        if okM and mr and type(mr.MapHierarchy) == 'table' then
+          for _, l in pairs(mr.MapHierarchy) do
+            local ln = tonumber(l)
+            if ln ~= nil then layers[ln] = true end
+          end
+        end
+      end
+      for layer, _ in pairs(layers) do
+        local okE, ents = pcall(function() return mapVm.LoadEntityTableData(sid, layer) end)
+        if okE and type(ents) == 'table' then
+          for _, e in pairs(ents) do
+            local tpId = tonumber(e.TpPointId or 0) or 0
+            if tpId > 0 and not seenTp[tpId] and e.Pos then
+              seenTp[tpId] = true
+              local unlocked = true
+              if mapVm.CheckTransferPointUnlock then
+                local okU, u = pcall(function() return mapVm.CheckTransferPointUnlock(tpId) end)
+                if okU then unlocked = (u == true) end
+              end
+              local tr = ttm and ttm.GetRow(tpId, true) or nil
+              local nm = tr and tostring(tr.Name or '') or ''
+              nm = nm:gsub('^순간%s*이동%s*[-–:]?%s*', '')
+              nm = nm:gsub('^[Tt]eleport%s*[-–:]?%s*', '')
+              nm = nm:gsub('^[Ww]arp%s*[-–:]?%s*', '')
+              nm = nm:gsub('^テレポート%s*[-–：:]?%s*', '')
+              nm = nm:gsub('^転送%s*[-–：:]?%s*', '')
+              wlist[#wlist + 1] = {
+                tp_id = tpId,
+                name = nm,
+                unlocked = unlocked,
+                x = tonumber(e.Pos.x or e.Pos[1] or 0) or 0,
+                y = tonumber(e.Pos.y or e.Pos[2] or 0) or 0,
+                z = tonumber(e.Pos.z or e.Pos[3] or 0) or 0
+              }
             end
-            local tr = ttm and ttm.GetRow(tpId, true) or nil
-            local nm = tr and tostring(tr.Name or '') or ''
-            nm = nm:gsub('^순간%s*이동%s*[-–:]?%s*', '')
-            nm = nm:gsub('^[Tt]eleport%s*[-–:]?%s*', '')
-            nm = nm:gsub('^[Ww]arp%s*[-–:]?%s*', '')
-            nm = nm:gsub('^テレポート%s*[-–：:]?%s*', '')
-            nm = nm:gsub('^転送%s*[-–：:]?%s*', '')
-            wlist[#wlist + 1] = {
-              tp_id = tpId,
-              name = nm,
-              unlocked = unlocked,
-              x = tonumber(e.Pos.x or 0) or 0,
-              z = tonumber(e.Pos.z or 0) or 0
-            }
           end
         end
       end

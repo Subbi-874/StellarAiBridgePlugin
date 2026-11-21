@@ -146,6 +146,7 @@ public sealed class Plugin : IStellarPlugin
             new ZPhysicsSensor(_services),
             () => _behaviors.Current);
         _cameraGuard = new AutoCameraGuardService(_services, _config, _world, _autoCombat, _behaviors);
+        _boost.AttachCameraGuard(_cameraGuard);
         _ecoMode = new EcoModeService(_services, _config);
 
         _bridgeHost = new LeaderBridgeHost(
@@ -234,7 +235,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v1.0.7. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v1.1.0. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeaturePolicyChanged(string key, FeaturePolicyState policy)

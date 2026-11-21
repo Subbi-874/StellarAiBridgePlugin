@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters.Movement;
 using Stellar.AgyBridge.Core;
+using Stellar.AgyBridge.World;
 using UnityEngine;
 
 namespace Stellar.AgyBridge.Locomotion;
@@ -17,9 +18,13 @@ namespace Stellar.AgyBridge.Locomotion;
 /// </summary>
 public sealed class LocomotionBoostController
 {
+    private const int ActorStateJump = 3;
+    private const int ActorStateClimb = 5;
     private const int ActorStateSwim = 6;
+    private const int ActorStateFall = 14;
     private const int ActorStateFlow = 16;
     private const int ActorStateGlide = 17;
+    private const int ActorStatePedalWall = 18;
     private const int MoveDash = 3;
     private const int MoveParkourRun = 11;
 
@@ -63,11 +68,28 @@ public sealed class LocomotionBoostController
     private float _lastStaminaRatio = 1f;
     private float _lastCurStamina;
     private float _lastMaxStamina;
+    private float _effectiveConserveFloor;
     private float _prevRawStamina = -1f;
     private int _lastActorState;
-    private int _lastVirtualMoveType;
     private float _sprintBreakPauseTimer;
     private float _sprintBreakCooldown;
+
+    // Zone-aware wall-climb, fall float->glide, pure dash & stepping-stone air jump state
+    private int _gapRemainingAirJumps;
+    private float _fieldDashCooldownTimer;
+    private bool _wasGrounded = true;
+    private float _airborneStartY;
+    private float _airborneFallTimer;
+    private float _flowToGlideTimer;
+    private float _flowInvokeCooldown;
+    private bool _autoGlideActive;
+    private float _wallClimbLatchCooldown;
+    private string _lastLoggedBoostMode = "";
+    private float _wallDiagLogTimer;
+    private AutoCameraGuardService? _cameraGuard;
+    private float _wallAlignWaitTimer;
+    private float _lastWallYawErrDeg;
+    private int _wallLatchAttemptCount;
 
     // Stuck & vertical elevation rapid-jump state
     private bool _hasProgressAnchor;
@@ -87,6 +109,8 @@ public sealed class LocomotionBoostController
     public bool IsConservingStamina => _conservingStamina;
     public bool IsSwimming => _lastActorState == ActorStateSwim;
     public float LastStaminaRatio => _lastStaminaRatio;
+    public float LastCurStamina => _lastCurStamina;
+    public float LastMaxStamina => _lastMaxStamina;
     public float SuggestedSteerYawOffset => (!_config.EnableSmartPathfinding && _rapidJumpActiveTimer > 0f && _stuckCounter >= 4) ? (38f * _sidestepSign) : 0f;
 
     public LocomotionBoostController(IPluginServices services, BridgeConfig config, IMovementAdapter movement)
@@ -97,13 +121,30 @@ public sealed class LocomotionBoostController
         PathNavigator = new SmartPathNavigator(_services, _config, new ZPhysicsSensor(_services));
     }
 
+    public void AttachCameraGuard(AutoCameraGuardService cameraGuard) => _cameraGuard = cameraGuard;
+
     public void Reset()
     {
         ResetBoostInputsOnly();
         _conservingStamina = false;
+        _effectiveConserveFloor = 0f;
         _prevRawStamina = -1f;
         _sprintBreakPauseTimer = 0f;
         _sprintBreakCooldown = 0f;
+        _wasGrounded = true;
+        _airborneStartY = 0f;
+        _airborneFallTimer = 0f;
+        _flowToGlideTimer = 0f;
+        _flowInvokeCooldown = 0f;
+        _autoGlideActive = false;
+        _wallClimbLatchCooldown = 0f;
+        _fieldDashCooldownTimer = 0f;
+        _lastLoggedBoostMode = "";
+        _wallDiagLogTimer = 0f;
+        _wallAlignWaitTimer = 0f;
+        _lastWallYawErrDeg = 0f;
+        _wallLatchAttemptCount = 0;
+        _cameraGuard?.ResetHorizontalYawTracking();
         PathNavigator.Reset();
     }
 
@@ -117,8 +158,21 @@ public sealed class LocomotionBoostController
         _rapidJumpActiveTimer = 0f;
         _rapidJumpPulseCooldown = 0f;
         _gapDoubleJumpTimer = 0f;
+        _gapRemainingAirJumps = 0;
         _sidestepFlipTimer = 0f;
         _activeBoostMode = "walk";
+
+        if (_autoGlideActive)
+        {
+            InvokeGlide(false);
+            InvokeFlow(false);
+            _autoGlideActive = false;
+        }
+        _flowToGlideTimer = 0f;
+        _flowInvokeCooldown = 0f;
+        _wallAlignWaitTimer = 0f;
+        _lastWallYawErrDeg = 0f;
+        _wallLatchAttemptCount = 0;
 
         if (!_dodgePulseActive)
         {
@@ -163,20 +217,65 @@ public sealed class LocomotionBoostController
         long targetKey = 0L,
         bool allowLedgeClimb = false)
     {
+        int sceneType = _movement.GetSceneType(sceneId);
+        var zoneProfile = LocomotionRules.GetZoneProfile(sceneType);
+        bool isWallClimbingNow = _lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb;
+        bool isGlidingOrFlowingNow = _lastActorState is ActorStateFlow or ActorStateGlide;
+
         Vector3 steerTarget = PathNavigator.ComputeSteerTarget(
             dt,
             sceneId,
             localPos,
             goalPos,
             targetKey,
-            allowLedgeClimb);
+            allowLedgeClimb,
+            zoneProfile,
+            isWallClimbingNow,
+            isGlidingOrFlowingNow);
 
         float navDx = steerTarget.x - localPos.x;
         float navDz = steerTarget.z - localPos.z;
         float legHorizDist = MathF.Sqrt(navDx * navDx + navDz * navDz);
+        float goalDx = goalPos.x - localPos.x;
+        float goalDz = goalPos.z - localPos.z;
+        float goalHorizLen = MathF.Sqrt(goalDx * goalDx + goalDz * goalDz);
+        float steerTowardGoalDot = (legHorizDist >= 0.1f && goalHorizLen >= 0.1f)
+            ? ((navDx * goalDx + navDz * goalDz) / (legHorizDist * goalHorizLen))
+            : 1.0f;
         bool hasCornerAhead = PathNavigator.HasIntermediateWaypoint;
         Vector3 boostTarget = hasCornerAhead ? steerTarget : goalPos;
         float boostDist = hasCornerAhead ? MathF.Min(distanceToGoal, legHorizDist) : distanceToGoal;
+        float goalDy = goalPos.y - localPos.y;
+        bool wantUpwardClimb = goalDy > 0.5f && (PathNavigator.IsWallClimbAhead || (isWallClimbingNow && !PathNavigator.IsDetouring));
+
+        bool wantWallYawAlign = useBoost && wantUpwardClimb;
+        bool wallCameraAligned = true;
+        if (wantWallYawAlign && _cameraGuard != null)
+        {
+            Vector3 wallDir = new(steerTarget.x - localPos.x, 0f, steerTarget.z - localPos.z);
+            if (wallDir.sqrMagnitude < 1e-4f)
+                wallDir = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
+
+            bool aligned = _cameraGuard.TryAlignHorizontalYaw(wallDir, out float absYawErr);
+            _lastWallYawErrDeg = absYawErr;
+            if (!aligned)
+            {
+                _wallAlignWaitTimer += dt;
+                wallCameraAligned = _wallAlignWaitTimer >= 0.65f;
+            }
+            else
+            {
+                _wallAlignWaitTimer = 0f;
+                wallCameraAligned = true;
+            }
+        }
+        else
+        {
+            _wallAlignWaitTimer = 0f;
+            _lastWallYawErrDeg = 0f;
+            _wallLatchAttemptCount = 0;
+            _cameraGuard?.ResetHorizontalYawTracking();
+        }
 
         if (useBoost)
         {
@@ -193,7 +292,11 @@ public sealed class LocomotionBoostController
                 PathNavigator.IsDropVaultAhead,
                 PathNavigator.IsGapJumpAhead,
                 PathNavigator.GapJumpDistance,
-                PathNavigator.GapJumpHeightDelta);
+                PathNavigator.GapJumpHeightDelta,
+                zoneProfile,
+                wallCameraAligned,
+                steerTowardGoalDot,
+                goalDy);
         }
         else
         {
@@ -203,9 +306,22 @@ public sealed class LocomotionBoostController
             ResetBoostInputsOnly();
         }
 
+        LogClimbOrAirDiagIfNeeded(dt, localPos, goalPos);
+
+        bool isClimbingAfterTick = _lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb;
+        if (isClimbingAfterTick && goalDy <= -1.5f && _sprintBreakPauseTimer <= 0f)
+            _sprintBreakPauseTimer = 0.16f;
+
         if (_sprintBreakPauseTimer > 0f)
         {
             moveDriver.Stop(owner);
+            return _activeBoostMode;
+        }
+
+        if (isClimbingAfterTick && PathNavigator.IsWallClimbAhead && !PathNavigator.IsDetouring && (goalPos.y > localPos.y + 0.5f))
+        {
+            Vector3 hint = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
+            moveDriver.TryDriveRawStick(owner, new Vector2(0f, 1.0f), hint);
             return _activeBoostMode;
         }
 
@@ -218,7 +334,8 @@ public sealed class LocomotionBoostController
         float scale = (IsRapidJumping
             || PathNavigator.IsGapJumpAhead
             || PathNavigator.IsAirborneCommitted
-            || PathNavigator.IsDropVaultAhead)
+            || PathNavigator.IsDropVaultAhead
+            || PathNavigator.IsWallClimbAhead)
             ? 1.0f
             : baseSpeedScale;
         moveDriver.TryDrive(owner, localPos, steerTarget, scale, SuggestedSteerYawOffset);
@@ -271,37 +388,68 @@ public sealed class LocomotionBoostController
         bool dropVaultAhead = false,
         bool gapJumpAhead = false,
         float gapJumpDist = 0f,
-        float gapJumpDy = 0f)
+        float gapJumpDy = 0f,
+        SceneMovementProfile? zoneProfile = null,
+        bool wallCameraAligned = true,
+        float steerTowardGoalDot = 1.0f,
+        float goalDy = 0f)
     {
         EnsureResolved();
         TickPendingReleases(dt);
 
+        var profile = zoneProfile ?? LocomotionRules.GetZoneProfile(1);
+
         if (_mobilityCheckTimer > 0f) _mobilityCheckTimer -= dt;
         if (_postMobilityGraceTimer > 0f) _postMobilityGraceTimer -= dt;
         if (_bunnyhopCooldownTimer > 0f) _bunnyhopCooldownTimer -= dt;
+        if (_fieldDashCooldownTimer > 0f) _fieldDashCooldownTimer -= dt;
+        if (_wallClimbLatchCooldown > 0f) _wallClimbLatchCooldown -= dt;
         if (_rapidJumpPulseCooldown > 0f) _rapidJumpPulseCooldown -= dt;
+        if (_flowInvokeCooldown > 0f) _flowInvokeCooldown = MathF.Max(0f, _flowInvokeCooldown - dt);
         if (!gapJumpAhead && _gapDoubleJumpTimer > 0f)
+        {
             _gapDoubleJumpTimer = Math.Max(0f, _gapDoubleJumpTimer - dt);
+            if (_gapDoubleJumpTimer <= 0f)
+                _gapRemainingAirJumps = 0;
+        }
 
         UpdateStaminaAndState(dt);
 
-        // Priority Gate A: Stamina Conservation (<= 50% -> calm movement without Rush, Jump, or Mobility Skill)
-        if (_conservingStamina)
+        // Priority Gate A: Stamina Conservation (>= 600 floor), EXCEPT active upward cliff climbing finishes to the top
+        bool activeUpwardClimb = (_lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb)
+            && !isDetouring
+            && goalDy > 0.5f;
+        if (_conservingStamina && !activeUpwardClimb)
         {
             CancelBoostForStaminaConserve();
-            _activeBoostMode = $"conserve_stamina({_lastStaminaRatio * 100f:F0}%)";
+            _activeBoostMode = $"conserve_stamina({_lastCurStamina:F0}/{_effectiveConserveFloor:F0})";
             return _activeBoostMode;
         }
 
-        // Priority Gate B: Swimming Safety (prevent rapid Jump / Rush / SwimSprint drowning loops in water)
+        // Priority Gate B: Swimming Safety (Rule B-5: never dash or swim-sprint in water -> calm swim only)
         if (IsSwimming)
         {
             _jumpTriggerTimer = 0f;
             _rapidJumpActiveTimer = 0f;
             _gapDoubleJumpTimer = 0f;
+            _gapRemainingAirJumps = 0;
             _stuckCounter = 0;
             _hasProgressAnchor = false;
             _progressWindowTimer = 0f;
+            if (_rushHeld && !_dodgePulseActive)
+            {
+                InvokeRush(false);
+                _rushHeld = false;
+                _rushReleaseTimer = 0f;
+            }
+            if (_autoGlideActive)
+            {
+                InvokeGlide(false);
+                InvokeFlow(false);
+                _autoGlideActive = false;
+            }
+            _flowToGlideTimer = 0f;
+            _flowInvokeCooldown = 0f;
             InvokeSwimSprint(false);
 
             if (stepAhead
@@ -322,12 +470,171 @@ public sealed class LocomotionBoostController
             return _activeBoostMode;
         }
 
+        // Priority Gate B.5: High Fall -> Float -> Glide (Rule B-4 in Open Zones)
+        bool inAirActorState = _lastActorState is ActorStateFall or ActorStateFlow or ActorStateGlide or ActorStateJump;
+        bool grounded = PathNavigator.SensorHasGroundNear(localPos, downDepth: inAirActorState ? 0.90f : 1.35f);
+        if (grounded)
+        {
+            _wasGrounded = true;
+            _airborneFallTimer = 0f;
+            _flowToGlideTimer = 0f;
+            _flowInvokeCooldown = 0f;
+            if (_autoGlideActive || _lastActorState is ActorStateFlow or ActorStateGlide)
+            {
+                InvokeGlide(false);
+                InvokeFlow(false);
+                _autoGlideActive = false;
+            }
+        }
+        else
+        {
+            if (_wasGrounded)
+            {
+                _wasGrounded = false;
+                _airborneStartY = localPos.y;
+                _airborneFallTimer = 0f;
+            }
+            _airborneFallTimer += dt;
+
+            if (distanceToTarget <= 3.5f && (_autoGlideActive || _lastActorState is ActorStateFlow or ActorStateGlide))
+            {
+                InvokeGlide(false);
+                InvokeFlow(false);
+                _autoGlideActive = false;
+                _flowToGlideTimer = 0f;
+            }
+            else if ((_autoGlideActive || _lastActorState is ActorStateFlow or ActorStateGlide)
+                && !LocomotionRules.ShouldAllowAirGlide(steerTowardGoalDot, isDetouring, alreadyGliding: true))
+            {
+                InvokeGlide(false);
+                InvokeFlow(false);
+                _autoGlideActive = false;
+                _flowToGlideTimer = 0f;
+            }
+            else if (profile.CanFlowGlide
+                && HasStaminaForBoost()
+                && distanceToTarget >= 5.0f
+                && !PathNavigator.IsWallClimbAhead
+                && _lastActorState != ActorStatePedalWall
+                && _lastActorState != ActorStateClimb)
+            {
+                bool fallingTrigger = _lastActorState == ActorStateFall
+                    || (PathNavigator.IsDirectDropCommitted && _airborneFallTimer >= 0.30f)
+                    || ((_airborneStartY - localPos.y) >= 3.2f && _airborneFallTimer >= 0.25f);
+
+                if (_lastActorState == ActorStateFlow)
+                {
+                    _autoGlideActive = true;
+                    _flowToGlideTimer -= dt;
+                    if (_flowToGlideTimer <= 0f)
+                    {
+                        InvokeGlide(true);
+                        _flowToGlideTimer = 0.25f;
+                    }
+                    _activeBoostMode = "air_flow";
+                    return _activeBoostMode;
+                }
+
+                if (_lastActorState == ActorStateGlide)
+                {
+                    _autoGlideActive = true;
+                    _activeBoostMode = "air_glide";
+                    return _activeBoostMode;
+                }
+
+                if (fallingTrigger
+                    && LocomotionRules.ShouldAllowAirGlide(steerTowardGoalDot, isDetouring, alreadyGliding: false)
+                    && !PathNavigator.IsGapJumpAhead
+                    && _gapDoubleJumpTimer <= 0f
+                    && _gapRemainingAirJumps <= 0)
+                {
+                    if (_flowInvokeCooldown > 0f)
+                    {
+                        _activeBoostMode = "air_flow";
+                        return _activeBoostMode;
+                    }
+
+                    if (InvokeFlow(true))
+                    {
+                        _autoGlideActive = true;
+                        _flowInvokeCooldown = 0.55f;
+                        _flowToGlideTimer = 0.28f;
+                        _activeBoostMode = "air_flow";
+                        return _activeBoostMode;
+                    }
+                }
+            }
+        }
+
+        // Priority Gate C.2: Zone-allowed Wall Climb (Rule A-1 when overhead is clear & target is not below)
+        if ((PathNavigator.IsWallClimbAhead || (!isDetouring && (_lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb)))
+            && goalDy > -1.5f)
+        {
+            _jumpTriggerTimer = 0f;
+            _rapidJumpActiveTimer = 0f;
+            _gapDoubleJumpTimer = 0f;
+            _gapRemainingAirJumps = 0;
+
+            if (_lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb)
+            {
+                _wallLatchAttemptCount = 0;
+                _activeBoostMode = "wall_climbing";
+                return _activeBoostMode;
+            }
+
+            if (!PathNavigator.IsWallClimbLatchReady)
+            {
+                _wallLatchAttemptCount = 0;
+                _activeBoostMode = "wall_approach";
+                return _activeBoostMode;
+            }
+
+            if (!wallCameraAligned)
+            {
+                _activeBoostMode = "wall_align_cam";
+                return _activeBoostMode;
+            }
+
+            if (HasStaminaForBoost() && _wallClimbLatchCooldown <= 0f)
+            {
+                if (_wallLatchAttemptCount == 0)
+                {
+                    if (!_jumpHeld && InvokeJump(true))
+                    {
+                        _jumpHeld = true;
+                        _jumpReleaseTimer = 0.08f;
+                    }
+                    _wallClimbLatchCooldown = 0.38f;
+                    _wallLatchAttemptCount = 1;
+                }
+                else
+                {
+                    if (!_jumpHeld && InvokeJump(true))
+                    {
+                        _jumpHeld = true;
+                        _jumpReleaseTimer = 0.08f;
+                    }
+                    if (!_rushHeld && InvokeRush(true))
+                    {
+                        _rushHeld = true;
+                        _rushReleaseTimer = 0.06f;
+                    }
+                    _wallClimbLatchCooldown = 0.55f;
+                    _wallLatchAttemptCount++;
+                }
+            }
+
+            _activeBoostMode = "wall_climb_latch";
+            return _activeBoostMode;
+        }
+
         // Priority Gate C: Wall-Follow / Corner-Escape Safety (never jump or dash into walls)
         if (isDetouring || wallAhead)
         {
             _jumpTriggerTimer = 0f;
             _rapidJumpActiveTimer = 0f;
             _gapDoubleJumpTimer = 0f;
+            _gapRemainingAirJumps = 0;
             _stuckCounter = 0;
             _hasProgressAnchor = false;
             _progressWindowTimer = 0f;
@@ -342,6 +649,7 @@ public sealed class LocomotionBoostController
             _jumpTriggerTimer = 0f;
             _rapidJumpActiveTimer = 0f;
             _gapDoubleJumpTimer = 0f;
+            _gapRemainingAirJumps = 0;
             _stuckCounter = 0;
             _hasProgressAnchor = false;
             _progressWindowTimer = 0f;
@@ -361,7 +669,7 @@ public sealed class LocomotionBoostController
             return _activeBoostMode;
         }
 
-        // Priority Gate C.6: Stepping-stone / air-gap crossing (launch Jump + timed double-jump across verified landing)
+        // Priority Gate C.6: Stepping-stone / air-gap crossing (Rule A-4: 1 platform at a time, up to MaxJumps)
         if (gapJumpAhead)
         {
             _jumpTriggerTimer = 0f;
@@ -370,23 +678,28 @@ public sealed class LocomotionBoostController
             _hasProgressAnchor = false;
             _progressWindowTimer = 0f;
 
-            if (_gapDoubleJumpTimer > 0f)
+            if (_gapDoubleJumpTimer > 0f && _gapRemainingAirJumps > 0)
             {
                 _gapDoubleJumpTimer -= dt;
                 if (_gapDoubleJumpTimer <= 0f
                     && _config.EnableObstacleJump
+                    && HasStaminaForBoost()
                     && !_jumpHeld
                     && InvokeJump(true))
                 {
                     _jumpHeld = true;
                     _jumpReleaseTimer = 0.08f;
+                    _gapRemainingAirJumps--;
+                    if (_gapRemainingAirJumps > 0)
+                        _gapDoubleJumpTimer = 0.26f;
                 }
             }
             else if (_config.EnableObstacleJump
+                && HasStaminaForBoost()
                 && _rapidJumpPulseCooldown <= 0f
                 && !_jumpHeld)
             {
-                if (gapJumpDist >= 5.0f && HasStaminaForBoost() && !_rushHeld && InvokeRush(true))
+                if (gapJumpDist >= 5.0f && !_rushHeld && InvokeRush(true))
                 {
                     _rushHeld = true;
                     _rushReleaseTimer = 0.06f;
@@ -397,8 +710,15 @@ public sealed class LocomotionBoostController
                     _jumpHeld = true;
                     _jumpReleaseTimer = 0.08f;
                     _rapidJumpPulseCooldown = 0.70f;
-                    if (gapJumpDist >= 3.3f || gapJumpDy >= 0.70f)
-                        _gapDoubleJumpTimer = 0.27f;
+                    int totalJumps = Math.Clamp(
+                        PathNavigator.PlannedGapJumpCount > 0
+                            ? PathNavigator.PlannedGapJumpCount
+                            : LocomotionRules.ComputeRequiredGapJumps(profile, gapJumpDist, gapJumpDy),
+                        1,
+                        profile.MaxJumps);
+                    _gapRemainingAirJumps = Math.Max(0, totalJumps - 1);
+                    if (_gapRemainingAirJumps > 0)
+                        _gapDoubleJumpTimer = 0.26f;
                 }
             }
 
@@ -526,16 +846,20 @@ public sealed class LocomotionBoostController
         }
 
         // Close range (flat ground, unstuck): cancel pending bunnyhop jump so we never overshoot the stop radius
-        if (distanceToTarget < _config.BunnyhopMinDistance)
+        float closeRangeDist = profile.UseBunnyhop
+            ? _config.BunnyhopMinDistance
+            : MathF.Min(_config.BunnyhopMinDistance, 7.5f);
+        if (distanceToTarget < closeRangeDist)
         {
             _jumpTriggerTimer = 0f;
             _activeBoostMode = "walk";
             return _activeBoostMode;
         }
 
-        // Tier 1: Far distance -> Try 'E' / Phantom Dash (환영 대시) if off cooldown and not blocked by a wall
+        // Tier 1: Far distance -> Try 'E' / Phantom Dash (환영 대시) if off cooldown and not blocked by a wall or cliff
         if (_config.EnableMobilitySkill
             && !wallAhead
+            && PathNavigator.IsSafeForLongDash(localPos, targetPos)
             && distanceToTarget >= _config.MobilitySkillMinDistance
             && _mobilityCheckTimer <= 0f
             && _jumpTriggerTimer <= 0f)
@@ -559,24 +883,41 @@ public sealed class LocomotionBoostController
             return _activeBoostMode;
         }
 
-        // Tier 2: Mid/Far distance -> Dash (Rush) -> Jump -> Direction Stick Bunnyhop
-        if (_config.EnableBunnyhop
-            && distanceToTarget >= _config.BunnyhopMinDistance
-            && _bunnyhopCooldownTimer <= 0f
-            && _jumpTriggerTimer <= 0f)
+        // Tier 2: Restricted Zones (SceneType == 2) -> Bunnyhop; Open Fields/Cities -> Pure Dash (Rush) only (Rule B-2 & B-3)
+        if (profile.UseBunnyhop)
         {
-            if (HasStaminaForBoost() && InvokeRush(true))
+            if (_config.EnableBunnyhop
+                && distanceToTarget >= _config.BunnyhopMinDistance
+                && _bunnyhopCooldownTimer <= 0f
+                && _jumpTriggerTimer <= 0f)
+            {
+                if (HasStaminaForBoost() && InvokeRush(true))
+                {
+                    _rushHeld = true;
+                    _rushReleaseTimer = 0.06f;
+                    _jumpTriggerTimer = Math.Max(0.06f, _config.BunnyhopDashToJumpSec);
+                    _bunnyhopCooldownTimer = Math.Max(0.55f, _config.BunnyhopCycleCooldownSec);
+                    _activeBoostMode = "bunnyhop";
+                    return _activeBoostMode;
+                }
+            }
+        }
+        else if (distanceToTarget >= closeRangeDist
+            && _fieldDashCooldownTimer <= 0f
+            && HasStaminaForBoost()
+            && !_rushHeld)
+        {
+            if (InvokeRush(true))
             {
                 _rushHeld = true;
-                _rushReleaseTimer = 0.06f;
-                _jumpTriggerTimer = Math.Max(0.06f, _config.BunnyhopDashToJumpSec);
-                _bunnyhopCooldownTimer = Math.Max(0.55f, _config.BunnyhopCycleCooldownSec);
-                _activeBoostMode = "bunnyhop";
+                _rushReleaseTimer = 0.07f;
+                _fieldDashCooldownTimer = 0.85f;
+                _activeBoostMode = "field_dash";
                 return _activeBoostMode;
             }
         }
 
-        if (_jumpTriggerTimer <= 0f && _postMobilityGraceTimer <= 0f && _bunnyhopCooldownTimer <= 0.3f)
+        if (_jumpTriggerTimer <= 0f && _postMobilityGraceTimer <= 0f && _bunnyhopCooldownTimer <= 0.3f && _fieldDashCooldownTimer <= 0.3f)
         {
             _activeBoostMode = "run";
         }
@@ -719,35 +1060,38 @@ public sealed class LocomotionBoostController
         _lastCurStamina = curStam;
         _lastMaxStamina = maxStam;
         _lastActorState = actorState;
-        _lastVirtualMoveType = moveType;
 
         if (maxStam <= 0f)
         {
             _lastStaminaRatio = -1f;
+            _effectiveConserveFloor = 0f;
             _conservingStamina = false;
             _prevRawStamina = -1f;
             return;
         }
 
-        float conserveRatio = Math.Clamp(_config.LowStaminaConserveRatio, 0.10f, 0.90f);
-        float resumeRatio = Math.Clamp(_config.LowStaminaResumeRatio, conserveRatio + 0.03f, 0.98f);
-
         _lastStaminaRatio = Math.Clamp(curStam / maxStam, 0f, 1f);
         bool wasConserving = _conservingStamina;
-        if (_lastStaminaRatio <= conserveRatio)
-            _conservingStamina = true;
-        else if (_lastStaminaRatio >= resumeRatio)
-            _conservingStamina = false;
+        _conservingStamina = LocomotionRules.EvaluateStaminaConservation(
+            curStam,
+            maxStam,
+            _config.MinStaminaFloor,
+            _config.LowStaminaConserveRatio,
+            wasConserving,
+            out _effectiveConserveFloor,
+            out _);
 
         bool staminaDraining = _prevRawStamina > 0f && curStam < _prevRawStamina - 1.5f;
         bool inLatchedSprint = moveType == MoveParkourRun || moveType == MoveDash || actorState == ActorStateSwim;
 
         if (_conservingStamina)
         {
-            if (actorState == ActorStateGlide)
+            if (actorState == ActorStateGlide || _autoGlideActive)
                 InvokeGlide(false);
-            else if (actorState == ActorStateFlow)
+            if (actorState == ActorStateFlow || _autoGlideActive)
                 InvokeFlow(false);
+            _autoGlideActive = false;
+            _flowToGlideTimer = 0f;
 
             if (!wasConserving || (staminaDraining && inLatchedSprint && _sprintBreakCooldown <= 0f))
             {
@@ -765,10 +1109,9 @@ public sealed class LocomotionBoostController
 
     private bool HasStaminaForBoost()
     {
-        float conserveRatio = Math.Clamp(_config.LowStaminaConserveRatio, 0.10f, 0.90f);
         return _lastMaxStamina > 0f
             && !_conservingStamina
-            && _lastStaminaRatio > conserveRatio
+            && _lastCurStamina > _effectiveConserveFloor
             && _lastCurStamina >= _config.BunnyhopMinStamina;
     }
 
@@ -788,14 +1131,52 @@ public sealed class LocomotionBoostController
             _rushReleaseTimer = 0f;
         }
 
+        if (_autoGlideActive)
+        {
+            InvokeGlide(false);
+            InvokeFlow(false);
+            _autoGlideActive = false;
+        }
+        _flowToGlideTimer = 0f;
+        _flowInvokeCooldown = 0f;
+
         InvokeSwimSprint(false);
         _jumpTriggerTimer = 0f;
         _rapidJumpActiveTimer = 0f;
         _gapDoubleJumpTimer = 0f;
+        _gapRemainingAirJumps = 0;
         _stuckCounter = 0;
         _hasProgressAnchor = false;
         _progressWindowTimer = 0f;
         _sidestepFlipTimer = 0f;
+    }
+
+    private void LogClimbOrAirDiagIfNeeded(float dt, Vector3 localPos, Vector3 goalPos)
+    {
+        _wallDiagLogTimer = MathF.Max(0f, _wallDiagLogTimer - dt);
+        bool isWallMode = _activeBoostMode is "wall_approach" or "wall_align_cam" or "wall_climb_latch" or "wall_climbing";
+        bool isConserveMode = _activeBoostMode.StartsWith("conserve_stamina", StringComparison.Ordinal);
+        bool isTrackedDetour = _activeBoostMode == "detour_run" && (goalPos.y - localPos.y) >= 2.0f;
+        bool isTrackedTransition = isWallMode
+            || isConserveMode
+            || isTrackedDetour
+            || _activeBoostMode is "air_flow" or "air_glide" or "swim";
+
+        string diagBucket = isConserveMode ? "conserve_stamina" : _activeBoostMode;
+        bool modeChanged = diagBucket != _lastLoggedBoostMode;
+        bool shouldLog = modeChanged
+            ? isTrackedTransition
+            : (_wallDiagLogTimer <= 0f && (isWallMode || isTrackedDetour));
+
+        if (modeChanged)
+            _lastLoggedBoostMode = diagBucket;
+
+        if (shouldLog)
+        {
+            _services.Log.Info(
+                $"[AgyBridge][NavDiag] mode={_activeBoostMode} nav={PathNavigator.ActiveNavMode} state={_lastActorState} dy={goalPos.y - localPos.y:+0.0;-0.0;0.0}m yaw={_lastWallYawErrDeg:F0}deg try={_wallLatchAttemptCount} stam={_lastCurStamina:F0}/{_lastMaxStamina:F0}");
+            _wallDiagLogTimer = isWallMode ? 2.5f : 3.0f;
+        }
     }
 
     private bool InvokeSwimSprint(bool pressed)

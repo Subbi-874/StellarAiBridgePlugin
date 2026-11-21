@@ -626,13 +626,60 @@ public sealed class FollowPartyBehavior : IBehavior
         bool differentChannelConfirmed = SceneTransferGate.IsDifferentChannelConfirmedForSwitch(
             target.InAoi, currentIsInstancedDungeon, myLineId, target.LineId);
 
+        // Emergency anti-drown warp: rescue bot via nearest portal before swimming drains stamina to 0
+        bool drowningEmergency = LocomotionRules.IsDrowningEmergency(
+            _boost.IsSwimming,
+            _boost.LastCurStamina,
+            _boost.LastMaxStamina);
+        if (drowningEmergency
+            && !transferBusy
+            && _intraMapTpCooldown <= 0f
+            && mySceneId > 0)
+        {
+            var myPos = _services.PlayerState.Position;
+            var warpAnchor = (target.Position.X != 0f || target.Position.Z != 0f) ? target.Position : myPos;
+            if (_navigator.FindBestIntraMapWarp(
+                mySceneId,
+                myPos,
+                warpAnchor,
+                minDistance: 0f,
+                minGain: -99999f,
+                out int rescueTpId,
+                out string rescueTpName,
+                out _))
+            {
+                ResetEmoteMimicState();
+                _boost.Reset();
+                _moveDriver.Stop(this);
+                _holdingInRange = false;
+                _autoCombat.SuppressForCatchup = true;
+                _combatClearWaitTimer = 0f;
+
+                var rescueRes = _navigator.RequestIntraMapTeleport(mySceneId, rescueTpId);
+                if (rescueRes["ok"]?.GetValue<bool>() == true)
+                {
+                    _pendingAsyncId = rescueRes["async_id"]?.GetValue<string>();
+                    _lastIntraWarpTpId = rescueTpId;
+                    _sameIntraWarpBlockTimer = 25.0f;
+                    _intraMapTpCooldown = _config.IntraMapTeleportCooldownSec;
+                    _settleTimer = 2.0f;
+                    _channelAttempts = 0;
+                    _transferWaitTimer = SceneTransferGate.IntraWarpLockSec;
+                    _phase = "anti_drown_emergency_warp";
+                    _detail = $"Emergency anti-drown warp to '{rescueTpName}' (#{rescueTpId}, stam={_boost.LastCurStamina:F0}/{_boost.LastMaxStamina:F0})";
+                    _services.Log.Info($"[AgyBridge][Follow] {_detail}");
+                    return;
+                }
+            }
+        }
+
         // Stage 1.5: Same Scene & Confirmed Same Channel (never warp during active transfer or before lineId is confirmed), Far Away -> Closest Unlocked Warp Point
         if (_autoTeleport
             && allowTpAndChannel
             && _config.EnableClosestTeleport
             && !transferBusy
             && sameChannelConfirmed
-            && (!target.InAoi || sameSceneHorizDist >= 140f)
+            && (!target.InAoi || sameSceneHorizDist >= 140f || MathF.Abs(target.Position.Y - _services.PlayerState.Position.Y) >= 35f)
             && _intraMapTpCooldown <= 0f
             && (target.Position.X != 0f || target.Position.Z != 0f))
         {
