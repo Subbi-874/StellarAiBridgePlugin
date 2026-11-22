@@ -52,7 +52,10 @@ public sealed class CapabilityRegistry
         ["export_recipes"] = CapabilityKeys.Craft,
         ["craft_item"] = CapabilityKeys.Craft,
         ["farm_monster_item"] = CapabilityKeys.MonsterSeek,
-        ["reset_camera"] = CapabilityKeys.CameraGuard
+        ["reset_camera"] = CapabilityKeys.CameraGuard,
+        ["list_quests"] = CapabilityKeys.AutoQuest,
+        ["auto_quest"] = CapabilityKeys.AutoQuest,
+        ["get_quest_status"] = CapabilityKeys.AutoQuest
     };
 
     private readonly IPluginLog _log;

@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Stellar.Abstractions.Services;
+using Stellar.AgyBridge.Bridge.Core;
 using Stellar.AgyBridge.Bridge.Server;
 using Stellar.AgyBridge.Commands;
 using Stellar.AgyBridge.Core;
@@ -96,7 +97,7 @@ public sealed class BridgeWebSocketClient : IDisposable
                 {
                     ["type"] = "hello",
                     ["plugin"] = "Stellar.AgyBridge",
-                    ["version"] = "1.1.0",
+                    ["version"] = BridgeRuntimeConfig.PluginVersion,
                     ["pid"] = Environment.ProcessId,
                     ["game_dir"] = Environment.CurrentDirectory,
                     ["local_char_id"] = idObj?["local_char_id"]?.GetValue<long>() ?? 0L,

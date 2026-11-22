@@ -15,7 +15,7 @@ namespace Stellar.AgyBridge.Behaviors;
 /// delegates node-level pathfinding &amp; interaction to Stellar.AutoGather,
 /// counts server-confirmed gather completions up to TargetCount (e.g. 20), and stops automatically.
 /// </summary>
-public sealed class GatherResourceBehavior : IBehavior
+public sealed class GatherResourceBehavior : IBehavior, INavigationRecoverableBehavior
 {
     private readonly IPluginServices _services;
     private readonly BridgeConfig _config;
@@ -382,6 +382,29 @@ public sealed class GatherResourceBehavior : IBehavior
         _autoCombat.SuppressForCatchup = false;
         _phase = reason;
         IsFinished = true;
+    }
+
+    public bool CanSkipCurrentTarget => false;
+
+    public void FillRecoveryContext(JsonObject context)
+    {
+        context["resource_name"] = _target?.Name ?? _resourceQuery;
+        context["scene_id"] = _target?.SceneId ?? 0;
+        context["can_skip_quest"] = false;
+    }
+
+    public void OnNavigationRecoveryCompleted(string recoveryAction)
+    {
+        _settleTimer = 1.0f;
+        _intraWarpedOnce = true;
+    }
+
+    public bool TrySkipCurrentTargetFromRecovery(string reason) => false;
+
+    public void FailFromNavigationRecovery(string reason)
+    {
+        string msg = string.IsNullOrWhiteSpace(reason) ? "길찾기 정체 복구 실패" : $"길찾기 정체 복구 실패: {reason}";
+        Fail("navigation_stalled", msg);
     }
 
     public JsonObject GetSnapshot() => new()

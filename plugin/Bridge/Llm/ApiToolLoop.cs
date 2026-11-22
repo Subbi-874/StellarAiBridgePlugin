@@ -661,13 +661,23 @@ public sealed class BotToolDispatcher
             "loadouts" => "list_loadouts",
             "outfits" => "list_outfits",
             "emotes" => "list_emotes",
+            "quests" => "list_quests",
             _ => null,
         };
         if (rpcMethod != null)
         {
             var rpcParams = new JsonObject();
-            if (!string.IsNullOrEmpty(query) && kind is "dungeons" or "gatherables" or "fishing_spots" or "gimmicks")
+            if (!string.IsNullOrEmpty(query) && kind is "dungeons" or "gatherables" or "fishing_spots" or "gimmicks" or "quests")
                 rpcParams["query"] = query;
+            if (kind == "quests")
+            {
+                if (args.TryGetPropertyValue("category", out JsonNode? qCat) && qCat != null)
+                    rpcParams["category"] = JsonNodeHelpers.AsString(qCat, "");
+                if (args.TryGetPropertyValue("region", out JsonNode? qReg) && qReg != null)
+                    rpcParams["region"] = JsonNodeHelpers.AsString(qReg, "");
+                if (args.TryGetPropertyValue("region_only", out JsonNode? qRegOnly) && qRegOnly != null)
+                    rpcParams["region_only"] = JsonNodeHelpers.GetBool(args, "region_only", false);
+            }
             if (kind == "gimmicks")
                 rpcParams["radius"] = 60.0;
             JsonObject res = await _dispatch(rpcMethod, rpcParams, _connId, ct).ConfigureAwait(false);

@@ -158,9 +158,24 @@ public static class JsonNodeHelpers
             val = d;
             return true;
         }
+        if (jv.TryGetValue(out float f) && !float.IsNaN(f) && !float.IsInfinity(f))
+        {
+            val = f;
+            return true;
+        }
         if (jv.TryGetValue(out long l))
         {
             val = l;
+            return true;
+        }
+        if (jv.TryGetValue(out int i))
+        {
+            val = i;
+            return true;
+        }
+        if (jv.TryGetValue(out decimal dec))
+        {
+            val = (double)dec;
             return true;
         }
         if (jv.TryGetValue(out string? s))

@@ -37,7 +37,7 @@
    - **저스트 회피 우선 & 보스 붉은 섬광 회피 (`auto_evade`)**: 자동전투가 켜져 있을 때 일반 평타/일반 탄막(`BulletStage`)은 무시하고 불필요한 이동키 회피를 억제하며, 바닥 위험 장판 폭발 직전(`~82%` 이상 또는 잔여 `0.19초` 이하) 및 보스 붉은 섬광 전조(`ZUISkillWarning`/붉은 섬광 이펙트) 타이밍에 맞춰 회피키 대시(`Rush`)로 **저스트 회피**합니다. 녹색 회복 장판과 파티 분담/집합 장판(`"분담"`, `"[집합]"`, 아군 화살표 추적)은 회피에서 제외합니다.
    - **감정표현 vs 내장 스티커**: `play_emote`는 `[보유 감정표현 목록]`의 해금 3D 모션만 사용(미보유 시 `actions` 제외 후 안내). 2D 그림 이모티콘은 최상위 `"sticker"` 필드(`greet`, `thanks`, `thumbsup`, `cheer`, `heart`, `laugh`, `cute`, `ok`, `think`, `sorry`, `sad`, `random`)를 사용합니다.
 
-## 3. JSON `actions` 규격 명세 (30종)
+## 3. JSON `actions` 규격 명세 (31종)
 1. **유저 따라가기 (`follow_player`)**: `{"type": "follow_player", "target": "<숫자 UID 우선 또는 닉네임>", "continuous": true}` (`false`면 1회 접근 후 정지)
 2. **자동전투 (`set_auto_combat`)**: `{"type": "set_auto_combat", "enable": true | false}`
 3. **이동/추적/채집/낚시 즉시 정지 (`stop`)**: `{"type": "stop"}`
@@ -76,4 +76,5 @@
     - 부족한 하위 재료(채집·낚시·하위 제작)는 자동 계획해 순차 실행하며, **몬스터 드랍 재료가 부족하면 먼저 사냥 여부를 질문**합니다(발신자가 사냥을 승인하면 `{"type": "craft_goal", "confirm_monster_farm": true}`, 취소하면 `"confirm_monster_farm": false`).
 29. **기능 활성(ON/OFF) · 관리자 잠금 설정 (`set_feature_policy`)**: `{"type": "set_feature_policy", "key": "<기능키 또는 따라가기|자동전투|채집|낚시|제작|기억|월챗|일반|파티|길드|귓속말 등>", "enabled": true | false, "admin_only": true | false}` — `enabled` 변경은 해당 기능이 잠겨 있지 않으면 일반 유저도 가능, `admin_only` 설정·해제 및 잠긴 기능 변경은 **관리자만** 가능.
 30. **지정 채널 채팅/귓속말 발신 (`send_chat`)**: `{"type": "send_chat", "channel": "party | guild | say | world | whisper", "text": "<보낼 텍스트>", "target_char_id": 0}` — 일반 대답이 아닌 다른 채널(예: 관리자가 "월챗으로 ~라고 외쳐")로 메시지를 보낼 때 사용 (`world`/`say`는 기본 관리자 잠금).
+31. **자동 퀘스트 진행 (`auto_quest`)**: `{"type": "auto_quest", "category": "구역 퀘스트 | 스토리 | 후일담 | 가이드 퀘스트 | 인연 스토리 | 이벤트 퀘스트 | 전체", "region": "<특정 지역/맵명 또는 '현재 지역' 또는 ''>", "region_only": false, "quest": "<특정 퀘스트명 또는 ''>", "max_quests": 0}` — 요청 시 자동으로 목표(`set_goal`)로 등록되며 진행 가능한 퀘스트를 순서대로 자동 처리합니다(`"region"` 지정 시 해당 지역·맵 퀘스트를 최우선 정렬하며, `"region_only": true`이면 해당 지역 퀘스트만 실행; 맵/워프 이동, NPC 대화·컷신 스킵, 조사/상호작용, 몬스터 처치; 사진·통찰·시간/선행조건 잠금 퀘스트는 자동 건너뛰기).
 </skill_reference>

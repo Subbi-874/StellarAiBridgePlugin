@@ -86,6 +86,7 @@ public sealed class BridgeConfig
     public bool EnableAutoEvade { get; set; }
     public bool EnableAutoCameraGuard { get; set; }
     public float CameraTargetZoomRatio { get; set; }
+    public bool EnableRareMonsterGuildAlert { get; set; }
     public float CameraTargetVertical { get; set; }
     public bool EnableObstacleJump { get; set; }
     public float StuckCheckWindowSec { get; set; }
@@ -174,6 +175,7 @@ public sealed class BridgeConfig
         EnableAutoEvade = _cfg.Get<bool>("enable_auto_evade", true);
         EnableAutoCameraGuard = _cfg.Get<bool>("enable_auto_camera_guard", true);
         CameraTargetZoomRatio = Math.Clamp(_cfg.Get<float>("camera_target_zoom_ratio", 1.0f), 0.50f, 1.0f);
+        EnableRareMonsterGuildAlert = _cfg.Get<bool>("enable_rare_monster_guild_alert", false);
         CameraTargetVertical = Math.Clamp(_cfg.Get<float>("camera_target_vertical", 0.82f), 0.45f, 0.96f);
         EnableObstacleJump = _cfg.Get<bool>("enable_obstacle_jump", true);
         StuckCheckWindowSec = _cfg.Get<float>("stuck_check_window_sec", 0.38f);
@@ -926,6 +928,7 @@ public sealed class BridgeConfig
         _cfg.Set("enable_auto_evade", EnableAutoEvade);
         _cfg.Set("enable_auto_camera_guard", EnableAutoCameraGuard);
         _cfg.Set("camera_target_zoom_ratio", CameraTargetZoomRatio);
+        _cfg.Set("enable_rare_monster_guild_alert", EnableRareMonsterGuildAlert);
         _cfg.Set("camera_target_vertical", CameraTargetVertical);
         _cfg.Set("enable_obstacle_jump", EnableObstacleJump);
         _cfg.Set("stuck_check_window_sec", StuckCheckWindowSec);

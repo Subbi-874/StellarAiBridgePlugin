@@ -69,6 +69,7 @@ public static class BridgePolicy
             ["dungeon_enter"] = new(enabled: true, adminOnly: false),
             ["auto_fish"] = new(enabled: true, adminOnly: false),
             ["auto_craft"] = new(enabled: true, adminOnly: false),
+            ["auto_quest"] = new(enabled: true, adminOnly: false),
             ["memory_manage"] = new(enabled: true, adminOnly: true),
         };
 
@@ -102,6 +103,10 @@ public static class BridgePolicy
             ["낚시"] = "auto_fish",
             ["craft"] = "auto_craft",
             ["제작"] = "auto_craft",
+            ["quest"] = "auto_quest",
+            ["퀘스트"] = "auto_quest",
+            ["자동퀘스트"] = "auto_quest",
+            ["자동 퀘스트"] = "auto_quest",
             ["memory"] = "memory_manage",
             ["기억"] = "memory_manage",
             ["메모리"] = "memory_manage",

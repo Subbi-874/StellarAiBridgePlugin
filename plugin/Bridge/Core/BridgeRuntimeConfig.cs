@@ -38,6 +38,8 @@ public delegate Task<(string Raw, bool TimedOut)> LocalCliInvokeAsync(
 /// </summary>
 public static class BridgeRuntimeConfig
 {
+    public const string PluginVersion = "1.2.0";
+
     public static string DefaultBridgeHost => EnvString("BRIDGE_HOST", "0.0.0.0");
     public static int DefaultBridgePort => EnvInt("BRIDGE_PORT", 18765, min: 1);
     public static string DefaultBridgeToken => Environment.GetEnvironmentVariable("BRIDGE_TOKEN") ?? "";

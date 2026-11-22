@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Text.Json.Nodes;
+using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Core;
+using Stellar.AgyBridge.World;
 using UnityEngine;
 
 namespace Stellar.AgyBridge.Locomotion;
@@ -52,6 +54,8 @@ public sealed class SmartPathNavigator
     private long _activeTargetKey;
     private Vector3 _corridorGoal;
     private bool _corridorFailed;
+    private float _corridorRetryTimer;
+    private Vector3 _corridorFailPos;
     private float _repathCooldown;
     private int _rerouteCount;
     private float _wpStuckTimer;
@@ -105,6 +109,7 @@ public sealed class SmartPathNavigator
     private float _wallClimbAttemptTimer;
     private float _wallClimbPeakY;
     private float _wallClimbRejectTimer;
+    private float _postWallDetachTimer;
     private float _postGapLandSettleTimer;
     private SceneMovementProfile _activeProfile = LocomotionRules.GetZoneProfile(1);
 
@@ -139,6 +144,7 @@ public sealed class SmartPathNavigator
     public bool IsClimbableStepAhead { get; private set; }
     public bool IsWallClimbAhead { get; private set; }
     public bool IsWallClimbLatchReady { get; private set; }
+    public bool IsClimbingIntermediateRidge { get; private set; }
     public bool IsDetouring { get; private set; }
     public bool IsCliffAhead { get; private set; }
     public bool IsDropVaultAhead { get; private set; }
@@ -152,6 +158,74 @@ public sealed class SmartPathNavigator
 
     public bool SensorHasGroundNear(Vector3 pos, float downDepth = 3.8f)
         => !_sensor.IsReady || _sensor.HasGroundNear(pos, downDepth: downDepth);
+
+    /// <summary>
+    /// Samples physics-verified ground waypoints laterally/diagonally around the current blocking
+    /// obstacle relative to <paramref name="goalPos"/>. Returns empty if the physics sensor is unavailable.
+    /// </summary>
+    public List<FlankingWaypointCandidate> SampleFlankingWaypoints(
+        Vector3 localPos,
+        Vector3 goalPos,
+        int maxCount = 4)
+    {
+        var candidates = new List<FlankingWaypointCandidate>();
+        if (maxCount <= 0 || !_sensor.IsReady)
+            return candidates;
+
+        Vector3 toGoal = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
+        Vector3 fwd = toGoal.sqrMagnitude > 0.01f ? toGoal.normalized : new Vector3(0f, 0f, 1f);
+        Vector3 probeOrigin = new(localPos.x, localPos.y + 0.9f, localPos.z);
+
+        (float AngleDeg, string Id, string Label)[] specs =
+        {
+            (+55f, "wp_left_front", "좌측 전방 우회"),
+            (-55f, "wp_right_front", "우측 전방 우회"),
+            (+82f, "wp_left_wide", "좌측 광각 우회"),
+            (-82f, "wp_right_wide", "우측 광각 우회"),
+        };
+        float[] radii = { 38f, 26f };
+        float curHorizToGoal = HorizontalDist(localPos, goalPos);
+
+        foreach (var (angleDeg, id, label) in specs)
+        {
+            if (candidates.Count >= maxCount)
+                break;
+
+            Vector3 dir = RotateY(fwd, angleDeg);
+            float clearance = _sensor.ProbeClearDistance(probeOrigin, dir, 14f, radius: 0.28f, ignoreStep: true);
+            if (clearance < 11.5f)
+                continue;
+
+            foreach (float radius in radii)
+            {
+                float cx = localPos.x + dir.x * radius;
+                float cz = localPos.z + dir.z * radius;
+                if (!_sensor.TrySampleGroundHeight(cx, localPos.y, cz, out float gy, upOffset: 9.0f, downDepth: 14.0f))
+                    continue;
+
+                float dyFromPlayer = gy - localPos.y;
+                if (MathF.Abs(dyFromPlayer) > 10.0f)
+                    continue;
+                if (dyFromPlayer < -3.5f && goalPos.y >= localPos.y - 6.0f)
+                    continue;
+
+                var wpPos = new Vector3(cx, gy, cz);
+                if (HorizontalDist(wpPos, goalPos) > curHorizToGoal + 8.0f)
+                    continue;
+
+                candidates.Add(new FlankingWaypointCandidate(
+                    Id: id,
+                    Label: label,
+                    Position: new Position3D(cx, gy, cz),
+                    DistFromPlayer: Vector3.Distance(localPos, wpPos),
+                    DistToGoal: Vector3.Distance(wpPos, goalPos),
+                    DyFromPlayer: dyFromPlayer));
+                break;
+            }
+        }
+
+        return candidates;
+    }
 
     public bool IsSafeForLongDash(Vector3 localPos, Vector3 targetPos)
     {
@@ -225,6 +299,8 @@ public sealed class SmartPathNavigator
         _activeTargetKey = 0L;
         _corridorGoal = Vector3.zero;
         _corridorFailed = false;
+        _corridorRetryTimer = 0f;
+        _corridorFailPos = Vector3.zero;
         _repathCooldown = 0f;
         _rerouteCount = 0;
         _wpStuckTimer = 0f;
@@ -246,6 +322,7 @@ public sealed class SmartPathNavigator
         _wallClimbAttemptTimer = 0f;
         _wallClimbPeakY = 0f;
         _wallClimbRejectTimer = 0f;
+        _postWallDetachTimer = 0f;
         _postGapLandSettleTimer = 0f;
         _nonDetourProgressAnchor = Vector3.zero;
         _hasNonDetourAnchor = false;
@@ -264,6 +341,7 @@ public sealed class SmartPathNavigator
         IsClimbableStepAhead = false;
         IsWallClimbAhead = false;
         IsWallClimbLatchReady = false;
+        IsClimbingIntermediateRidge = false;
         IsDetouring = false;
         IsCliffAhead = false;
         IsDropVaultAhead = false;
@@ -274,11 +352,15 @@ public sealed class SmartPathNavigator
         HasIntermediateWaypoint = false;
         ActiveNavMode = "direct";
 
-        try
-        {
-            _miClearBlockedPolys?.Invoke(_navNavigator, null);
-        }
-        catch { }
+        ClearBlockedNavPolys();
+    }
+
+    public void NotifyForcedWallDetach()
+    {
+        _postWallDetachTimer = 3.5f;
+        _wallClimbRejectTimer = MathF.Max(_wallClimbRejectTimer, 12.0f);
+        if (_airCommitMode == "cliff_drop")
+            ClearAirCommit();
     }
 
     public Vector3 ComputeSteerTarget(
@@ -296,6 +378,7 @@ public sealed class SmartPathNavigator
         _activeProfile = profile;
         IsWallClimbAhead = false;
         IsWallClimbLatchReady = false;
+        IsClimbingIntermediateRidge = false;
         IsDropVaultAhead = false;
         IsGapJumpAhead = false;
         GapJumpDistance = 0f;
@@ -304,6 +387,10 @@ public sealed class SmartPathNavigator
 
         if (_wallClimbRejectTimer > 0f)
             _wallClimbRejectTimer = MathF.Max(0f, _wallClimbRejectTimer - dt);
+        if (_postWallDetachTimer > 0f)
+            _postWallDetachTimer = MathF.Max(0f, _postWallDetachTimer - dt);
+        if (_corridorRetryTimer > 0f)
+            _corridorRetryTimer = MathF.Max(0f, _corridorRetryTimer - dt);
         if (_postGapLandSettleTimer > 0f)
             _postGapLandSettleTimer = MathF.Max(0f, _postGapLandSettleTimer - dt);
         if (_jumpOverRejectTimer > 0f)
@@ -351,10 +438,13 @@ public sealed class SmartPathNavigator
             flatToGoal.y = 0f;
             float flatDist = flatToGoal.magnitude;
             float heightDiff = goalPos.y - localPos.y;
-            bool tallWallBlocking = _sensor.IsReady
-                && flatDist >= 0.15f
-                && _sensor.IsTallWallAhead(localPos, flatToGoal / flatDist, Math.Clamp(flatDist, 1.4f, 2.5f));
-            if (heightDiff <= 2.65f && !tallWallBlocking)
+            bool inRange = flatDist >= 0.15f && flatDist <= 4.5f && heightDiff >= 0.35f && heightDiff <= 2.65f;
+            Vector3 flatDir = flatDist >= 0.15f ? (flatToGoal / flatDist) : Vector3.zero;
+            bool tallWallBlocking = inRange && _sensor.IsReady
+                && _sensor.IsTallWallAhead(localPos, flatDir, Math.Clamp(flatDist, 1.4f, 2.5f));
+            bool overheadCeiling = inRange && _sensor.IsReady
+                && _sensor.HasOverheadCeiling(localPos, flatDir, forwardOffset: 0.75f, checkHeight: 3.2f);
+            if (LocomotionRules.ShouldAllowDirectLedgeClimbShortcut(flatDist, heightDiff, tallWallBlocking, overheadCeiling))
             {
                 IsWallAhead = false;
                 IsClimbableStepAhead = false;
@@ -501,6 +591,20 @@ public sealed class SmartPathNavigator
         return false;
     }
 
+    private bool HasBlockingRidgeTowardDistantLowerGoal(Vector3 localPos, Vector3 goalPos, float goalHorizDist)
+    {
+        if (!_sensor.IsReady || goalHorizDist <= 16.0f || goalPos.y >= localPos.y)
+            return false;
+
+        Vector3 flat = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
+        if (flat.sqrMagnitude < 1e-4f)
+            return false;
+
+        Vector3 flatGoalDir = flat.normalized;
+        return _sensor.IsTallWallAhead(localPos, flatGoalDir, 6.0f)
+            || ProbeCorridorClearance(localPos, flatGoalDir, 6.0f, 0.36f, checkGround: false) < 5.7f;
+    }
+
     private bool TryDetectDirectCliffDrop(
         Vector3 localPos,
         Vector3 goalPos,
@@ -512,7 +616,7 @@ public sealed class SmartPathNavigator
         dropTarget = goalPos;
         dropDir = Vector3.zero;
         needsVault = false;
-        if (!_sensor.IsReady)
+        if (!_sensor.IsReady || _postWallDetachTimer > 0f)
             return false;
 
         float goalDrop = localPos.y - goalPos.y;
@@ -526,8 +630,12 @@ public sealed class SmartPathNavigator
             return false;
 
         dropDir = flat.normalized;
-        float wallCheckDist = MathF.Min(distToGoal, 2.1f);
+        float wallCheckDist = distToGoal > 14.0f ? MathF.Min(distToGoal, 12.0f) : MathF.Min(distToGoal, 4.8f);
         if (_sensor.IsTallWallAhead(localPos, dropDir, wallCheckDist))
+            return false;
+
+        Vector3 torsoFrom = new(localPos.x, localPos.y + 0.75f, localPos.z);
+        if (_sensor.ProbeClearDistance(torsoFrom, dropDir, wallCheckDist, 0.32f, ignoreStep: true) < wallCheckDist - 0.12f)
             return false;
 
         Vector3 chestFrom = new(localPos.x, localPos.y + 1.40f, localPos.z);
@@ -537,6 +645,21 @@ public sealed class SmartPathNavigator
         Vector3 headFrom = new(localPos.x, localPos.y + 2.00f, localPos.z);
         if (_sensor.ProbeClearDistance(headFrom, dropDir, wallCheckDist, 0.30f, ignoreStep: true) < wallCheckDist - 0.08f)
             return false;
+
+        if (distToGoal > 22.0f)
+        {
+            foreach (float checkStep in new[] { 8.0f, 12.0f, 18.0f })
+            {
+                if (checkStep >= distToGoal - 2.0f)
+                    break;
+                Vector3 samplePt = localPos + dropDir * checkStep;
+                if (_sensor.TrySampleGroundHeight(samplePt.x, localPos.y, samplePt.z, out float sampleGy, upOffset: 16.0f, downDepth: 24.0f)
+                    && sampleGy > localPos.y - 0.5f)
+                {
+                    return false;
+                }
+            }
+        }
 
         Vector3 lowWaistFrom = new(localPos.x, localPos.y + 0.52f, localPos.z);
         needsVault = _sensor.IsBlocked(lowWaistFrom, lowWaistFrom + dropDir * MathF.Min(distToGoal, 1.8f), 0.32f, ignoreStep: true)
@@ -613,12 +736,25 @@ public sealed class SmartPathNavigator
                 if (d > _activeProfile.MaxGapJumpDistMeters || d > distToGoal + 1.4f)
                     continue;
 
+                float maxGapUp = MathF.Min(_activeProfile.MaxJumpReachHeightMeters, 2.8f);
                 Vector3 candXZ = localPos + dir * d;
-                if (!_sensor.TrySampleGroundHeight(candXZ.x, localPos.y, candXZ.z, out float landY, upOffset: MathF.Min(_activeProfile.MaxJumpReachHeightMeters, 6.0f), downDepth: 5.5f, radius: 0.24f))
+                if (!_sensor.TrySampleGroundHeight(candXZ.x, localPos.y, candXZ.z, out float landY, upOffset: maxGapUp, downDepth: 5.5f, radius: 0.24f))
                     continue;
 
                 float dy = landY - localPos.y;
-                if (dy < -5.5f || dy > MathF.Min(_activeProfile.MaxJumpReachHeightMeters, 6.0f))
+                if (dy < -5.5f || dy > maxGapUp)
+                    continue;
+
+                int flatSupport = 0;
+                if (_sensor.TrySampleGroundHeight(candXZ.x + 0.50f, landY, candXZ.z, out float sy0, upOffset: 0.9f, downDepth: 1.2f, radius: 0.18f) && MathF.Abs(sy0 - landY) <= 0.75f)
+                    flatSupport++;
+                if (_sensor.TrySampleGroundHeight(candXZ.x - 0.50f, landY, candXZ.z, out float sy1, upOffset: 0.9f, downDepth: 1.2f, radius: 0.18f) && MathF.Abs(sy1 - landY) <= 0.75f)
+                    flatSupport++;
+                if (_sensor.TrySampleGroundHeight(candXZ.x, landY, candXZ.z + 0.50f, out float sy2, upOffset: 0.9f, downDepth: 1.2f, radius: 0.18f) && MathF.Abs(sy2 - landY) <= 0.75f)
+                    flatSupport++;
+                if (_sensor.TrySampleGroundHeight(candXZ.x, landY, candXZ.z - 0.50f, out float sy3, upOffset: 0.9f, downDepth: 1.2f, radius: 0.18f) && MathF.Abs(sy3 - landY) <= 0.75f)
+                    flatSupport++;
+                if (flatSupport < 3)
                     continue;
 
                 Vector3 candPos = new(candXZ.x, landY, candXZ.z);
@@ -838,7 +974,8 @@ public sealed class SmartPathNavigator
 
         // Persistent global 3D/climb stall monitor (not reset by ClearDetourState -> breaks alley ping-pong loops)
         float dist3D = Vector3.Distance(localPos, goalPos);
-        if (dist3D < _globalBestGoalDist3D - 3.0f
+        if ((usingCorridor && _waypoints.Count > 0 && _wpStuckTimer < 1.5f)
+            || dist3D < _globalBestGoalDist3D - 3.0f
             || ((goalPos.y - localPos.y) >= 2.0f && localPos.y > _globalBestClimbY + 2.0f))
         {
             _globalBestGoalDist3D = dist3D;
@@ -867,7 +1004,15 @@ public sealed class SmartPathNavigator
             _globalBestClimbY = localPos.y;
 
             if (_waypoints.Count > 0 && _wpIndex < _waypoints.Count)
-                TryMarkBlockedAndReroute(localPos, goalPos, _waypoints[_wpIndex]);
+            {
+                if (_wpStuckTimer >= 2.0f)
+                    TryMarkBlockedAndReroute(localPos, goalPos, _waypoints[_wpIndex]);
+                else
+                {
+                    ClearBlockedNavPolys();
+                    TryBuildCorridor(localPos, goalPos);
+                }
+            }
 
             if (_detourActive)
             {
@@ -881,13 +1026,25 @@ public sealed class SmartPathNavigator
 
         // Catch unplanned falls when jumping off a cliff after the leader
         float goalHorizDist = HorizontalDist(localPos, goalPos);
-        if (!localGrounded && !isWallClimbingNow && (localPos.y - goalPos.y) >= 1.8f && goalHorizDist <= (profile.CanFlowGlide ? 55.0f : 35.0f))
+        Vector3 flatGoalRaw = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
+        Vector3 flatGoalDir = flatGoalRaw.sqrMagnitude > 1e-4f ? flatGoalRaw.normalized : wantDir;
+        bool blockingRidgeToLowerGoal = HasBlockingRidgeTowardDistantLowerGoal(localPos, goalPos, goalHorizDist);
+        if (!localGrounded
+            && !isWallClimbingNow
+            && !_detourActive
+            && !blockingRidgeToLowerGoal
+            && _postWallDetachTimer <= 0f
+            && (localPos.y - goalPos.y) >= 1.8f
+            && goalHorizDist <= (profile.CanFlowGlide ? 55.0f : 35.0f))
         {
-            Vector3 flatGoalDir = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
-            if (flatGoalDir.sqrMagnitude > 1e-4f)
+            if (flatGoalRaw.sqrMagnitude > 1e-4f)
             {
-                flatGoalDir = flatGoalDir.normalized;
-                if (!_sensor.IsTallWallAhead(localPos, flatGoalDir, 1.35f))
+                float capDist = profile.CanFlowGlide ? 32.0f : 22.0f;
+                float airClearCheck = goalHorizDist > capDist
+                    ? MathF.Min(goalHorizDist, 14.0f)
+                    : MathF.Min(goalHorizDist, 4.8f);
+                if (!_sensor.IsTallWallAhead(localPos, flatGoalDir, MathF.Min(airClearCheck, 6.0f))
+                    && ProbeCorridorClearance(localPos, flatGoalDir, airClearCheck, 0.36f, checkGround: false) >= airClearCheck - 0.20f)
                 {
                     float dropDur = Math.Clamp((localPos.y - goalPos.y) * 0.22f + 2.2f, 3.2f, 8.5f);
                     BeginAirCommit(localPos, goalPos, flatGoalDir, "cliff_drop", dropDur, MathF.Min(goalHorizDist, 8.0f), goalPos.y - localPos.y);
@@ -999,6 +1156,8 @@ public sealed class SmartPathNavigator
 
         if (allowSafeDrop
             && (goalPos.y - localPos.y) < 1.5f
+            && !blockingRidgeToLowerGoal
+            && (goalHorizDist <= 14.0f || Vector3.Dot(wantDir, flatGoalDir) >= 0.15f)
             && (isDropOffVault || (primaryBlocked && CanVaultDropAhead(localPos, wantDir, distToDesired, maxDropDepth)))
             && !_sensor.IsTallWallAhead(localPos, wantDir, Math.Clamp(distToDesired, 1.35f, 2.2f)))
         {
@@ -1053,6 +1212,8 @@ public sealed class SmartPathNavigator
             _clearHoldTimer += dt;
             if (isDropOffStep
                 && (goalPos.y - localPos.y) < 1.5f
+                && !blockingRidgeToLowerGoal
+                && (goalHorizDist <= 14.0f || Vector3.Dot(wantDir, flatGoalDir) >= 0.35f)
                 && localGrounded
                 && !HasSafeGroundAt(localPos + wantDir * 1.15f, localPos.y, allowSafeDrop: false, 3.8f))
             {
@@ -1082,6 +1243,7 @@ public sealed class SmartPathNavigator
 
         // Before wall-following around an air gap, check if we can jump directly to a verified landing stone (one stone at a time)
         if (localGrounded
+            && !usingCorridor
             && !isWallClimbingNow
             && _postGapLandSettleTimer <= 0f
             && TryDetectJumpableGapAhead(localPos, goalPos, wantDir, out Vector3 gapLand, out Vector3 gapDir, out float gapDist, out float gapDy))
@@ -1103,15 +1265,17 @@ public sealed class SmartPathNavigator
 
         // Zone-aware wall-climb (when SceneType != 2 & NO overhead ceiling) or jump within 5/2 jump budget
         float goalDyUp = goalPos.y - localPos.y;
+        bool ridgeClimbAllowed = !usingCorridor && blockingRidgeToLowerGoal;
         bool canReenterClimbFromDetour = _detourActive
+            && !usingCorridor
             && _detourCommitTimer <= 0f
             && _wallClimbRejectTimer <= 0f
             && profile.CanWallClimb
-            && goalDyUp >= 1.5f;
+            && goalDyUp >= 2.0f;
 
         if (!_detourActive || isWallClimbingNow || _wallClimbAttemptTimer > 0f || canReenterClimbFromDetour)
         {
-            if (isWallClimbingNow && goalDyUp > 0.5f && _wallClimbRejectTimer <= 0f)
+            if (isWallClimbingNow && (goalDyUp > 0.5f || ridgeClimbAllowed) && _wallClimbRejectTimer <= 0f)
             {
                 bool straightUpBlocked = _sensor.HasOverheadCeiling(localPos, wantDir, verticalOnly: true);
                 if (_wallClimbAttemptTimer <= 0f)
@@ -1129,6 +1293,7 @@ public sealed class SmartPathNavigator
                         ClearDetourState();
                     IsWallClimbAhead = true;
                     IsWallClimbLatchReady = true;
+                    IsClimbingIntermediateRidge = ridgeClimbAllowed;
                     IsDetouring = false;
                     IsWallAhead = false;
                     IsClimbableStepAhead = true;
@@ -1138,26 +1303,42 @@ public sealed class SmartPathNavigator
 
                 _wallClimbAttemptTimer = 0f;
                 _wallClimbPeakY = 0f;
-                _wallClimbRejectTimer = 5.0f;
+                _wallClimbRejectTimer = 18.0f;
             }
             else
             {
                 bool hasCeiling = _sensor.HasOverheadCeiling(localPos, wantDir);
                 if (hasCeiling && goalDyUp >= 1.5f && _wallClimbRejectTimer <= 0f)
-                    _wallClimbRejectTimer = 6.0f;
+                    _wallClimbRejectTimer = 15.0f;
 
                 float measuredHeight = 0f;
-                if (!_sensor.TryMeasureObstacleTopHeight(localPos, wantDir, MathF.Min(probeDist, 2.2f), 18.0f, out measuredHeight))
+                bool measuredTop = _sensor.TryMeasureObstacleTopHeight(localPos, wantDir, MathF.Min(probeDist, 2.2f), 18.0f, out measuredHeight);
+                if (!measuredTop)
                 {
                     measuredHeight = (goalDyUp >= 1.2f || isWallClimbingNow) ? MathF.Max(goalDyUp, 3.5f) : 25.0f;
                 }
 
+                bool allowRidgeOverDistantLower = ridgeClimbAllowed
+                    && measuredTop
+                    && measuredHeight > profile.MaxJumpReachHeightMeters
+                    && measuredHeight <= 16.0f;
                 var verticalAct = LocomotionRules.DecideObstacleVerticalAction(
                     profile,
                     measuredHeight,
                     hasCeiling,
-                    wallClimbRejected: _wallClimbRejectTimer > 0f || goalDyUp <= -2.0f,
-                    targetIsAbove: goalDyUp >= 1.2f || isWallClimbingNow);
+                    wallClimbRejected: _wallClimbRejectTimer > 0f || (goalDyUp <= -2.0f && !allowRidgeOverDistantLower),
+                    targetIsAbove: goalDyUp >= 1.2f || isWallClimbingNow || allowRidgeOverDistantLower);
+
+                if (verticalAct == ObstacleVerticalAction.WallClimb
+                    && usingCorridor
+                    && _waypoints.Count > 0
+                    && EvaluateActiveNavMeshPath(localPos, goalPos, out float navRoadLen, out float navRoadEndH, out float navRoadEndV)
+                    && LocomotionRules.ShouldPreferNavMeshOverWallClimb(HorizontalDist(localPos, goalPos), navRoadLen, navRoadEndH, navRoadEndV))
+                {
+                    verticalAct = (!hasCeiling && measuredHeight <= profile.MaxJumpReachHeightMeters)
+                        ? ObstacleVerticalAction.Jump
+                        : ObstacleVerticalAction.Detour;
+                }
 
                 if (verticalAct == ObstacleVerticalAction.WallClimb)
                 {
@@ -1173,7 +1354,7 @@ public sealed class SmartPathNavigator
                         _wallClimbAttemptTimer = 0f;
                         _wallClimbPeakY = 0f;
                         if (goalDyUp >= 1.5f)
-                            _wallClimbRejectTimer = MathF.Max(_wallClimbRejectTimer, 6.0f);
+                            _wallClimbRejectTimer = MathF.Max(_wallClimbRejectTimer, 15.0f);
                         verticalAct = ObstacleVerticalAction.Detour;
                     }
                     else if (latchReady)
@@ -1191,7 +1372,7 @@ public sealed class SmartPathNavigator
                         {
                             _wallClimbAttemptTimer = 0f;
                             _wallClimbPeakY = 0f;
-                            _wallClimbRejectTimer = 5.0f;
+                            _wallClimbRejectTimer = 18.0f;
                             verticalAct = ObstacleVerticalAction.Detour;
                         }
                     }
@@ -1207,6 +1388,7 @@ public sealed class SmartPathNavigator
                             ClearDetourState();
                         IsWallClimbAhead = true;
                         IsWallClimbLatchReady = latchReady;
+                        IsClimbingIntermediateRidge = allowRidgeOverDistantLower || ridgeClimbAllowed;
                         IsDetouring = false;
                         IsWallAhead = false;
                         IsClimbableStepAhead = latchReady;
@@ -1833,7 +2015,19 @@ public sealed class SmartPathNavigator
 
         if (TryResolveNavMeshWaypoint(dt, sceneId, localPos, goalPos, targetKey, out Vector3 navWp))
         {
-            if (directDropReady)
+            bool navPrefersRoad = EvaluateActiveNavMeshPath(
+                    localPos,
+                    goalPos,
+                    out float navPathLen,
+                    out float navEndHorizErr,
+                    out float navEndVertErr)
+                && LocomotionRules.ShouldPreferNavMeshOverWallClimb(
+                    distToGoal,
+                    navPathLen,
+                    navEndHorizErr,
+                    navEndVertErr);
+
+            if (directDropReady && !navPrefersRoad)
             {
                 Vector3 toNav = new(navWp.x - localPos.x, 0f, navWp.z - localPos.z);
                 bool navAlignedWithDrop = toNav.sqrMagnitude >= 1e-4f
@@ -1852,7 +2046,7 @@ public sealed class SmartPathNavigator
                 }
             }
 
-            if (directClimbReady)
+            if (directClimbReady && !navPrefersRoad)
             {
                 Vector3 toNav = new(navWp.x - localPos.x, 0f, navWp.z - localPos.z);
                 bool navAlignedClimb = toNav.sqrMagnitude >= 1e-4f
@@ -1975,16 +2169,20 @@ public sealed class SmartPathNavigator
             _waypoints.Clear();
             _wpIndex = 0;
             _corridorFailed = false;
+            _corridorRetryTimer = 0f;
+            _corridorFailPos = Vector3.zero;
             _rerouteCount = 0;
             _wpStuckTimer = 0f;
             _bestWpDist = float.MaxValue;
         }
 
         float goalMoved = HorizontalDist(goalPos, _corridorGoal);
-        if (_corridorFailed && goalMoved >= 5.0f)
+        if (_corridorFailed && (goalMoved >= 5.0f || _corridorRetryTimer <= 0f || HorizontalDist(localPos, _corridorFailPos) >= 8.0f))
         {
             _corridorFailed = false;
             _rerouteCount = 0;
+            _corridorRetryTimer = 0f;
+            ClearBlockedNavPolys();
         }
 
         bool needCompute = !_corridorFailed
@@ -1997,6 +2195,8 @@ public sealed class SmartPathNavigator
             if (!TryBuildCorridor(localPos, goalPos))
             {
                 _corridorFailed = true;
+                _corridorRetryTimer = 6.0f;
+                _corridorFailPos = localPos;
                 _waypoints.Clear();
                 return false;
             }
@@ -2013,7 +2213,7 @@ public sealed class SmartPathNavigator
             _bestWpDist = HorizontalDist(localPos, _waypoints[_wpIndex]);
         }
 
-        // Line-of-sight string-pulling so dashes / bunnyhops skip already-clear intermediate corners
+        // Line-of-sight string-pulling with ground continuity guard so cliffside bends are never cut across air
         if (_sensor.IsReady && _wpIndex < _waypoints.Count - 1)
         {
             int maxLook = Math.Min(_wpIndex + 3, _waypoints.Count - 1);
@@ -2023,7 +2223,8 @@ public sealed class SmartPathNavigator
                 Vector3 cand = _waypoints[k];
                 if (HorizontalDist(localPos, cand) <= 14.0f
                     && MathF.Abs(cand.y - localPos.y) <= 1.8f
-                    && !_sensor.IsBlocked(eyeFrom, new Vector3(cand.x, cand.y + 0.62f, cand.z), 0.46f, ignoreStep: true))
+                    && !_sensor.IsBlocked(eyeFrom, new Vector3(cand.x, cand.y + 0.62f, cand.z), 0.46f, ignoreStep: true)
+                    && HasContinuousGroundAlong(localPos, cand))
                 {
                     _wpIndex = k;
                     _wpStuckTimer = 0f;
@@ -2046,9 +2247,20 @@ public sealed class SmartPathNavigator
         else
         {
             _wpStuckTimer += dt;
-            if (_wpStuckTimer >= 1.6f)
+            if (_wpStuckTimer >= 4.0f)
             {
-                if (_rerouteCount < 6 && TryMarkBlockedAndReroute(localPos, goalPos, wp))
+                if (_rerouteCount == 0)
+                {
+                    _rerouteCount++;
+                    _wpStuckTimer = 0f;
+                    ClearBlockedNavPolys();
+                    if (TryBuildCorridor(localPos, goalPos) && _waypoints.Count > 0)
+                    {
+                        waypoint = _waypoints[_wpIndex];
+                        return true;
+                    }
+                }
+                else if (_rerouteCount < 3 && TryMarkBlockedAndReroute(localPos, goalPos, wp))
                 {
                     if (_waypoints.Count > 0)
                     {
@@ -2057,7 +2269,11 @@ public sealed class SmartPathNavigator
                     }
                     return false;
                 }
+
+                ClearBlockedNavPolys();
                 _corridorFailed = true;
+                _corridorRetryTimer = 6.0f;
+                _corridorFailPos = localPos;
                 _waypoints.Clear();
                 return false;
             }
@@ -2065,6 +2281,30 @@ public sealed class SmartPathNavigator
 
         waypoint = wp;
         return true;
+    }
+
+    private bool HasContinuousGroundAlong(Vector3 from, Vector3 to)
+    {
+        if (!_sensor.IsReady)
+            return true;
+
+        float[] ts = { 0.25f, 0.50f, 0.75f };
+        for (int i = 0; i < ts.Length; i++)
+        {
+            Vector3 p = Vector3.Lerp(from, to, ts[i]);
+            if (!_sensor.HasGroundNear(p, downDepth: 2.2f))
+                return false;
+        }
+        return true;
+    }
+
+    private void ClearBlockedNavPolys()
+    {
+        try
+        {
+            _miClearBlockedPolys?.Invoke(_navNavigator, null);
+        }
+        catch { }
     }
 
     private bool TryResolveLocalAStarWaypoint(
@@ -2124,6 +2364,74 @@ public sealed class SmartPathNavigator
         corridorLabel = $"local_astar({_localAStar.ActiveWaypointIndex + 1}/{_localAStar.ActiveWaypointCount})";
         waypoint = astarWp;
         return true;
+    }
+
+    private bool EvaluateActiveNavMeshPath(
+        Vector3 localPos,
+        Vector3 goalPos,
+        out float pathLen,
+        out float endHorizErr,
+        out float endVertErr)
+    {
+        pathLen = 0f;
+        endHorizErr = float.MaxValue;
+        endVertErr = float.MaxValue;
+        if (_waypoints.Count == 0 || _wpIndex < 0 || _wpIndex >= _waypoints.Count)
+            return false;
+
+        Vector3 prev = localPos;
+        for (int i = _wpIndex; i < _waypoints.Count; i++)
+        {
+            Vector3 wp = _waypoints[i];
+            pathLen += HorizontalDist(prev, wp);
+            prev = wp;
+        }
+
+        Vector3 tail = _waypoints[_waypoints.Count - 1];
+        endHorizErr = HorizontalDist(tail, goalPos);
+        endVertErr = MathF.Abs(tail.y - goalPos.y);
+        return true;
+    }
+
+    public PortalNavRouteEvaluation EvaluatePortalRoute(int sceneId, Position3D startPos, Position3D goalPos)
+    {
+        if (!EnsureSceneNavMesh(sceneId) || _miTryComputeCorridor == null || _navNavigator == null || _cachedNavMesh == null || _cachedNavQuery == null)
+            return default;
+
+        try
+        {
+            var start = new Vector3(startPos.X, startPos.Y, startPos.Z);
+            var goal = new Vector3(goalPos.X, goalPos.Y, goalPos.Z);
+            var tempWps = new List<Vector3>(32);
+            var args = new object?[] { _cachedNavMesh, _cachedNavQuery, start, goal, tempWps, "" };
+            object? res = _miTryComputeCorridor.Invoke(_navNavigator, args);
+            if (res is bool ok && ok && tempWps.Count > 0)
+            {
+                float pathLen = 0f;
+                Vector3 prev = start;
+                for (int i = 0; i < tempWps.Count; i++)
+                {
+                    pathLen += Vector3.Distance(prev, tempWps[i]);
+                    prev = tempWps[i];
+                }
+
+                Vector3 tail = tempWps[^1];
+                float tailHorizErr = HorizontalDist(tail, goal);
+                bool hasGoalY = MathF.Abs(goal.y) > 0.01f;
+                float tailVertErr = hasGoalY ? MathF.Abs(tail.y - goal.y) : 0f;
+                bool reachable = tailHorizErr <= 20.0f && (!hasGoalY || tailVertErr <= 14.0f);
+                return new PortalNavRouteEvaluation(
+                    HasNavMesh: true,
+                    IsReachable: reachable,
+                    PathLengthMeters: reachable ? pathLen + tailHorizErr : 0f);
+            }
+
+            return new PortalNavRouteEvaluation(HasNavMesh: true, IsReachable: false, PathLengthMeters: 0f);
+        }
+        catch
+        {
+            return default;
+        }
     }
 
     private bool TryBuildCorridor(Vector3 start, Vector3 goal)
@@ -2215,8 +2523,10 @@ public sealed class SmartPathNavigator
         _waypoints.Clear();
         _wpIndex = 0;
         _corridorFailed = false;
+        _corridorRetryTimer = 0f;
+        _corridorFailPos = Vector3.zero;
         _rerouteCount = 0;
-        try { _miClearBlockedPolys?.Invoke(_navNavigator, null); } catch { }
+        ClearBlockedNavPolys();
 
         if (!_sceneToNavFile.TryGetValue(sceneId, out string? file) || string.IsNullOrWhiteSpace(file))
             return false;

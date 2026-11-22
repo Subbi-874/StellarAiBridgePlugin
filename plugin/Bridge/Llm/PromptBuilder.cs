@@ -90,7 +90,8 @@ public static class PromptBuilder
         IReadOnlyList<string>? unavailableLabels = null,
         string activeGoalsSummary = "",
         string memoryContext = "",
-        IReadOnlyList<string>? disabledLabels = null)
+        IReadOnlyList<string>? disabledLabels = null,
+        string questSummary = "")
     {
         string lang = BridgeI18n.NormalizeUiLanguage(cfg.UiLanguage);
         bool isAdmin = JsonNodeHelpers.GetBool(trig, "is_admin", JsonNodeHelpers.GetBool(trig, "is_commander", false));
@@ -137,6 +138,8 @@ public static class PromptBuilder
             ["수신 채팅 채널"] = channel,
             ["등록된 관리자(UID)"] = commandersStr,
         };
+        if (!string.IsNullOrWhiteSpace(questSummary))
+            gameContext["보유 퀘스트 현황"] = questSummary.Trim();
 
         string personaText = !string.IsNullOrWhiteSpace(cfg.Llm.Persona)
             ? cfg.Llm.Persona.Trim()
@@ -168,6 +171,7 @@ public static class PromptBuilder
             + $"- 현재 패치로 사용 불가 기능: {unavailableStr}\n"
             + $"- 온라인 파티/친구/길드원 UID 목록: {rosterStr}\n"
             + $"- 보유 감정표현 목록: {emotesStr}\n"
+            + (!string.IsNullOrWhiteSpace(questSummary) ? $"- 보유 퀘스트 현황: {questSummary.Trim()}\n" : "")
             + $"- 수신 채팅 채널: {channel}\n"
             + $"- 등록된 관리자(UID): {commandersStr}\n\n"
             + $"<recent_chat_history>\n{recentChatBlock}\n</recent_chat_history>\n\n"
@@ -326,7 +330,8 @@ public static class PromptBuilder
         IReadOnlyList<string> lockedLabels,
         IReadOnlyList<string> unavailableLabels,
         bool isRemoteBpsr,
-        string lang = "ko")
+        string lang = "ko",
+        JsonObject? eventContext = null)
     {
         string langCode = BridgeI18n.NormalizeUiLanguage(lang);
         string channel = JsonNodeHelpers.GetString(goalJson, "channel", "");
@@ -363,6 +368,9 @@ public static class PromptBuilder
             + "- ask_user: 사용자에게 상황을 알리고 결정/확인 요청 (reply_text 작성)\n"
             + "- abort_goal: 현재 목표를 포기·중단하고 사용자에게 안내 (reply_text 작성)\n"
             + "- switch_strategy: 현재 단계를 대체 액션(replacement_step: {\"type\": \"...\", ...})으로 교체\n\n"
+            + "- 퀘스트 막힘(event_name=auto_quest_failed 또는 event_context에 block_reason/active_step_tips/active_goal_kind 포함) 시 "
+            + "event_context를 우선 해석해 선행 행동(switch_strategy: 예. gather/farm_monster_item/다른 퀘스트)이 가능하면 전환하고, "
+            + "사진·통찰·시간대기·관리자잠금 등 불가 사유라면 ask_user 또는 abort_goal로 정확한 막힌 원인을 사용자에게 설명하세요.\n\n"
             + "반드시 순수 JSON 객체 하나만 출력하세요:\n"
             + "{\"action\": \"retry | skip_step | ask_user | abort_goal | switch_strategy\", "
             + "\"reply_text\": \"\", \"delay_sec\": 0, \"replacement_step\": null, \"reason\": \"...\"}";
@@ -376,6 +384,8 @@ public static class PromptBuilder
             ["locked_labels"] = ToJsonStringArray(lockedLabels),
             ["unavailable_labels"] = ToJsonStringArray(unavailableLabels),
         };
+        if (eventContext != null && eventContext.Count > 0)
+            payload["event_context"] = JsonNodeHelpers.CloneObject(eventContext);
         string extra =
             "<goal_exception>\n"
             + JsonNodeHelpers.ToCompactJson(payload)
@@ -394,6 +404,96 @@ public static class PromptBuilder
             SystemPrompt = sysPrompt,
             UserPrompt = extra,
             ExtraBlock = isRemoteBpsr ? extra : "",
+        };
+    }
+
+    public static ConsultPrompts BuildNavigationStallPrompts(
+        string? persona,
+        string channel,
+        long requesterUid,
+        string requesterName,
+        JsonObject stallPayload,
+        bool isRemoteBpsr,
+        string lang = "ko")
+    {
+        string langCode = BridgeI18n.NormalizeUiLanguage(lang);
+        string safeChannel = !string.IsNullOrWhiteSpace(channel) ? channel : "party";
+        string safeReqName = !string.IsNullOrWhiteSpace(requesterName) ? requesterName : "시스템";
+
+        string behKind = JsonNodeHelpers.GetString(stallPayload, "behavior_kind", "");
+        string stallReason = JsonNodeHelpers.GetString(stallPayload, "stall_reason", "");
+
+        var synthTrig = new JsonObject
+        {
+            ["sender_name"] = safeReqName,
+            ["sender_id"] = requesterUid,
+            ["is_commander"] = true,
+            ["text"] = $"[길찾기 정체 해결 요청: {behKind}/{stallReason}] 막힌 지형을 우회할 고수준 이동 전략을 결정해 주세요.",
+        };
+
+        string personaText = !string.IsNullOrWhiteSpace(persona)
+            ? persona.Trim()
+            : BridgeI18n.DefaultPersonaForLang(langCode);
+        string langRule = BridgeI18n.T("reply_language_rule", langCode);
+        string personaBlock =
+            "<persona>\n"
+            + "아래 캐릭터 페르소나(말투·성격) 지침에 맞춰 중단/포기 시 reply_text를 작성하세요:\n"
+            + $"{personaText}\n"
+            + $"{langRule}\n"
+            + "</persona>";
+
+        const string strategyGuide =
+            "길찾기가 벽/절벽/산맥 앞에서 제자리 뺑뺑이 돌거나 거리가 줄지 않을 때 고수준 우회 경로만 결정하세요.\n"
+            + "상황별 선택 우선순위:\n"
+            + "1. exhausted == true 이면 더 이상 우회하지 말고, can_skip_quest == true 이면 skip_quest 를, false 이면 abort 를 선택해 자연스러운 reply_text 를 작성하세요.\n"
+            + "2. [최우선 포탈 규칙] candidate_portals 중 \"navmesh_reachable\": true 인 포탈이 하나라도 있으면, 그 포탈의 horiz_dist_to_target(예: 150~280m)가 현재 막힌 직선거리(horiz_dist, 예: 70~110m)보다 크더라도 반드시 해당 포탈로 warp_portal(teleport_to_place) 을 최우선 선택하세요. 직선거리는 산/절벽에 가로막힌 허수이고, navmesh_reachable == true 는 목표 지점까지 도보 도로가 완전히 이어진 유일한 진입로입니다. navmesh_reachable == false 인 포탈은 절대 고르지 마세요.\n"
+            + "3. navmesh_reachable 값이 없더라도 지형 막힘(horiz_dist >= 50, loop_or_wall_stall)이거나 dy > +10 이면 25~38m짜리 근거리 detour_waypoint 대신 다른 방위(bearing_from_target) 또는 고도가 맞는 candidate_portals 워프나 nearby_gimmicks 탑승을 우선 선택하세요. (detour_waypoints 는 쓸 만한 포탈/기믹이 없을 때 작은 장애물만 돌아갈 때 사용)\n"
+            + "4. tried_actions 에 이미 기록된 포탈/기믹/웨이포인트는 절대 다시 고르지 마세요.\n";
+
+        string sysPrompt = isRemoteBpsr
+            ? $"{personaBlock}\n\n{strategyGuide}\n"
+              + "응답 JSON의 actions 배열로 행동을 표현하세요:\n"
+              + "- 워프 포탈 이동: {\"type\": \"teleport_to_place\", \"destination\": \"<tp_id 또는 포탈명>\"}\n"
+              + "- 이동 기믹 탑승: {\"type\": \"use_gimmick\", \"gimmick\": \"<uuid 또는 기믹명>\"}\n"
+              + "- 우회 웨이포인트 이동: {\"type\": \"teleport_to_place\", \"destination\": \"waypoint:<waypoint id>\"}\n"
+              + "- 퀘스트 건너뛰기: {\"type\": \"auto_quest\", \"quest\": \"skip_quest\"}\n"
+              + "- 포기 및 채팅 안내: {\"type\": \"stop\"} (reply_text 작성)\n"
+            : $"{personaBlock}\n\n{strategyGuide}\n"
+              + "반드시 아래 5가지 action 중 정확히 하나만 순수 JSON 객체로 출력하세요:\n"
+              + "- warp_portal: candidate_portals 중 하나의 tp_id / destination 지정\n"
+              + "- use_gimmick: nearby_gimmicks 중 하나의 uuid / gimmick 지정\n"
+              + "- detour_waypoint: detour_waypoints 중 하나의 waypoint_id 지정\n"
+              + "- skip_quest: auto_quest 대기열에서 현재 막힌 퀘스트만 건너뜀 (can_skip_quest == true 일 때)\n"
+              + "- abort: 더 이상 우회 불가 시 정지 및 reply_text 작성\n\n"
+              + "{\"action\": \"warp_portal | use_gimmick | detour_waypoint | skip_quest | abort\", "
+              + "\"tp_id\": 0, \"destination\": \"\", \"uuid\": 0, \"gimmick\": \"\", "
+              + "\"waypoint_id\": \"\", \"reply_text\": \"\", \"reason\": \"...\"}";
+
+        string payloadJson = JsonNodeHelpers.ToCompactJson(stallPayload);
+        string userPrompt = isRemoteBpsr
+            ? "<navigation_stalled>\n"
+              + payloadJson
+              + "\n</navigation_stalled>\n"
+              + strategyGuide
+              + "\n위 <navigation_stalled> 데이터를 바탕으로 actions 배열(warp: destination='<tp_id>', gimmick: use_gimmick, detour: destination='waypoint:<id>', skip: auto_quest quest='skip_quest', abort: stop) 중 하나를 선택해 JSON으로 응답하세요."
+            : "<navigation_stalled>\n"
+              + payloadJson
+              + "\n</navigation_stalled>\n"
+              + "위 <navigation_stalled> 데이터를 분석해 최적의 복구 action 하나를 순수 JSON 객체로 응답하세요.";
+
+        return new ConsultPrompts
+        {
+            SynthTrig = synthTrig,
+            GameContext = new JsonObject
+            {
+                ["수신 채팅 채널"] = safeChannel,
+                ["정체 행동"] = behKind,
+                ["정체 유형"] = stallReason,
+            },
+            PersonaBlock = personaBlock,
+            SystemPrompt = sysPrompt,
+            UserPrompt = userPrompt,
+            ExtraBlock = isRemoteBpsr ? userPrompt : "",
         };
     }
 

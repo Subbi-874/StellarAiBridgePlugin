@@ -4,6 +4,18 @@ using Stellar.Abstractions.Domain;
 
 namespace Stellar.AgyBridge.Adapters.Social;
 
+public sealed record SharedPositionMessage(
+    long MsgId,
+    long SenderId,
+    string BeforeText,
+    string AfterText,
+    int SceneId,
+    int LineId,
+    int X,
+    int Y,
+    int Z,
+    int MapLayerId);
+
 /// <summary>
 /// Domain adapter encapsulating Lua VMs, DataMgr caches, TableMgr tables, Z.EntityMgr AOI/combat
 /// reflection, invite event hooks, party RPCs, emote playback, and sticker catalog filtering for social/world services.
@@ -55,4 +67,24 @@ public interface ISocialAdapter : ICapabilityProbe
     // ─── Stickers & Scene Metadata ───
     IReadOnlyList<int> QueryActiveStickerGroups();
     bool TryReadSceneTableRow(int sceneId, out string name, out int subType);
+
+    // ─── Hypertext Position Share ───
+    string? StartSharePositionInChatCoroutine(
+        int channelType,
+        string beforeDesc,
+        string afterDesc,
+        int sceneId,
+        int lineId,
+        int posX,
+        int posY,
+        int posZ,
+        int mapLayerId = -1,
+        long targetCharId = 0L);
+
+    JsonObject PollCoroutineRpc(string reqId, bool clearWhenDone = true);
+
+    IReadOnlyList<SharedPositionMessage> ReadRecentSharedPositionMessages(
+        int channelType,
+        long afterMsgId,
+        int maxScan = 12);
 }

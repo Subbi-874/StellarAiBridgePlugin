@@ -55,6 +55,7 @@ public sealed class ChatMonitorService
     private readonly HashSet<Task> _backgroundTasks = new();
     private readonly Dictionary<string, (string Channel, long SenderId)> _lastGatherTriggerCh = new(StringComparer.Ordinal);
     private readonly Dictionary<(string ConnId, string Kind), (string Channel, long SenderId, double Timestamp)> _lastActionTrigger = new();
+    private readonly Dictionary<string, double> _recentNavStallAbortNoticeAt = new(StringComparer.Ordinal);
 
     public IMemoryStore Memory { get; }
     public BotAgentRegistry Agents { get; }
@@ -175,6 +176,44 @@ public sealed class ChatMonitorService
             cnt = Math.Max(1, cnt);
             string label = !string.IsNullOrEmpty(mon) ? mon : $"아이템 #{itemId}";
             title = $"{label} 재료 {cnt}개 파밍";
+        }
+        else if (atype == "auto_quest")
+        {
+            string cat = FirstNonEmpty(
+                JsonNodeHelpers.GetString(act, "quest_category", ""),
+                JsonNodeHelpers.GetString(act, "category", ""),
+                JsonNodeHelpers.GetString(act, "group", "")).Trim();
+            string quest = FirstNonEmpty(
+                JsonNodeHelpers.GetString(act, "quest", ""),
+                JsonNodeHelpers.GetString(act, "query", ""),
+                JsonNodeHelpers.GetString(act, "name", "")).Trim();
+            string region = FirstNonEmpty(
+                JsonNodeHelpers.GetString(act, "region", ""),
+                JsonNodeHelpers.GetString(act, "scene", ""),
+                JsonNodeHelpers.GetString(act, "area", ""),
+                JsonNodeHelpers.GetString(act, "map", ""),
+                JsonNodeHelpers.GetString(act, "scene_name", "")).Trim();
+            bool regionOnly = JsonNodeHelpers.GetBool(act, "region_only", false);
+            int qid = JsonNodeHelpers.GetInt(act, "quest_id", 0);
+            int maxQ = Math.Max(0, JsonNodeHelpers.GetInt(act, "max_quests", 0));
+
+            string scope;
+            if (!string.IsNullOrEmpty(quest))
+                scope = $"'{quest}' 퀘스트";
+            else if (qid > 0)
+                scope = $"퀘스트 #{qid}";
+            else
+            {
+                int gid = Stellar.AgyBridge.World.QuestRules.NormalizeCategoryGroupId(cat);
+                string catLabel = gid >= 0
+                    ? Stellar.AgyBridge.World.QuestRules.GetCanonicalCategoryName(gid)
+                    : cat;
+                string baseCat = string.IsNullOrEmpty(catLabel) ? "전체 퀘스트" : catLabel;
+                scope = string.IsNullOrEmpty(region)
+                    ? baseCat
+                    : (regionOnly ? $"{region} {baseCat}" : $"{region} 우선 {baseCat}");
+            }
+            title = maxQ > 0 ? $"{scope} 최대 {maxQ}개 자동 진행" : $"{scope} 자동 진행";
         }
         else
         {
@@ -521,6 +560,12 @@ public sealed class ChatMonitorService
             return;
         }
 
+        if (evName == "navigation_stalled")
+        {
+            await HandleNavigationStalledEventAsync(connId, data, ct).ConfigureAwait(false);
+            return;
+        }
+
         if (evName == "behavior_finished")
         {
             BotAgent? bAgent = ResolveAgent(
@@ -610,7 +655,8 @@ public sealed class ChatMonitorService
         }
 
         if (evName is "follow_cancelled" or "monster_seek_arrived" or "monster_seek_failed"
-            or "fishing_completed" or "fishing_stopped" or "gimmick_failed")
+            or "fishing_completed" or "fishing_stopped" or "gimmick_failed"
+            or "auto_quest_completed" or "auto_quest_failed")
         {
             await HandleTaskEventAsync(connId, evName, data, ct).ConfigureAwait(false);
             return;
@@ -901,13 +947,44 @@ public sealed class ChatMonitorService
                 ? agent.Goals.FormatPromptSummary(JsonNodeHelpers.GetObject(st, "behavior"))
                 : BridgeI18n.T("no_active_goals", cfg.UiLanguage);
 
+            string triggerTextForCtx = JsonNodeHelpers.GetString(trig, "text", "");
             string memoryContext = botCid > 0
                 ? Memory.BuildPromptContext(
                     botCid,
                     senderUid: sUid,
                     senderName: sName,
-                    triggerText: JsonNodeHelpers.GetString(trig, "text", "")).ToPromptText()
+                    triggerText: triggerTextForCtx).ToPromptText()
                 : BridgeI18n.T("no_memories", cfg.UiLanguage);
+
+            string questSummary = "";
+            if (triggerTextForCtx.Contains("퀘스트", StringComparison.OrdinalIgnoreCase)
+                || triggerTextForCtx.Contains("퀘 ", StringComparison.OrdinalIgnoreCase)
+                || triggerTextForCtx.Contains("quest", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    JsonObject qRes = await _dispatch("list_quests", new JsonObject(), connId, ct).ConfigureAwait(false);
+                    if (JsonNodeHelpers.GetBool(qRes, "ok", false))
+                    {
+                        var summaryParts = new List<string>();
+                        JsonObject? catCounts = JsonNodeHelpers.GetObject(qRes, "category_counts");
+                        if (catCounts != null && catCounts.Count > 0)
+                        {
+                            summaryParts.Add("분류별: " + string.Join(", ",
+                                catCounts.Select(kv => $"{kv.Key} {JsonNodeHelpers.AsString(kv.Value, "0")}개")));
+                        }
+                        JsonObject? regCounts = JsonNodeHelpers.GetObject(qRes, "region_counts");
+                        if (regCounts != null && regCounts.Count > 0)
+                        {
+                            summaryParts.Add("지역별: " + string.Join(", ",
+                                regCounts.Select(kv => $"{kv.Key} {JsonNodeHelpers.AsString(kv.Value, "0")}개")));
+                        }
+                        if (summaryParts.Count > 0)
+                            questSummary = string.Join(" | ", summaryParts);
+                    }
+                }
+                catch { }
+            }
 
             BuiltPrompts prompts = PromptBuilder.BuildLlmPrompts(
                 cfg,
@@ -923,7 +1000,8 @@ public sealed class ChatMonitorService
                 cfg.UnavailableCapabilities,
                 activeGoalsSummary,
                 memoryContext,
-                disabledLabels);
+                disabledLabels,
+                questSummary);
 
             void RememberKind(string kind) => RememberTrigger(connId, kind, trig, agent);
             void ClearKinds(string[] kinds)
@@ -1851,6 +1929,17 @@ public sealed class ChatMonitorService
             SafeRecordEvent(agent.CharId, evName, fact, outcome: evOutcome);
         }
 
+        string evPhase = JsonNodeHelpers.GetString(data, "phase", "").Trim().ToLowerInvariant();
+        if (evPhase is "navigation_stalled" or "cancelled_navigation_stalled")
+        {
+            string cKey = connId ?? "";
+            lock (_stateLock)
+            {
+                if (_recentNavStallAbortNoticeAt.TryGetValue(cKey, out double sentAt) && _clock() - sentAt <= 5.0)
+                    return;
+            }
+        }
+
         (string Channel, long SenderId, double Timestamp)? entry = agent?.PopActionTrigger(kind, maxAge);
         if (!entry.HasValue && !string.IsNullOrEmpty(connId))
         {
@@ -2230,19 +2319,20 @@ public sealed class ChatMonitorService
                         pol.ErrorMessage,
                         null);
                 }
-                if (stItem.ActionType == "farm_monster_item")
+                if (stItem.ActionType is "farm_monster_item" or "auto_quest")
                 {
-                    PolicyCheckResult acPol = BridgePolicy.CheckActionPermission(cfg.FeaturePolicies, "set_auto_combat", isAdmin, cfg.UiLanguage);
-                    if (!acPol.Allowed)
+                    string extraAction = stItem.ActionType == "farm_monster_item" ? "set_auto_combat" : "follow_player";
+                    PolicyCheckResult exPol = BridgePolicy.CheckActionPermission(cfg.FeaturePolicies, extraAction, isAdmin, cfg.UiLanguage);
+                    if (!exPol.Allowed)
                     {
                         return (
                             new JsonObject
                             {
                                 ["action"] = atype,
-                                ["blocked_by_admin_lock"] = acPol.AdminLocked,
-                                ["policy_key"] = acPol.PolicyKey,
+                                ["blocked_by_admin_lock"] = exPol.AdminLocked,
+                                ["policy_key"] = exPol.PolicyKey,
                             },
-                            acPol.ErrorMessage,
+                            exPol.ErrorMessage,
                             null);
                     }
                 }
@@ -2828,7 +2918,8 @@ public sealed class ChatMonitorService
             BridgePolicy.GetAdminOnlyLabels(agent.Settings.FeaturePolicies, uiLang),
             agent.Settings.UnavailableCapabilities,
             agent.Settings.Llm.IsRemoteAgent,
-            uiLang);
+            uiLang,
+            directive.EventContext);
 
         (string raw, bool timedOut) = await InvokeLlmGuardedAsync(
             agent,
@@ -2878,6 +2969,211 @@ public sealed class ChatMonitorService
             await ExecuteRouteDirectiveAsync(
                 agent, targetConn, evName, applied, ct, alreadyRendered: !string.IsNullOrEmpty(decision.ReplyText)).ConfigureAwait(false);
         }
+    }
+
+    private async Task HandleNavigationStalledEventAsync(
+        string? connId,
+        JsonObject data,
+        CancellationToken ct)
+    {
+        string stallId = JsonNodeHelpers.GetString(data, "stall_id", "").Trim();
+        if (string.IsNullOrEmpty(stallId))
+            return;
+
+        long localCid = JsonNodeHelpers.GetLong(data, "local_char_id", 0L);
+        string localName = JsonNodeHelpers.GetString(data, "local_char_name", "").Trim();
+        BotAgent? agent = ResolveAgent(connId, localCid, localName);
+        string? targetConn = agent?.ConnId ?? connId;
+        ClientChatSettings cfg = GetCfg(targetConn);
+        bool exhausted = JsonNodeHelpers.GetBool(data, "exhausted", false);
+        bool canSkipQuest = JsonNodeHelpers.GetBool(data, "can_skip_quest", false);
+
+        async Task DispatchFallbackAsync(string fallbackReason)
+        {
+            await _dispatch(
+                "apply_nav_recovery",
+                new JsonObject
+                {
+                    ["stall_id"] = stallId,
+                    ["action"] = "fallback",
+                    ["reason"] = fallbackReason,
+                },
+                targetConn,
+                ct).ConfigureAwait(false);
+        }
+
+        if (!cfg.Enabled)
+        {
+            await DispatchFallbackAsync("chat_monitor_disabled").ConfigureAwait(false);
+            return;
+        }
+
+        string? activeGoalId = null;
+        string noticeChannel = "";
+        long requesterUid = 0L;
+        string requesterName = "";
+        bool hasActiveGoal = false;
+
+        if (agent != null)
+        {
+            await agent.Lock.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                Goal? g = agent.Goals.ActiveGoal;
+                if (g != null)
+                {
+                    hasActiveGoal = true;
+                    activeGoalId = g.GoalId;
+                    noticeChannel = g.Channel;
+                    requesterUid = g.RequesterUid;
+                    requesterName = g.RequesterName;
+                }
+            }
+            finally
+            {
+                agent.Lock.Release();
+            }
+
+            (bool budgetOk, string budgetReason) = agent.Budget.CanCall(activeGoalId);
+            if (!budgetOk)
+            {
+                _log?.Invoke($"Navigation stall LLM consultation skipped (bot={agent.CharId}): {budgetReason}");
+                await DispatchFallbackAsync(budgetReason).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        string behKind = JsonNodeHelpers.GetString(data, "behavior_kind", "");
+        (string Channel, long SenderId, string SenderName) resolvedNotice = ResolveStallNoticeChannel(agent, targetConn, behKind, cfg, noticeChannel, requesterUid, requesterName);
+        ConsultPrompts cp = PromptBuilder.BuildNavigationStallPrompts(
+            cfg.Llm.Persona,
+            resolvedNotice.Channel,
+            resolvedNotice.SenderId,
+            resolvedNotice.SenderName,
+            data,
+            cfg.Llm.IsRemoteAgent,
+            cfg.UiLanguage);
+
+        LlmClientConfig consultLlm = CloneLlmForJsonConsult(cfg.Llm);
+        string fullCliPrompt = cfg.Llm.IsRemoteAgent
+            ? cp.UserPrompt
+            : $"{cp.SystemPrompt}\n\n{cp.UserPrompt}";
+
+        (string raw, bool timedOut) = await InvokeLlmGuardedAsync(
+            agent,
+            activeGoalId,
+            consultLlm,
+            cp.SynthTrig,
+            cp.GameContext,
+            BridgeI18n.T("no_recent_chat", cfg.UiLanguage),
+            cp.SystemPrompt,
+            cp.UserPrompt,
+            fullCliPrompt,
+            cp.PersonaBlock,
+            "",
+            cp.ExtraBlock,
+            ct: ct).ConfigureAwait(false);
+
+        NavigationStallDecision? decision = !timedOut ? NavigationStallDecisionParser.Parse(raw, data) : null;
+        if (decision == null)
+        {
+            string fbAction = exhausted ? (canSkipQuest ? "skip_quest" : "abort") : "fallback";
+            decision = new NavigationStallDecision
+            {
+                Action = fbAction,
+                ReplyText = fbAction == "abort" ? "장애물 때문에 더 이상 목표 지점으로 이동할 수 없어 멈췄어요." : "",
+                Reason = timedOut ? "llm_timeout" : "unparseable_nav_consult",
+            };
+        }
+
+        if (decision.Action == "abort" && !string.IsNullOrWhiteSpace(decision.ReplyText))
+        {
+            bool handledByGoal = false;
+            if (agent != null && hasActiveGoal)
+            {
+                await agent.Lock.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    if (agent.Goals.ActiveGoal != null)
+                    {
+                        agent.Goals.ActiveGoal.Metadata["nav_stall_abort_reply"] = decision.ReplyText;
+                        handledByGoal = true;
+                    }
+                }
+                finally
+                {
+                    agent.Lock.Release();
+                }
+            }
+
+            if (!handledByGoal && !string.IsNullOrEmpty(resolvedNotice.Channel))
+            {
+                lock (_stateLock)
+                    _recentNavStallAbortNoticeAt[targetConn ?? ""] = _clock();
+                bool asAdmin = BridgePolicy.IsSenderAdmin(cfg, resolvedNotice.SenderId, resolvedNotice.SenderName);
+                await _output.SendNoticeAsync(
+                    resolvedNotice.Channel,
+                    decision.ReplyText,
+                    resolvedNotice.SenderId,
+                    targetConn,
+                    ct,
+                    asAdmin: asAdmin).ConfigureAwait(false);
+            }
+        }
+
+        await _dispatch("apply_nav_recovery", decision.ToRpcParams(stallId), targetConn, ct).ConfigureAwait(false);
+    }
+
+    private static LlmClientConfig CloneLlmForJsonConsult(LlmClientConfig src) => new()
+    {
+        Backend = src.Backend,
+        CliFlavor = src.CliFlavor,
+        EndpointUrl = src.EndpointUrl,
+        ApiKey = src.ApiKey,
+        Model = src.Model,
+        CliCommand = src.CliCommand,
+        CliEffort = src.CliEffort,
+        Persona = src.Persona,
+        // Disable response_schema.json enforcement on non-remote CLI runs so Format A JSON validates cleanly.
+        SendSystemPrompt = src.IsRemoteAgent && src.SendSystemPrompt,
+    };
+
+    private (string Channel, long SenderId, string SenderName) ResolveStallNoticeChannel(
+        BotAgent? agent,
+        string? connId,
+        string behKind,
+        ClientChatSettings cfg,
+        string goalChannel,
+        long goalUid,
+        string goalName)
+    {
+        if (!string.IsNullOrEmpty(goalChannel))
+            return (goalChannel, goalUid, goalName);
+
+        string triggerKind = behKind switch
+        {
+            "follow_player" => "follow",
+            "auto_quest" => "quest",
+            "seek_monster" => "monster",
+            "fish" or "fish_at_spot" => "fish",
+            "use_gimmick" => "gimmick",
+            _ => behKind,
+        };
+
+        if (agent != null && !string.IsNullOrEmpty(triggerKind))
+        {
+            var trig = agent.PopActionTrigger(triggerKind, 900.0);
+            if (trig.HasValue)
+            {
+                agent.RememberActionTrigger(triggerKind, trig.Value.Channel, trig.Value.SenderId);
+                return (trig.Value.Channel, trig.Value.SenderId, "");
+            }
+        }
+
+        if (cfg.Channels.Contains("party"))
+            return ("party", 0L, "");
+        string? firstCh = cfg.Channels.OrderBy(c => c, StringComparer.Ordinal).FirstOrDefault();
+        return (firstCh ?? "party", 0L, "");
     }
 
     private async Task ExecuteRouteDirectiveAsync(
@@ -2959,7 +3255,7 @@ public sealed class ChatMonitorService
 
             if (!string.IsNullOrEmpty(directive.Channel) && !string.IsNullOrEmpty(directive.Fact) && !string.IsNullOrEmpty(targetConn))
             {
-                string outTxt = alreadyRendered
+                string outTxt = (alreadyRendered || directive.FactAlreadyRendered)
                     ? directive.Fact
                     : await RenderEventInPersonaAsync(targetConn, directive.Channel, directive.Fact, ct).ConfigureAwait(false);
                 bool dirAsAdmin = BridgePolicy.IsSenderAdmin(agent.Settings, directive.RequesterUid, "");

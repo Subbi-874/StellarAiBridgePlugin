@@ -183,4 +183,73 @@ public static class LocomotionRules
         float dangerFloor = MathF.Max(300f, maxStamina * 0.25f);
         return curStamina <= dangerFloor;
     }
+
+    /// <summary>
+    /// Triggers an early portal rescue when swimming against a high cliff target (>= 4.5m above water)
+    /// for >= 3.5 seconds so the character escapes to land instead of burning stamina until drowning.
+    /// </summary>
+    public static bool ShouldTriggerSwimCliffRescue(
+        bool isSwimming,
+        float goalHeightAbovePlayer,
+        float swimCliffElapsedSec)
+        => isSwimming && goalHeightAbovePlayer >= 4.5f && swimCliffElapsedSec >= 3.5f;
+
+    /// <summary>
+    /// Allows the direct ledge-climb shortcut only for short upward ledges (0.35m..2.65m above player,
+    /// within 4.5m horizontally) with neither a tall blocking wall nor an overhanging ceiling.
+    /// </summary>
+    public static bool ShouldAllowDirectLedgeClimbShortcut(
+        float flatDist,
+        float heightDiff,
+        bool tallWallBlocking,
+        bool overheadCeiling)
+        => flatDist <= 4.5f
+           && heightDiff >= 0.35f
+           && heightDiff <= 2.65f
+           && !tallWallBlocking
+           && !overheadCeiling;
+
+    /// <summary>
+    /// Returns true when an active NavMesh corridor reaches the target elevation cleanly within
+    /// a reasonable walking factor, so the navigator follows the road instead of climbing walls.
+    /// </summary>
+    public static bool ShouldPreferNavMeshOverWallClimb(
+        float straightHorizDist,
+        float navPathLen,
+        float navEndHorizError,
+        float navEndVerticalError)
+    {
+        if (navPathLen <= 0f)
+            return false;
+
+        return navEndHorizError <= 6.0f
+            && navEndVerticalError <= 3.5f;
+    }
+
+    /// <summary>
+    /// Returns true when the character is currently attached to a climbable wall even though
+    /// navigation exited climb mode (into detour or downward target), requiring clean detach first.
+    /// Static ledge/wall clings detach immediately, whereas parkour wall-runs (<c>ActorStatePedalWall</c>)
+    /// are allowed to finish unless stalled on the wall.
+    /// </summary>
+    public static bool ShouldForceWallDetach(
+        bool isWallClimbingNow,
+        bool isWallClimbAhead,
+        bool isDetouring,
+        float goalDy,
+        bool isParkourWallRunOnly = false,
+        float wallStallElapsedSec = 0f)
+    {
+        if (!isWallClimbingNow)
+            return false;
+
+        bool unwantedWall = !isWallClimbAhead || isDetouring || goalDy <= -1.5f;
+        if (!unwantedWall)
+            return false;
+
+        if (isParkourWallRunOnly)
+            return wallStallElapsedSec >= 1.6f;
+
+        return true;
+    }
 }

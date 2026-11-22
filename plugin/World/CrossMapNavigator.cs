@@ -1,13 +1,38 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters.Combat;
 using Stellar.AgyBridge.Adapters.Movement;
+using Stellar.AgyBridge.Bridge.Core;
 using Stellar.AgyBridge.Locomotion;
 
 namespace Stellar.AgyBridge.World;
+
+/// <summary>
+/// Result of evaluating whether a walkable NavMesh corridor connects two positions on a scene.
+/// </summary>
+public readonly record struct PortalNavRouteEvaluation(
+    bool HasNavMesh,
+    bool IsReachable,
+    float PathLengthMeters);
+
+/// <summary>
+/// Unlocked intra-map warp portal candidate ranked relative to player and goal coordinates.
+/// </summary>
+public sealed record CandidateWarpPortal(
+    int TpId,
+    string Name,
+    Position3D Position,
+    float HorizDistToTarget,
+    float DyToTarget,
+    float DistFromPlayer,
+    string BearingFromTarget,
+    string ElevationHint,
+    bool? NavMeshReachable = null,
+    float? NavMeshPathMeters = null);
 
 /// <summary>
 /// Executes cross-map teleportation, special hub entry/exit (Guild Hall, Personal Home),
@@ -21,11 +46,126 @@ public sealed class CrossMapNavigator
     private readonly ICombatAdapter _combat;
     private readonly SceneTransferGate _transferGate = new();
 
+    private readonly Dictionary<(int SceneId, int TpId), double> _blacklistedPortalsUntilMono = new();
+    private Func<int, Position3D, Position3D, PortalNavRouteEvaluation>? _navRouteEvaluator;
+    private int _lastIntraWarpSceneId;
+    private int _lastIntraWarpTpId;
+    private int _suppressAutoIntraWarpSceneId;
+    private double _suppressAutoIntraWarpUntilMono;
+
     public CrossMapNavigator(IPluginServices services, IMovementAdapter movement, ICombatAdapter combat)
     {
         _services = services;
         _movement = movement;
         _combat = combat;
+    }
+
+    public void AttachNavRouteEvaluator(Func<int, Position3D, Position3D, PortalNavRouteEvaluation>? evaluator)
+        => _navRouteEvaluator = evaluator;
+
+    private static double MonoNow() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+
+    public (int SceneId, int TpId) LastIntraWarp => (_lastIntraWarpSceneId, _lastIntraWarpTpId);
+    public bool IsLoadingOrSettling => _transferGate.IsCurrentlyLoading || _transferGate.IsBlocked(out _, out _);
+
+    public void BlacklistPortal(int sceneId, int tpId, double durationSec = 300.0)
+    {
+        if (sceneId <= 0 || tpId <= 0) return;
+        _blacklistedPortalsUntilMono[(sceneId, tpId)] = MonoNow() + Math.Max(5.0, durationSec);
+    }
+
+    public void ClearBlacklistedPortals(int sceneId = 0)
+    {
+        if (sceneId <= 0)
+        {
+            _blacklistedPortalsUntilMono.Clear();
+            return;
+        }
+
+        List<(int SceneId, int TpId)>? toRemove = null;
+        foreach (var kv in _blacklistedPortalsUntilMono)
+        {
+            if (kv.Key.SceneId == sceneId)
+            {
+                toRemove ??= new List<(int, int)>();
+                toRemove.Add(kv.Key);
+            }
+        }
+        if (toRemove != null)
+        {
+            foreach (var key in toRemove)
+                _blacklistedPortalsUntilMono.Remove(key);
+        }
+    }
+
+    public void SuppressAutoIntraWarp(int sceneId, double durationSec = 90.0)
+    {
+        if (sceneId <= 0) return;
+        _suppressAutoIntraWarpSceneId = sceneId;
+        _suppressAutoIntraWarpUntilMono = MonoNow() + Math.Max(5.0, durationSec);
+    }
+
+    public void ClearAutoIntraWarpSuppression(int sceneId = 0)
+    {
+        if (sceneId <= 0 || _suppressAutoIntraWarpSceneId == sceneId)
+        {
+            _suppressAutoIntraWarpSceneId = 0;
+            _suppressAutoIntraWarpUntilMono = 0.0;
+        }
+    }
+
+    public bool IsAutoIntraWarpSuppressed(int sceneId)
+        => sceneId > 0 && _suppressAutoIntraWarpSceneId == sceneId && MonoNow() < _suppressAutoIntraWarpUntilMono;
+
+    /// <summary>
+    /// Determines whether an automatic per-step intra-map warp check should lock the step against retries.
+    /// Transient blocks (active suppression or an ongoing transfer gate) must NOT lock the step.
+    /// </summary>
+    public static bool ShouldLockIntraWarpStepAfterAttempt(
+        bool isSuppressed,
+        bool isTransferBusy,
+        bool warpCandidateFound,
+        bool warpSucceeded,
+        string? failureReasonCode)
+    {
+        if (isSuppressed || isTransferBusy)
+            return false;
+        if (!warpCandidateFound)
+            return true;
+        if (warpSucceeded)
+            return true;
+        return !string.Equals(failureReasonCode, "transfer_in_progress", StringComparison.Ordinal);
+    }
+
+    private HashSet<int>? BuildMergedExcludedTpIds(int sceneId, IReadOnlySet<int>? extraExcluded)
+    {
+        double now = MonoNow();
+        HashSet<int>? merged = extraExcluded != null && extraExcluded.Count > 0
+            ? new HashSet<int>(extraExcluded)
+            : null;
+
+        List<(int SceneId, int TpId)>? expired = null;
+        foreach (var kv in _blacklistedPortalsUntilMono)
+        {
+            if (now >= kv.Value)
+            {
+                expired ??= new List<(int, int)>();
+                expired.Add(kv.Key);
+                continue;
+            }
+            if (kv.Key.SceneId == sceneId)
+            {
+                merged ??= new HashSet<int>();
+                merged.Add(kv.Key.TpId);
+            }
+        }
+        if (expired != null)
+        {
+            foreach (var key in expired)
+                _blacklistedPortalsUntilMono.Remove(key);
+        }
+
+        return merged;
     }
 
     public void Tick(float dt)
@@ -192,11 +332,98 @@ public sealed class CrossMapNavigator
 
         if (!_movement.IsLuaReady || sceneId <= 0) return false;
         if (MathF.Abs(targetPos.X) < 0.01f && MathF.Abs(targetPos.Z) < 0.01f) return false;
+        if (IsAutoIntraWarpSuppressed(sceneId)) return false;
 
         float myDist = LocomotionRules.ComputeWarpEffectiveDistance(localPos, targetPos);
-        if (myDist < minDistance) return false;
+        PortalNavRouteEvaluation playerRoute = _navRouteEvaluator != null
+            ? _navRouteEvaluator(sceneId, localPos, targetPos)
+            : default;
+        bool playerStrandedOffRoute = playerRoute.HasNavMesh && !playerRoute.IsReachable && myDist >= 45.0f;
+        if (myDist < minDistance && !playerStrandedOffRoute) return false;
 
-        var obj = _movement.FindBestIntraMapWarpRaw(sceneId, targetPos, excludedTpIds);
+        HashSet<int>? mergedExcluded = BuildMergedExcludedTpIds(sceneId, excludedTpIds);
+
+        if (_navRouteEvaluator != null && playerRoute.HasNavMesh)
+        {
+            JsonArray? rawPortals = _movement.ListSceneUnlockedPortalsRaw(sceneId, mergedExcluded);
+            if (rawPortals != null && rawPortals.Count > 0)
+            {
+                bool foundReachable = false;
+                int reachableTpId = 0;
+                string reachableTpName = "";
+                float reachableBestMetric = float.MaxValue;
+                float reachableBestEffDist = float.MaxValue;
+                var seenIds = new HashSet<int>();
+
+                foreach (JsonNode? n in rawPortals)
+                {
+                    if (n is not JsonObject o) continue;
+
+                    int tpId = JsonNodeHelpers.GetInt(o, "tpId", 0);
+                    if (tpId <= 0 || !seenIds.Add(tpId) || (mergedExcluded != null && mergedExcluded.Contains(tpId)))
+                        continue;
+
+                    float px = (float)JsonNodeHelpers.GetDouble(o, "x", 0.0);
+                    float py = (float)JsonNodeHelpers.GetDouble(o, "y", 0.0);
+                    float pz = (float)JsonNodeHelpers.GetDouble(o, "z", 0.0);
+                    if (MathF.Abs(px) < 0.01f && MathF.Abs(pz) < 0.01f)
+                        continue;
+
+                    float pdx = px - localPos.X;
+                    float pdz = pz - localPos.Z;
+                    float horizFromPlayer = MathF.Sqrt(pdx * pdx + pdz * pdz);
+                    if (horizFromPlayer < 25.0f && MathF.Abs(py - localPos.Y) < 8.0f)
+                        continue;
+
+                    var portalPos = new Position3D(px, py, pz);
+                    PortalNavRouteEvaluation pRoute = _navRouteEvaluator(sceneId, portalPos, targetPos);
+                    if (!pRoute.HasNavMesh || !pRoute.IsReachable)
+                        continue;
+
+                    float tpEffDist = LocomotionRules.ComputeWarpEffectiveDistance(portalPos, targetPos);
+                    float metric = pRoute.PathLengthMeters > 0f ? pRoute.PathLengthMeters : tpEffDist;
+                    if (metric < reachableBestMetric)
+                    {
+                        foundReachable = true;
+                        reachableTpId = tpId;
+                        string rawName = JsonNodeHelpers.GetString(o, "name", "").Trim();
+                        reachableTpName = !string.IsNullOrEmpty(rawName) ? rawName : $"포탈 #{tpId}";
+                        reachableBestMetric = metric;
+                        reachableBestEffDist = tpEffDist;
+                    }
+                }
+
+                if (foundReachable)
+                {
+                    if (!playerRoute.IsReachable)
+                    {
+                        bestTpId = reachableTpId;
+                        bestTpName = reachableTpName;
+                        gainMeters = MathF.Max(0f, myDist - reachableBestEffDist);
+                        return true;
+                    }
+
+                    float navGain = playerRoute.PathLengthMeters > 0f
+                        ? (playerRoute.PathLengthMeters - reachableBestMetric)
+                        : float.NegativeInfinity;
+                    float effGain = myDist - reachableBestEffDist;
+                    if (navGain >= minGain || effGain >= minGain)
+                    {
+                        bestTpId = reachableTpId;
+                        bestTpName = reachableTpName;
+                        gainMeters = MathF.Max(navGain, effGain);
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                if (playerRoute.IsReachable)
+                    return false;
+            }
+        }
+
+        var obj = _movement.FindBestIntraMapWarpRaw(sceneId, targetPos, mergedExcluded);
         if (obj != null)
         {
             int tpId = obj["tpId"]?.GetValue<int>() ?? 0;
@@ -211,6 +438,158 @@ public sealed class CrossMapNavigator
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// Queries unlocked intra-map warp portals on <paramref name="sceneId"/> (excluding nearby/blacklisted portals)
+    /// and ranks alternate approach portals by NavMesh connectivity, target proximity, and elevation compatibility.
+    /// </summary>
+    public List<CandidateWarpPortal> GetCandidateIntraMapPortals(
+        int sceneId,
+        Position3D localPos,
+        Position3D targetPos,
+        IReadOnlySet<int>? extraExcludedTpIds = null,
+        int maxResults = 5)
+    {
+        if (!_movement.IsLuaReady || sceneId <= 0)
+            return new List<CandidateWarpPortal>();
+
+        HashSet<int>? mergedExcluded = BuildMergedExcludedTpIds(sceneId, extraExcludedTpIds);
+        JsonArray? rawPortals = _movement.ListSceneUnlockedPortalsRaw(sceneId, mergedExcluded);
+        Func<Position3D, Position3D, PortalNavRouteEvaluation>? routeEval = _navRouteEvaluator != null
+            ? (start, goal) => _navRouteEvaluator(sceneId, start, goal)
+            : null;
+        return RankCandidatePortals(rawPortals, localPos, targetPos, mergedExcluded, maxResults, routeEval);
+    }
+
+    public static List<CandidateWarpPortal> RankCandidatePortals(
+        JsonArray? rawPortals,
+        Position3D localPos,
+        Position3D targetPos,
+        IReadOnlySet<int>? excluded = null,
+        int maxResults = 5,
+        Func<Position3D, Position3D, PortalNavRouteEvaluation>? routeEvaluator = null)
+    {
+        var scored = new List<(float Score, CandidateWarpPortal Portal)>();
+        if (rawPortals == null || maxResults <= 0)
+            return new List<CandidateWarpPortal>();
+
+        var seenIds = new HashSet<int>();
+        bool targetHighAbovePlayer = (targetPos.Y - localPos.Y) >= 8.0f && MathF.Abs(targetPos.Y) > 0.01f;
+
+        foreach (JsonNode? n in rawPortals)
+        {
+            if (n is not JsonObject o) continue;
+
+            int tpId = JsonNodeHelpers.GetInt(o, "tpId", 0);
+            if (tpId <= 0 || !seenIds.Add(tpId) || (excluded != null && excluded.Contains(tpId)))
+                continue;
+
+            float px = (float)JsonNodeHelpers.GetDouble(o, "x", 0.0);
+            float py = (float)JsonNodeHelpers.GetDouble(o, "y", 0.0);
+            float pz = (float)JsonNodeHelpers.GetDouble(o, "z", 0.0);
+            if (MathF.Abs(px) < 0.01f && MathF.Abs(pz) < 0.01f)
+                continue;
+
+            float pdx = px - localPos.X;
+            float pdz = pz - localPos.Z;
+            float horizFromPlayer = MathF.Sqrt(pdx * pdx + pdz * pdz);
+            float distFromPlayer = MathF.Sqrt(pdx * pdx + (py - localPos.Y) * (py - localPos.Y) + pdz * pdz);
+
+            var portalPos = new Position3D(px, py, pz);
+            PortalNavRouteEvaluation navEval = routeEvaluator?.Invoke(portalPos, targetPos) ?? default;
+
+            // Exclude warping right back onto the local stuck plateau/spot unless verified NavMesh-reachable away from here.
+            if (navEval is { HasNavMesh: true, IsReachable: true })
+            {
+                if (horizFromPlayer < 22.0f && MathF.Abs(py - localPos.Y) < 8.0f)
+                    continue;
+            }
+            else if (horizFromPlayer < 75.0f && MathF.Abs(py - localPos.Y) < 28.0f)
+            {
+                continue;
+            }
+
+            float tdx = px - targetPos.X;
+            float tdz = pz - targetPos.Z;
+            float horizToTarget = MathF.Sqrt(tdx * tdx + tdz * tdz);
+            bool hasTargetY = MathF.Abs(targetPos.Y) > 0.01f && MathF.Abs(py) > 0.01f;
+            float dyToTarget = hasTargetY ? (py - targetPos.Y) : 0f;
+
+            float score;
+            if (targetHighAbovePlayer && hasTargetY)
+            {
+                float belowCliffPenalty = py < targetPos.Y - 8.0f
+                    ? (targetPos.Y - py) * 4.5f
+                    : 0f;
+                float climbCredit = MathF.Min(25.0f, MathF.Max(0f, py - localPos.Y) * 1.2f);
+                score = horizToTarget + MathF.Abs(dyToTarget) * 2.0f + belowCliffPenalty - climbCredit;
+            }
+            else
+            {
+                score = horizToTarget + MathF.Abs(dyToTarget) * 3.0f;
+            }
+
+            if (navEval.HasNavMesh)
+            {
+                score = navEval.IsReachable
+                    ? ((navEval.PathLengthMeters > 0f ? navEval.PathLengthMeters : score) - 10000.0f)
+                    : (score + 5000.0f);
+            }
+
+            string rawName = JsonNodeHelpers.GetString(o, "name", "").Trim();
+            string name = !string.IsNullOrEmpty(rawName) ? rawName : $"포탈 #{tpId}";
+            string bearing = ComputeBearingFromTarget(px, pz, targetPos.X, targetPos.Z);
+            string elevHint = !hasTargetY
+                ? "고도 정보 없음"
+                : MathF.Abs(dyToTarget) <= 4.0f
+                    ? "목표와 비슷한 고도"
+                    : dyToTarget > 0f
+                        ? $"목표보다 {dyToTarget:F0}m 위"
+                        : $"목표보다 {MathF.Abs(dyToTarget):F0}m 아래";
+
+            scored.Add((score, new CandidateWarpPortal(
+                TpId: tpId,
+                Name: name,
+                Position: portalPos,
+                HorizDistToTarget: horizToTarget,
+                DyToTarget: dyToTarget,
+                DistFromPlayer: distFromPlayer,
+                BearingFromTarget: bearing,
+                ElevationHint: elevHint,
+                NavMeshReachable: navEval.HasNavMesh ? navEval.IsReachable : null,
+                NavMeshPathMeters: (navEval.HasNavMesh && navEval.IsReachable) ? MathF.Round(navEval.PathLengthMeters, 1) : null)));
+        }
+
+        scored.Sort((a, b) => a.Score.CompareTo(b.Score));
+        var results = new List<CandidateWarpPortal>(Math.Min(maxResults, scored.Count));
+        for (int i = 0; i < scored.Count && i < maxResults; i++)
+            results.Add(scored[i].Portal);
+        return results;
+    }
+
+    private static string ComputeBearingFromTarget(float px, float pz, float tx, float tz)
+    {
+        float dx = px - tx;
+        float dz = pz - tz;
+        if (dx * dx + dz * dz < 1.0f)
+            return "인근";
+
+        // Unity world axes: +Z North, +X East, -Z South, -X West.
+        double deg = Math.Atan2(dx, dz) * (180.0 / Math.PI);
+        if (deg < 0.0) deg += 360.0;
+        int sector = (int)Math.Round(deg / 45.0) % 8;
+        return sector switch
+        {
+            0 => "북",
+            1 => "북동",
+            2 => "동",
+            3 => "남동",
+            4 => "남",
+            5 => "남서",
+            6 => "서",
+            _ => "북서",
+        };
     }
 
     public JsonObject RequestIntraMapTeleport(int sceneId, int transferId)
@@ -228,6 +607,8 @@ public sealed class CrossMapNavigator
             return new JsonObject { ["ok"] = false, ["error"] = "Failed to start intra-map teleport coroutine" };
         }
 
+        _lastIntraWarpSceneId = sceneId;
+        _lastIntraWarpTpId = transferId;
         _transferGate.AttachAsyncId(reqId);
         return new JsonObject
         {

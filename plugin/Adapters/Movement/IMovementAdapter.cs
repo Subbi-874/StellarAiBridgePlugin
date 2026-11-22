@@ -27,6 +27,7 @@ public interface IMovementAdapter : ICapabilityProbe
         bool leaveSpecialFirst);
     int GetSceneType(int sceneId);
     JsonObject? FindBestIntraMapWarpRaw(int sceneId, Position3D targetPos, HashSet<int>? excludedTpIds);
+    JsonArray? ListSceneUnlockedPortalsRaw(int sceneId, HashSet<int>? excludedTpIds = null);
     string? StartIntraMapTeleportCoroutine(int sceneId, int transferId);
     string? StartTeleportByQueryCoroutine(string trimmedQuery, int localSceneId, bool leaveSpecialFirst);
     string? StartLeaveSpecialSceneCoroutine(int localSceneId);

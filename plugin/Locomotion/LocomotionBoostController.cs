@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Reflection;
 using System.Text.Json.Nodes;
+using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters.Movement;
 using Stellar.AgyBridge.Core;
@@ -38,6 +39,7 @@ public sealed class LocomotionBoostController
     private MethodInfo? _miJump;
     private MethodInfo? _miAttack;
     private MethodInfo? _miSwimSprint;
+    private MethodInfo? _miDrop;
     private MethodInfo? _miGlideBool;
     private MethodInfo? _miFlowBool;
     private MethodInfo? _miResonance1Press;
@@ -87,9 +89,14 @@ public sealed class LocomotionBoostController
     private string _lastLoggedBoostMode = "";
     private float _wallDiagLogTimer;
     private AutoCameraGuardService? _cameraGuard;
+    private NavigationStallDetector? _stallDetector;
     private float _wallAlignWaitTimer;
     private float _lastWallYawErrDeg;
     private int _wallLatchAttemptCount;
+    private float _wallDetachElapsed;
+    private float _wallDropCooldown;
+    private float _pedalWallUnwantedTimer;
+    private Vector3 _pedalWallAnchorPos;
 
     // Stuck & vertical elevation rapid-jump state
     private bool _hasProgressAnchor;
@@ -123,6 +130,8 @@ public sealed class LocomotionBoostController
 
     public void AttachCameraGuard(AutoCameraGuardService cameraGuard) => _cameraGuard = cameraGuard;
 
+    public void AttachStallDetector(NavigationStallDetector detector) => _stallDetector = detector;
+
     public void Reset()
     {
         ResetBoostInputsOnly();
@@ -144,6 +153,10 @@ public sealed class LocomotionBoostController
         _wallAlignWaitTimer = 0f;
         _lastWallYawErrDeg = 0f;
         _wallLatchAttemptCount = 0;
+        _wallDetachElapsed = 0f;
+        _wallDropCooldown = 0f;
+        _pedalWallUnwantedTimer = 0f;
+        _pedalWallAnchorPos = Vector3.zero;
         _cameraGuard?.ResetHorizontalYawTracking();
         PathNavigator.Reset();
     }
@@ -217,6 +230,58 @@ public sealed class LocomotionBoostController
         long targetKey = 0L,
         bool allowLedgeClimb = false)
     {
+        string mode = DriveWithSmartNavCore(
+            owner,
+            moveDriver,
+            dt,
+            sceneId,
+            localPos,
+            goalPos,
+            distanceToGoal,
+            baseSpeedScale,
+            hasTargetElevation,
+            useBoost,
+            targetKey,
+            allowLedgeClimb);
+
+        if (_stallDetector != null)
+        {
+            bool isWallClimbing = _lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb;
+            bool terrainConstrained = PathNavigator.IsDetouring
+                || PathNavigator.IsWallAhead
+                || PathNavigator.IsCliffAhead
+                || isWallClimbing
+                || !string.Equals(PathNavigator.ActiveNavMode, "direct", StringComparison.Ordinal);
+
+            _stallDetector.RecordDriveSample(
+                owner,
+                sceneId,
+                new Position3D(localPos.x, localPos.y, localPos.z),
+                new Position3D(goalPos.x, goalPos.y, goalPos.z),
+                PathNavigator.ActiveNavMode,
+                mode,
+                terrainConstrained,
+                dt,
+                out _);
+        }
+
+        return mode;
+    }
+
+    private string DriveWithSmartNavCore(
+        object owner,
+        PlayerMoveDriver moveDriver,
+        float dt,
+        int sceneId,
+        Vector3 localPos,
+        Vector3 goalPos,
+        float distanceToGoal,
+        float baseSpeedScale,
+        bool hasTargetElevation,
+        bool useBoost,
+        long targetKey,
+        bool allowLedgeClimb)
+    {
         int sceneType = _movement.GetSceneType(sceneId);
         var zoneProfile = LocomotionRules.GetZoneProfile(sceneType);
         bool isWallClimbingNow = _lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb;
@@ -246,7 +311,11 @@ public sealed class LocomotionBoostController
         Vector3 boostTarget = hasCornerAhead ? steerTarget : goalPos;
         float boostDist = hasCornerAhead ? MathF.Min(distanceToGoal, legHorizDist) : distanceToGoal;
         float goalDy = goalPos.y - localPos.y;
-        bool wantUpwardClimb = goalDy > 0.5f && (PathNavigator.IsWallClimbAhead || (isWallClimbingNow && !PathNavigator.IsDetouring));
+        float legDy = steerTarget.y - localPos.y;
+        float effectiveClimbGoalDy = PathNavigator.IsClimbingIntermediateRidge
+            ? MathF.Max(goalDy, 3.0f)
+            : (hasCornerAhead && legDy > 0.5f ? MathF.Max(goalDy, legDy) : goalDy);
+        bool wantUpwardClimb = effectiveClimbGoalDy > 0.5f && (PathNavigator.IsWallClimbAhead || (isWallClimbingNow && !PathNavigator.IsDetouring));
 
         bool wantWallYawAlign = useBoost && wantUpwardClimb;
         bool wallCameraAligned = true;
@@ -296,7 +365,7 @@ public sealed class LocomotionBoostController
                 zoneProfile,
                 wallCameraAligned,
                 steerTowardGoalDot,
-                goalDy);
+                effectiveClimbGoalDy);
         }
         else
         {
@@ -308,9 +377,84 @@ public sealed class LocomotionBoostController
 
         LogClimbOrAirDiagIfNeeded(dt, localPos, goalPos);
 
-        bool isClimbingAfterTick = _lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb;
-        if (isClimbingAfterTick && goalDy <= -1.5f && _sprintBreakPauseTimer <= 0f)
-            _sprintBreakPauseTimer = 0.16f;
+        bool isStaticClimb = _lastActorState == ActorStateClimb;
+        bool isPedalWall = _lastActorState == ActorStatePedalWall;
+        bool isClimbingAfterTick = isStaticClimb || isPedalWall;
+
+        if (isPedalWall && (!PathNavigator.IsWallClimbAhead || PathNavigator.IsDetouring || effectiveClimbGoalDy <= -1.5f))
+        {
+            float pedalMovedSq = (localPos.x - _pedalWallAnchorPos.x) * (localPos.x - _pedalWallAnchorPos.x)
+                               + (localPos.z - _pedalWallAnchorPos.z) * (localPos.z - _pedalWallAnchorPos.z);
+            if (_pedalWallUnwantedTimer <= 0f || pedalMovedSq >= 1.25f * 1.25f)
+            {
+                _pedalWallAnchorPos = localPos;
+                _pedalWallUnwantedTimer = dt;
+            }
+            else
+            {
+                _pedalWallUnwantedTimer += dt;
+            }
+        }
+        else
+        {
+            _pedalWallUnwantedTimer = 0f;
+        }
+
+        bool forceWallDetach = LocomotionRules.ShouldForceWallDetach(
+            isClimbingAfterTick,
+            PathNavigator.IsWallClimbAhead,
+            PathNavigator.IsDetouring,
+            effectiveClimbGoalDy,
+            isParkourWallRunOnly: isPedalWall && !isStaticClimb,
+            wallStallElapsedSec: _pedalWallUnwantedTimer);
+
+        if (forceWallDetach)
+        {
+            _wallDetachElapsed += dt;
+            _wallDropCooldown = MathF.Max(0f, _wallDropCooldown - dt);
+            ResetBoostInputsOnly();
+            _activeBoostMode = "wall_detach";
+            _sprintBreakPauseTimer = MathF.Max(_sprintBreakPauseTimer, 0.22f);
+            PathNavigator.NotifyForcedWallDetach();
+
+            if (_wallDropCooldown <= 0f)
+            {
+                bool dropped = isStaticClimb && InvokeDrop();
+                if (!dropped || isPedalWall || _wallDetachElapsed >= 0.9f)
+                {
+                    if (InvokeJump(true))
+                    {
+                        _jumpHeld = true;
+                        _jumpReleaseTimer = 0.08f;
+                    }
+                }
+                _wallDropCooldown = 0.45f;
+            }
+            LogClimbOrAirDiagIfNeeded(dt, localPos, goalPos);
+            if (isStaticClimb && _wallDetachElapsed >= 0.8f)
+            {
+                moveDriver.TryDriveRawStick(owner, new Vector2(0f, -1.0f), new Vector3(navDx, 0f, navDz));
+            }
+            else if (legHorizDist >= 0.25f && (PathNavigator.IsDetouring || PathNavigator.HasIntermediateWaypoint || steerTowardGoalDot < 0.5f))
+            {
+                moveDriver.TryDrive(owner, localPos, steerTarget, 1.0f, SuggestedSteerYawOffset);
+            }
+            else if (goalHorizLen >= 0.25f)
+            {
+                Vector3 awayTarget = new(
+                    localPos.x - (goalDx / goalHorizLen) * 4.0f,
+                    localPos.y,
+                    localPos.z - (goalDz / goalHorizLen) * 4.0f);
+                moveDriver.TryDrive(owner, localPos, awayTarget, 1.0f);
+            }
+            else
+            {
+                moveDriver.Stop(owner);
+            }
+            return _activeBoostMode;
+        }
+        _wallDetachElapsed = 0f;
+        _wallDropCooldown = 0f;
 
         if (_sprintBreakPauseTimer > 0f)
         {
@@ -1024,6 +1168,7 @@ public sealed class LocomotionBoostController
                 _miJump = picType.GetMethod("Jump", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(bool) }, null);
                 _miAttack = picType.GetMethod("Attack", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(int), typeof(bool) }, null);
                 _miSwimSprint = picType.GetMethod("SwimSprint", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(bool) }, null);
+                _miDrop = picType.GetMethod("Drop", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
                 _miGlideBool = picType.GetMethod("Glide", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(bool) }, null);
                 _miFlowBool = picType.GetMethod("Flow", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(bool) }, null);
                 _miResonance1Press = picType.GetMethod("handleUseResonanceSkill1", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
@@ -1035,7 +1180,7 @@ public sealed class LocomotionBoostController
                 _piEmptyInputArgs = argsType?.GetProperty("Empty", BindingFlags.Public | BindingFlags.Static);
             }
 
-            _services.Log.Info($"[AgyBridge][Boost] Resolved PlayerInputController actions (Rush={_miRush != null}, Jump={_miJump != null}, Attack={_miAttack != null}, SwimSprint={_miSwimSprint != null}, Glide={_miGlideBool != null}, Flow={_miFlowBool != null}, ResE={_miResonance2Press != null})");
+            _services.Log.Info($"[AgyBridge][Boost] Resolved PlayerInputController actions (Rush={_miRush != null}, Jump={_miJump != null}, Attack={_miAttack != null}, SwimSprint={_miSwimSprint != null}, Drop={_miDrop != null}, Glide={_miGlideBool != null}, Flow={_miFlowBool != null}, ResE={_miResonance2Press != null})");
         }
         catch (Exception ex)
         {
@@ -1154,7 +1299,7 @@ public sealed class LocomotionBoostController
     private void LogClimbOrAirDiagIfNeeded(float dt, Vector3 localPos, Vector3 goalPos)
     {
         _wallDiagLogTimer = MathF.Max(0f, _wallDiagLogTimer - dt);
-        bool isWallMode = _activeBoostMode is "wall_approach" or "wall_align_cam" or "wall_climb_latch" or "wall_climbing";
+        bool isWallMode = _activeBoostMode is "wall_approach" or "wall_align_cam" or "wall_climb_latch" or "wall_climbing" or "wall_detach";
         bool isConserveMode = _activeBoostMode.StartsWith("conserve_stamina", StringComparison.Ordinal);
         bool isTrackedDetour = _activeBoostMode == "detour_run" && (goalPos.y - localPos.y) >= 2.0f;
         bool isTrackedTransition = isWallMode
@@ -1176,6 +1321,21 @@ public sealed class LocomotionBoostController
             _services.Log.Info(
                 $"[AgyBridge][NavDiag] mode={_activeBoostMode} nav={PathNavigator.ActiveNavMode} state={_lastActorState} dy={goalPos.y - localPos.y:+0.0;-0.0;0.0}m yaw={_lastWallYawErrDeg:F0}deg try={_wallLatchAttemptCount} stam={_lastCurStamina:F0}/{_lastMaxStamina:F0}");
             _wallDiagLogTimer = isWallMode ? 2.5f : 3.0f;
+        }
+    }
+
+    private bool InvokeDrop()
+    {
+        try
+        {
+            var pic = _piPicInstance?.GetValue(null);
+            if (pic == null || _miDrop == null) return false;
+            _miDrop.Invoke(pic, null);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 

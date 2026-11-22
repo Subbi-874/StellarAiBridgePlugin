@@ -7,6 +7,7 @@ using System.Text;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
 using Stellar.AgyBridge.Adapters;
+using Stellar.AgyBridge.Adapters.Quest;
 using Stellar.AgyBridge.Behaviors;
 using Stellar.AgyBridge.Bridge.Server;
 using Stellar.AgyBridge.Core;
@@ -53,6 +54,17 @@ public sealed class AgyBridgeUiWindow : IDisposable
 
     private static readonly IReadOnlyList<string> CliEffortLabels = new[] { "low", "medium", "high" };
 
+    private static readonly string[] QuestCategoryCodes =
+    {
+        "",
+        "구역 퀘스트",
+        "스토리",
+        "후일담",
+        "가이드 퀘스트",
+        "인연 스토리",
+        "이벤트 퀘스트"
+    };
+
     private static readonly (string Id, string LabelKey)[] SidebarTabs =
     {
         ("control", "tab.control"),
@@ -85,9 +97,13 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private readonly PartyManagerService _party;
     private readonly AutoGatherIntegration _autoGather;
     private readonly TraversalGimmickService _traversal;
+    private readonly IQuestAdapter _questAdapter;
+    private readonly MountService _mount;
     private readonly BridgeWebSocketClient _wsClient;
     private readonly CapabilityRegistry _capabilities;
     private readonly EcoModeService _ecoMode;
+
+    private int _questCategoryIdx = 1; // default: 구역 퀘스트
 
     private IWindowControl? _window;
     private IWindowControl? _adminWindow;
@@ -135,6 +151,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
     // Localized dropdown label caches rebuilt on language switch
     private IReadOnlyList<string> _llmBackendLabels = Array.Empty<string>();
     private IReadOnlyList<string> _cliFlavorLabels = Array.Empty<string>();
+    private IReadOnlyList<string> _questCategoryLabels = Array.Empty<string>();
 
     private ColorRgba AccentColor => _services.Theme.Colors.MenuAccent;
     private ColorRgba PrimaryTextColor => _services.Theme.Colors.MenuText;
@@ -155,6 +172,8 @@ public sealed class AgyBridgeUiWindow : IDisposable
         PartyManagerService party,
         AutoGatherIntegration autoGather,
         TraversalGimmickService traversal,
+        IQuestAdapter questAdapter,
+        MountService mount,
         BridgeWebSocketClient wsClient,
         CapabilityRegistry capabilities,
         EcoModeService ecoMode)
@@ -170,6 +189,8 @@ public sealed class AgyBridgeUiWindow : IDisposable
         _party = party;
         _autoGather = autoGather;
         _traversal = traversal;
+        _questAdapter = questAdapter;
+        _mount = mount;
         _wsClient = wsClient;
         _capabilities = capabilities;
         _ecoMode = ecoMode;
@@ -197,6 +218,16 @@ public sealed class AgyBridgeUiWindow : IDisposable
             T("ai.cli.codex"),
             T("ai.cli.gemini"),
             T("ai.cli.custom")
+        };
+        _questCategoryLabels = new[]
+        {
+            T("ctrl.quest.cat.all"),
+            T("ctrl.quest.cat.area"),
+            T("ctrl.quest.cat.story"),
+            T("ctrl.quest.cat.side"),
+            T("ctrl.quest.cat.guide"),
+            T("ctrl.quest.cat.bond"),
+            T("ctrl.quest.cat.event")
         };
     }
 
@@ -1449,7 +1480,112 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     true)
             });
 
-        return new ColumnElement(new HudElement[] { quickCard, ecoCard, pickerCard, emoteCard }, 10f);
+        var questCard = MakeSectionCard(
+            "ctrl.quest.title",
+            "ctrl.quest.subtitle",
+            new HudElement[]
+            {
+                new RowElement(new HudElement[]
+                {
+                    new TextElement(() => T("ctrl.quest.category"), () => MutedColor, false, 88f, TextAlign.Left, false),
+                    new DropdownElement(
+                        () => _questCategoryIdx,
+                        () => _questCategoryLabels,
+                        idx =>
+                        {
+                            if (idx >= 0 && idx < QuestCategoryCodes.Length)
+                            {
+                                _questCategoryIdx = idx;
+                                MarkDirty();
+                            }
+                        },
+                        240f),
+                    new ButtonElement(
+                        () => _behaviors.Current is AutoQuestBehavior ? T("ctrl.quest.stop") : T("ctrl.quest.start"),
+                        () =>
+                        {
+                            if (_behaviors.Current is AutoQuestBehavior)
+                            {
+                                _behaviors.StopCurrent("ui_quest_stop");
+                                MarkDirty();
+                                return;
+                            }
+
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.AutoQuest, out string qErr, asAdmin: true))
+                            {
+                                _services.Notifications.Notify(qErr, NotificationKind.Warning, 3.0f);
+                                return;
+                            }
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string fErr, asAdmin: true))
+                            {
+                                _services.Notifications.Notify(fErr, NotificationKind.Warning, 3.0f);
+                                return;
+                            }
+
+                            string catCode = QuestCategoryCodes[_questCategoryIdx];
+                            var listSnap = _questAdapter.ListQuests();
+                            if (!listSnap.Ok)
+                            {
+                                _services.Notifications.Notify(listSnap.Error ?? T("ctrl.quest.none_eligible"), NotificationKind.Warning, 3.0f);
+                                return;
+                            }
+
+                            var sel = QuestRules.SelectQuests(listSnap.Quests, catCode, null, 0);
+                            QuestEntry? firstSupported = null;
+                            foreach (var q in sel.Eligible)
+                            {
+                                var g = QuestRules.GetActiveGoal(q);
+                                if (g != null && QuestRules.IsGoalSupported(g.Kind))
+                                {
+                                    firstSupported = q;
+                                    break;
+                                }
+                            }
+
+                            if (firstSupported == null)
+                            {
+                                string msg = sel.Excluded.Count > 0
+                                    ? $"{sel.Excluded[0].Quest.Name}: {sel.Excluded[0].Reason}"
+                                    : T("ctrl.quest.none_eligible");
+                                _services.Notifications.Notify(msg, NotificationKind.Warning, 3.5f);
+                                return;
+                            }
+
+                            _behaviors.StartBehavior(new AutoQuestBehavior(
+                                _services,
+                                _config,
+                                _world,
+                                _navigator,
+                                _autoCombat,
+                                _moveDriver,
+                                _boost,
+                                _traversal,
+                                _mount,
+                                _questAdapter,
+                                catCode));
+                            MarkDirty();
+                        },
+                        () => _config.IsFeatureEnabled(FeaturePolicyKeys.AutoQuest),
+                        MenuButtonStyle.Outline,
+                        () => _behaviors.Current is AutoQuestBehavior,
+                        136f,
+                        null)
+                }, 8f, RowJustify.Left),
+                new TextElement(
+                    () =>
+                    {
+                        if (_behaviors.Current is AutoQuestBehavior qb)
+                            return qb.GetSnapshot()["detail"]?.GetValue<string>() ?? "";
+                        return T("ctrl.quest.idle");
+                    },
+                    () => _behaviors.Current is AutoQuestBehavior ? SuccessColor : MutedColor,
+                    false,
+                    0f,
+                    TextAlign.Left,
+                    true)
+            });
+
+        return new ColumnElement(new HudElement[] { quickCard, questCard, ecoCard, pickerCard, emoteCard }, 10f);
     }
 
     private HudElement BuildAutomationTab()
@@ -1475,6 +1611,15 @@ public sealed class AgyBridgeUiWindow : IDisposable
                     v =>
                     {
                         _config.EnableAutoCameraGuard = v;
+                        _config.Save();
+                        _window?.MarkDirty();
+                    }),
+                MakeToggleRow(
+                    "auto.toggle.rare_monster_alert",
+                    () => _config.EnableRareMonsterGuildAlert,
+                    v =>
+                    {
+                        _config.EnableRareMonsterGuildAlert = v;
                         _config.Save();
                         _window?.MarkDirty();
                     }),
@@ -1506,6 +1651,7 @@ public sealed class AgyBridgeUiWindow : IDisposable
                 MakeFeatureGateRow(FeaturePolicyKeys.AutoGather),
                 MakeFeatureGateRow(FeaturePolicyKeys.AutoFish),
                 MakeFeatureGateRow(FeaturePolicyKeys.AutoCraft),
+                MakeFeatureGateRow(FeaturePolicyKeys.AutoQuest),
                 MakeFeatureGateRow(FeaturePolicyKeys.LoadoutSwitch),
                 MakeFeatureGateRow(FeaturePolicyKeys.OutfitSwitch),
                 MakeFeatureGateRow(FeaturePolicyKeys.InteractionAccept),
@@ -2508,6 +2654,15 @@ public sealed class AgyBridgeUiWindow : IDisposable
             string lbl = snap["gimmick_label"]?.GetValue<string>() ?? T("behavior.gimmick_default");
             string phase = snap["phase"]?.GetValue<string>() ?? "";
             return TF("behavior.gimmick_fmt", lbl, phase);
+        }
+        if (kind == "auto_quest")
+        {
+            string qName = snap["active_quest_name"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrEmpty(qName))
+                qName = snap["category"]?.GetValue<string>() ?? "";
+            int done = snap["completed_count"]?.GetValue<int>() ?? 0;
+            string phase = snap["phase"]?.GetValue<string>() ?? "";
+            return TF("behavior.quest_fmt", qName, done, phase);
         }
         return TF("behavior.running_fmt", kind, snap["detail"]?.GetValue<string>() ?? "");
     }

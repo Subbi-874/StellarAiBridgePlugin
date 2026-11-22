@@ -64,6 +64,7 @@ public static class FeaturePolicyKeys
     public const string DungeonEnter = "dungeon_enter";
     public const string AutoFish = "auto_fish";
     public const string AutoCraft = "auto_craft";
+    public const string AutoQuest = "auto_quest";
     public const string MemoryManage = "memory_manage";
 
     public static string? FromSendChannel(string rawChannel)
@@ -118,6 +119,7 @@ public static class FeaturePolicyCatalog
         new FeaturePolicyDescriptor(FeaturePolicyKeys.DungeonEnter, FeatureCategory.Behavior, "던전·레이드·불안정공간 입장 시작", DefaultEnabled: true, DefaultAdminOnly: false),
         new FeaturePolicyDescriptor(FeaturePolicyKeys.AutoFish, FeatureCategory.Behavior, "자동 낚시 제어", DefaultEnabled: true, DefaultAdminOnly: false),
         new FeaturePolicyDescriptor(FeaturePolicyKeys.AutoCraft, FeatureCategory.Behavior, "아이템·요리·가구·장비 제작", DefaultEnabled: true, DefaultAdminOnly: false),
+        new FeaturePolicyDescriptor(FeaturePolicyKeys.AutoQuest, FeatureCategory.Behavior, "자동 퀘스트 진행", DefaultEnabled: true, DefaultAdminOnly: false),
         new FeaturePolicyDescriptor(FeaturePolicyKeys.MemoryManage, FeatureCategory.Behavior, "기억 저장·삭제", DefaultEnabled: true, DefaultAdminOnly: true),
     };
 

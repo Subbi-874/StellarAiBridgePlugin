@@ -357,10 +357,20 @@ public sealed class ZPhysicsSensor : IPhysicsWalkabilityProbe
         if (IsBlocked(waistFrom, waistTo, bodyRadius, ignoreStep: true))
             return false;
 
+        Vector3 midFrom = new(fromFloor.x, fromFloor.y + 1.15f, fromFloor.z);
+        Vector3 midTo = new(toFloor.x, toFloor.y + 1.15f, toFloor.z);
+        if (IsBlocked(midFrom, midTo, bodyRadius, ignoreStep: true))
+            return false;
+
         float chestRadius = MathF.Max(0.28f, bodyRadius - 0.03f);
         Vector3 chestFrom = new(fromFloor.x, fromFloor.y + 1.62f, fromFloor.z);
         Vector3 chestTo = new(toFloor.x, toFloor.y + 1.62f, toFloor.z);
         if (IsBlocked(chestFrom, chestTo, chestRadius, ignoreStep: true))
+            return false;
+
+        Vector3 standBottom = new(toFloor.x, toFloor.y + 0.55f, toFloor.z);
+        Vector3 standTop = new(toFloor.x, toFloor.y + 1.60f, toFloor.z);
+        if (IsBlocked(standBottom, standTop, 0.28f, ignoreStep: true))
             return false;
 
         return true;

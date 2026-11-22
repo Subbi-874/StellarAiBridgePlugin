@@ -4,7 +4,9 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
 using Stellar.AgyBridge.Adapters.Items;
+using Stellar.AgyBridge.Adapters.Quest;
 using Stellar.AgyBridge.Behaviors;
+using Stellar.AgyBridge.Bridge.Core;
 using Stellar.AgyBridge.Character;
 using Stellar.AgyBridge.Core;
 using Stellar.AgyBridge.Fishing;
@@ -42,8 +44,10 @@ public static class ExtendedCommands
         AutoFishingIntegration autoFishing,
         TraversalGimmickService traversal,
         IItemAdapter items,
+        IQuestAdapter quests,
         LuaBridge lua,
-        Action? onUiStateChanged = null)
+        Action? onUiStateChanged = null,
+        NavigationStallRecoveryService? stallRecovery = null)
     {
         static bool IsAdminParam(JsonObject? p) => p?["as_admin"]?.GetValue<bool>() ?? false;
 
@@ -347,6 +351,317 @@ public static class ExtendedCommands
             if (failedAtStart) res["error"] = snap["detail"]?.GetValue<string>() ?? phase;
             return res;
         });
+
+        static JsonObject BuildRegionCounts(IReadOnlyList<QuestEntry> list, WorldStateService worldSvc, bool supportedOnly)
+        {
+            var counts = new JsonObject();
+            foreach (var q in list)
+            {
+                if (supportedOnly)
+                {
+                    var g = QuestRules.GetActiveGoal(q);
+                    if (g == null || !QuestRules.IsGoalSupported(g.Kind))
+                        continue;
+                }
+                int sid = QuestRules.GetQuestSceneId(q);
+                if (sid <= 0)
+                    continue;
+                string sName = worldSvc.GetSceneName(sid);
+                if (string.IsNullOrEmpty(sName))
+                    continue;
+                int prev = counts[sName]?.GetValue<int>() ?? 0;
+                counts[sName] = prev + 1;
+            }
+            return counts;
+        }
+
+        // 16. Auto-Quest (v1.2.0+): list quests, track & sequentially execute category/region quests
+        Open("list_quests", p =>
+        {
+            string category = FirstStr(p, "category", "quest_category", "group");
+            string query = FirstStr(p, "query", "quest", "name");
+            string region = FirstStr(p, "region", "scene", "area", "map", "scene_name");
+            bool regionOnly = JsonNodeHelpers.GetBool(p, "region_only", false);
+            int explicitId = JsonNodeHelpers.GetInt(p, "quest_id", 0);
+
+            var listSnap = quests.ListQuests();
+            if (!listSnap.Ok)
+                return new JsonObject { ["ok"] = false, ["error"] = listSnap.Error ?? "퀘스트 목록 조회 실패" };
+
+            int curSceneId = world.GetLocalSceneId();
+            var resolved = QuestRules.ResolveAutoQuestFilters(
+                listSnap.Quests,
+                category,
+                query,
+                region,
+                regionOnly,
+                explicitId,
+                curSceneId,
+                world.GetSceneName);
+            category = resolved.Category;
+            query = resolved.Query;
+            region = resolved.Region;
+            regionOnly = resolved.RegionOnly;
+
+            var sel = QuestRules.SelectQuests(listSnap.Quests, category, query, explicitId);
+            var catCounts = new JsonObject();
+            foreach (var q in listSnap.Quests)
+            {
+                if (q.State == QuestRules.StateEnd) continue;
+                string gName = !string.IsNullOrEmpty(q.GroupName) ? q.GroupName : QuestRules.GetCanonicalCategoryName(q.GroupId);
+                int prev = catCounts[gName]?.GetValue<int>() ?? 0;
+                catCounts[gName] = prev + 1;
+            }
+
+            JsonObject regionCounts = BuildRegionCounts(sel.Eligible, world, supportedOnly: false);
+            var ordered = QuestRules.PreferCurrentContextQuests(
+                sel.Eligible,
+                world.GetLocalSceneId(),
+                listSnap.TrackingQuestId,
+                inInstanceScene: false,
+                preferredRegion: region,
+                regionOnly: regionOnly,
+                resolveSceneName: world.GetSceneName);
+
+            var questArr = new JsonArray();
+            foreach (var q in ordered.Take(40))
+            {
+                var g = QuestRules.GetActiveGoal(q);
+                questArr.Add(new JsonObject
+                {
+                    ["quest_id"] = q.QuestId,
+                    ["name"] = q.Name,
+                    ["category"] = q.GroupName,
+                    ["group_id"] = q.GroupId,
+                    ["ui_rank"] = q.UiRank,
+                    ["tracking"] = q.IsTracking,
+                    ["step_id"] = q.StepId,
+                    ["goal_type"] = g?.RawGoalType ?? 0,
+                    ["goal_kind"] = g?.Kind.ToString() ?? "Unknown",
+                    ["supported"] = g != null && QuestRules.IsGoalSupported(g.Kind),
+                    ["progress"] = g != null ? $"{g.CurCount}/{g.TargetCount}" : "",
+                    ["scene_id"] = g?.SceneId ?? 0,
+                    ["scene_name"] = g is { SceneId: > 0 } ? world.GetSceneName(g.SceneId) : "",
+                    ["description"] = g?.Description ?? q.StepTips
+                });
+            }
+
+            var exclArr = new JsonArray();
+            foreach (var (eq, reason) in sel.Excluded.Take(15))
+            {
+                exclArr.Add(new JsonObject
+                {
+                    ["quest_id"] = eq.QuestId,
+                    ["name"] = eq.Name,
+                    ["category"] = eq.GroupName,
+                    ["state"] = eq.State,
+                    ["reason"] = reason
+                });
+            }
+
+            return new JsonObject
+            {
+                ["ok"] = true,
+                ["tracking_quest_id"] = listSnap.TrackingQuestId,
+                ["region"] = region,
+                ["region_only"] = regionOnly,
+                ["region_counts"] = regionCounts,
+                ["category_counts"] = catCounts,
+                ["eligible_count"] = ordered.Count,
+                ["quests"] = questArr,
+                ["excluded_count"] = sel.Excluded.Count,
+                ["excluded"] = exclArr
+            };
+        });
+
+        Gated("auto_quest", FeaturePolicyKeys.AutoQuest, p =>
+        {
+            if (!config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string moveErr, IsAdminParam(p)))
+                return Blocked(config, FeaturePolicyKeys.FollowMove, moveErr);
+
+            string category = FirstStr(p, "category", "quest_category", "group");
+            string query = FirstStr(p, "query", "quest", "name");
+            string region = FirstStr(p, "region", "scene", "area", "map", "scene_name");
+            string triggerText = FirstStr(p, "trigger_text");
+            bool regionOnly = JsonNodeHelpers.GetBool(p, "region_only", false);
+            int explicitId = JsonNodeHelpers.GetInt(p, "quest_id", 0);
+            int maxQuests = Math.Max(0, JsonNodeHelpers.GetInt(p, "max_quests", 0));
+
+            var listSnap = quests.ListQuests();
+            if (!listSnap.Ok)
+                return new JsonObject { ["ok"] = false, ["error"] = listSnap.Error ?? "퀘스트 목록 조회 실패" };
+
+            int curSceneId = world.GetLocalSceneId();
+            var resolved = QuestRules.ResolveAutoQuestFilters(
+                listSnap.Quests,
+                category,
+                query,
+                region,
+                regionOnly,
+                explicitId,
+                curSceneId,
+                world.GetSceneName,
+                triggerText);
+            category = resolved.Category;
+            query = resolved.Query;
+            region = resolved.Region;
+            regionOnly = resolved.RegionOnly;
+
+            var sel = QuestRules.SelectQuests(listSnap.Quests, category, query, explicitId);
+            var exclArr = new JsonArray();
+            foreach (var (eq, reason) in sel.Excluded.Take(10))
+            {
+                exclArr.Add(new JsonObject
+                {
+                    ["quest_id"] = eq.QuestId,
+                    ["name"] = eq.Name,
+                    ["reason"] = reason
+                });
+            }
+
+            bool inInstance = listSnap.InVisualLayerOrDungeon
+                           || (curSceneId > 0 && !navigator.CheckSceneEnterability(curSceneId, isPartyMember: true, out _));
+            var ordered = QuestRules.PreferCurrentContextQuests(
+                sel.Eligible,
+                curSceneId,
+                listSnap.TrackingQuestId,
+                inInstance,
+                region,
+                regionOnly,
+                world.GetSceneName);
+            int regionMatchedCount = !string.IsNullOrEmpty(region)
+                ? QuestRules.CountMatchingRegionQuests(sel.Eligible, region, curSceneId, world.GetSceneName, supportedOnly: true)
+                : 0;
+            JsonObject availableRegions = BuildRegionCounts(sel.Eligible, world, supportedOnly: true);
+
+            QuestEntry? firstSupported = ordered.FirstOrDefault(q =>
+            {
+                var g = QuestRules.GetActiveGoal(q);
+                return g != null && QuestRules.IsGoalSupported(g.Kind);
+            });
+
+            if (firstSupported == null)
+            {
+                string catTitle = !string.IsNullOrEmpty(query)
+                    ? query
+                    : QuestRules.GetCanonicalCategoryName(QuestRules.NormalizeCategoryGroupId(category));
+                string reasonDetail;
+                if (!string.IsNullOrEmpty(region) && regionOnly && regionMatchedCount == 0)
+                {
+                    reasonDetail = $"'{region}' 지역에 진행 가능한 '{catTitle}' 퀘스트가 없어요.";
+                }
+                else if (ordered.Count > 0)
+                {
+                    var g = QuestRules.GetActiveGoal(ordered[0]);
+                    reasonDetail = $"{ordered[0].Name}: {QuestRules.DescribeUnsupportedReason(g, ordered[0].State, ordered[0].StepTips)}";
+                }
+                else if (sel.Excluded.Count > 0)
+                {
+                    reasonDetail = $"{sel.Excluded[0].Quest.Name}: {sel.Excluded[0].Reason}";
+                }
+                else
+                {
+                    reasonDetail = $"'{catTitle}' 카테고리에 진행 가능한 퀘스트가 없어요.";
+                }
+
+                var errObj = new JsonObject
+                {
+                    ["ok"] = false,
+                    ["error"] = reasonDetail,
+                    ["excluded"] = exclArr
+                };
+                if (!string.IsNullOrEmpty(region))
+                    errObj["available_regions"] = availableRegions;
+                return errObj;
+            }
+
+            var behavior = new AutoQuestBehavior(
+                services,
+                config,
+                world,
+                navigator,
+                autoCombat,
+                moveDriver,
+                boost,
+                traversal,
+                mount,
+                quests,
+                category,
+                query,
+                explicitId,
+                maxQuests,
+                region,
+                regionOnly);
+
+            var snap = behaviors.StartBehavior(behavior);
+            onUiStateChanged?.Invoke();
+
+            int firstSceneId = QuestRules.GetQuestSceneId(firstSupported);
+            string firstSceneName = firstSceneId > 0 ? world.GetSceneName(firstSceneId) : "";
+            string phase = snap["phase"]?.GetValue<string>() ?? "";
+            bool failedAtStart = phase is "quest_list_failed" or "quest_blocked" or "quest_instance_blocked" or "no_executable_quests" or "no_quests_found";
+            var res = new JsonObject
+            {
+                ["ok"] = !failedAtStart,
+                ["eligible_count"] = ordered.Count,
+                ["region"] = region,
+                ["region_only"] = regionOnly,
+                ["region_matched_count"] = regionMatchedCount,
+                ["first_quest"] = firstSupported.Name,
+                ["first_quest_scene"] = firstSceneName,
+                ["behavior"] = snap,
+                ["excluded"] = exclArr
+            };
+            if (!string.IsNullOrEmpty(region) && !regionOnly && regionMatchedCount == 0)
+            {
+                res["region_note"] = $"'{region}' 지역에 진행 가능한 퀘스트가 없어 다른 지역 퀘스트부터 진행합니다.";
+                res["available_regions"] = availableRegions;
+            }
+            if (failedAtStart)
+                res["error"] = snap["detail"]?.GetValue<string>() ?? phase;
+            return res;
+        });
+
+        Open("get_quest_status", _ =>
+        {
+            var cur = behaviors.Current as AutoQuestBehavior;
+            var listSnap = quests.ListQuests();
+            QuestEntry? tracking = listSnap.Ok
+                ? listSnap.Quests.FirstOrDefault(q => q.IsTracking || q.QuestId == listSnap.TrackingQuestId)
+                : null;
+            return new JsonObject
+            {
+                ["ok"] = true,
+                ["active"] = cur != null && !cur.IsFinished,
+                ["behavior"] = cur?.GetSnapshot(),
+                ["tracking_quest_id"] = listSnap.TrackingQuestId,
+                ["tracking_quest_name"] = tracking?.Name ?? "",
+                ["tracking_group"] = tracking?.GroupName ?? ""
+            };
+        });
+
+        // 17. Internal bridge callback for LLM navigation stall recovery (not exposed in mcp_tools.json)
+        Open("apply_nav_recovery", p =>
+        {
+            if (stallRecovery == null)
+                return new JsonObject { ["ok"] = false, ["error"] = "Navigation stall recovery service unavailable." };
+
+            JsonObject res = stallRecovery.ApplyDecision(p ?? new JsonObject());
+            onUiStateChanged?.Invoke();
+            return res;
+        });
+    }
+
+    private static string FirstStr(JsonObject? p, params string[] keys)
+    {
+        if (p == null) return "";
+        foreach (string k in keys)
+        {
+            string val = JsonNodeHelpers.GetString(p, k, "").Trim();
+            if (!string.IsNullOrEmpty(val))
+                return val;
+        }
+        return "";
     }
 
     private static JsonObject WithOk(this JsonObject o)

@@ -48,6 +48,7 @@
               "cancel_goal",
               "list_goals",
               "craft_goal",
+              "auto_quest",
               "remember",
               "forget"
             ]
@@ -238,13 +239,25 @@
           },
           "category": {
             "type": "string",
-            "enum": [
-              "preference",
-              "relationship",
-              "nickname_alias",
-              "habit",
-              "note"
-            ]
+            "description": "Memory category (preference|relationship|nickname_alias|habit|note) or quest category for auto_quest"
+          },
+          "quest_category": {
+            "type": "string"
+          },
+          "quest": {
+            "type": "string"
+          },
+          "quest_id": {
+            "type": "integer"
+          },
+          "max_quests": {
+            "type": "integer"
+          },
+          "region": {
+            "type": "string"
+          },
+          "region_only": {
+            "type": "boolean"
           },
           "mem_key": {
             "type": "string"

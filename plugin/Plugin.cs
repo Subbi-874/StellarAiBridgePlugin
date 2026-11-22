@@ -10,8 +10,10 @@ using Stellar.AgyBridge.Adapters.Dungeon;
 using Stellar.AgyBridge.Adapters.External;
 using Stellar.AgyBridge.Adapters.Items;
 using Stellar.AgyBridge.Adapters.Movement;
+using Stellar.AgyBridge.Adapters.Quest;
 using Stellar.AgyBridge.Adapters.Social;
 using Stellar.AgyBridge.Behaviors;
+using Stellar.AgyBridge.Bridge.Core;
 using Stellar.AgyBridge.Bridge.Server;
 using Stellar.AgyBridge.Character;
 using Stellar.AgyBridge.Commands;
@@ -44,6 +46,7 @@ public sealed class Plugin : IStellarPlugin
     private readonly IExternalPluginAdapter _externalPluginAdapter;
     private readonly IItemAdapter _itemAdapter;
     private readonly IMovementAdapter _movementAdapter;
+    private readonly IQuestAdapter _questAdapter;
     private readonly PlayerMoveDriver _moveDriver;
     private readonly LocomotionBoostController _boost;
     private readonly WorldStateService _world;
@@ -65,9 +68,11 @@ public sealed class Plugin : IStellarPlugin
     private readonly StickerService _stickers;
     private readonly AutoFishingIntegration _autoFishing;
     private readonly TraversalGimmickService _traversal;
+    private readonly NavigationStallRecoveryService _navStallRecovery;
     private readonly CombatEvadeService _combatEvade;
     private readonly AutoCameraGuardService _cameraGuard;
     private readonly EcoModeService _ecoMode;
+    private readonly RareMonsterAlertService _rareMonsterAlert;
     private readonly BehaviorRunner _behaviors;
     private readonly CommandRegistry _commands;
     private readonly LeaderBridgeHost _bridgeHost;
@@ -97,6 +102,7 @@ public sealed class Plugin : IStellarPlugin
         _externalPluginAdapter = new ExternalPluginAdapter(_services, _lua, _worldGuard);
         _itemAdapter = new LuaItemAdapter(_services, _lua, _worldGuard);
         _movementAdapter = new LuaMovementAdapter(_services, _lua, _worldGuard);
+        _questAdapter = new LuaQuestAdapter(_services, _lua, _worldGuard);
         _capabilities = new CapabilityRegistry(_services.Log, _worldGuard, _services.Localization);
         _capabilities.RegisterProbe(_combatAdapter);
         _capabilities.RegisterProbe(_characterAdapter);
@@ -105,11 +111,13 @@ public sealed class Plugin : IStellarPlugin
         _capabilities.RegisterProbe(_externalPluginAdapter);
         _capabilities.RegisterProbe(_itemAdapter);
         _capabilities.RegisterProbe(_movementAdapter);
+        _capabilities.RegisterProbe(_questAdapter);
         _capabilities.RunLoadTimeProbes();
         _moveDriver = new PlayerMoveDriver(_services);
         _boost = new LocomotionBoostController(_services, _config, _movementAdapter);
         _world = new WorldStateService(_services, _config, _socialAdapter);
         _navigator = new CrossMapNavigator(_services, _movementAdapter, _combatAdapter);
+        _navigator.AttachNavRouteEvaluator(_boost.PathNavigator.EvaluatePortalRoute);
         _autoCombat = new AutoCombatKeeper(_services, _combatAdapter, _navigator);
         if (_config.IsFeatureEnabled(FeaturePolicyKeys.AutoCombat))
         {
@@ -148,6 +156,7 @@ public sealed class Plugin : IStellarPlugin
         _cameraGuard = new AutoCameraGuardService(_services, _config, _world, _autoCombat, _behaviors);
         _boost.AttachCameraGuard(_cameraGuard);
         _ecoMode = new EcoModeService(_services, _config);
+        _rareMonsterAlert = new RareMonsterAlertService(_services, _config, _world, _worldGuard, _socialAdapter);
 
         _bridgeHost = new LeaderBridgeHost(
             () => _config.BridgeUrl,
@@ -155,6 +164,18 @@ public sealed class Plugin : IStellarPlugin
             () => _config.AuthToken,
             log: msg => _services.Log.Info(msg));
         _wsClient = new BridgeWebSocketClient(_services.Log, _config, _dispatcher, _commands, _capabilities.BuildStatusJson, BuildIdentitySnapshotJson, _bridgeHost);
+        _navStallRecovery = new NavigationStallRecoveryService(
+            _services,
+            _config,
+            _world,
+            _navigator,
+            _moveDriver,
+            _boost,
+            _traversal,
+            () => _wsClient.IsConnected,
+            reason => _behaviors.StopCurrent(reason));
+        _behaviors.AttachStallRecovery(_navStallRecovery);
+        _boost.AttachStallDetector(_navStallRecovery.Detector);
         _uiWindow = new AgyBridgeUiWindow(
             _services,
             _config,
@@ -167,6 +188,8 @@ public sealed class Plugin : IStellarPlugin
             _party,
             _autoGather,
             _traversal,
+            _questAdapter,
+            _mount,
             _wsClient,
             _capabilities,
             _ecoMode);
@@ -218,8 +241,10 @@ public sealed class Plugin : IStellarPlugin
             _autoFishing,
             _traversal,
             _itemAdapter,
+            _questAdapter,
             _lua,
-            _uiWindow.MarkDirty);
+            _uiWindow.MarkDirty,
+            _navStallRecovery);
 
         _world.SubscribeEvents(_wsClient.PushEvent);
         _behaviors.BehaviorFinished += OnBehaviorFinished;
@@ -235,7 +260,7 @@ public sealed class Plugin : IStellarPlugin
         _services.Framework.Update += OnUpdate;
 
         _wsClient.Start();
-        _services.Log.Info($"[AgyBridge] Initialized v1.1.0. Connecting to {_config.BridgeUrl}");
+        _services.Log.Info($"[AgyBridge] Initialized v{BridgeRuntimeConfig.PluginVersion}. Connecting to {_config.BridgeUrl}");
     }
 
     private void OnFeaturePolicyChanged(string key, FeaturePolicyState policy)
@@ -249,7 +274,12 @@ public sealed class Plugin : IStellarPlugin
         }
         else if (key == FeaturePolicyKeys.FollowMove && !policy.Enabled)
         {
-            if (_behaviors.Current is FollowPartyBehavior or MoveToBehavior or SeekMonsterBehavior or UseGimmickBehavior or FarmMonsterItemBehavior)
+            if (_behaviors.Current is FollowPartyBehavior or MoveToBehavior or SeekMonsterBehavior or UseGimmickBehavior or FarmMonsterItemBehavior or AutoQuestBehavior)
+                _behaviors.StopCurrent("policy_disabled");
+        }
+        else if (key == FeaturePolicyKeys.AutoQuest && !policy.Enabled)
+        {
+            if (_behaviors.Current is AutoQuestBehavior)
                 _behaviors.StopCurrent("policy_disabled");
         }
         else if (key == FeaturePolicyKeys.AutoCraft && !policy.Enabled)
@@ -320,6 +350,7 @@ public sealed class Plugin : IStellarPlugin
         _revive.Tick(deltaTime);
         _interaction.Tick(deltaTime);
         _autoReady.Tick(deltaTime);
+        _rareMonsterAlert.Tick(deltaTime);
         bool ecoActivityActive = _behaviors.Current != null || _moveDriver.IsDriving || _autoCombat.LastKnownInGameEnabled;
         _ecoMode.Tick(deltaTime, ecoActivityActive, _identity.InWorld);
         _uiWindow.TickPendingEdits();
@@ -440,12 +471,14 @@ public sealed class Plugin : IStellarPlugin
         _behaviors.BehaviorFinished -= OnBehaviorFinished;
         _world.UnsubscribeEvents(_wsClient.PushEvent);
         _autoReady.Dispose();
+        _rareMonsterAlert.Dispose();
         _uiWindow.Dispose();
         _ecoMode.Dispose();
         _wsClient.Dispose();
         _bridgeHost.Dispose();
         _cameraGuard.Dispose();
         _combatEvade.Dispose();
+        _navStallRecovery.CancelActiveRecovery();
         _boost.Reset();
         _behaviors.Dispose();
         _world.Dispose();

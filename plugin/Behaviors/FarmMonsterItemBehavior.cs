@@ -17,7 +17,7 @@ namespace Stellar.AgyBridge.Behaviors;
 /// reaches <c>TargetItemCount</c> for a dropped material <c>ItemId</c>, and restores prior Auto-Combat
 /// state upon completion or stop. Emits <c>monster_farm_completed</c> / <c>monster_farm_failed</c>.
 /// </summary>
-public sealed class FarmMonsterItemBehavior : IBehavior
+public sealed class FarmMonsterItemBehavior : IBehavior, INavigationRecoverableBehavior
 {
     private const float SpawnArrivalRadius = 7.5f;
     private const float LiveScanRadius = 45f;
@@ -444,6 +444,30 @@ public sealed class FarmMonsterItemBehavior : IBehavior
         RestoreAutoCombatAndCleanup();
         _phase = reason;
         IsFinished = true;
+    }
+
+    public bool CanSkipCurrentTarget => false;
+
+    public void FillRecoveryContext(JsonObject context)
+    {
+        context["monster_name"] = _monsterName;
+        context["item_id"] = _itemId;
+        context["target_scene_id"] = _targetSceneId;
+        context["can_skip_quest"] = false;
+    }
+
+    public void OnNavigationRecoveryCompleted(string recoveryAction)
+    {
+        _settleTimer = 1.0f;
+        _intraWarpedOnce = true;
+    }
+
+    public bool TrySkipCurrentTargetFromRecovery(string reason) => false;
+
+    public void FailFromNavigationRecovery(string reason)
+    {
+        string msg = string.IsNullOrWhiteSpace(reason) ? "길찾기 정체 복구 실패" : $"길찾기 정체 복구 실패: {reason}";
+        Fail("navigation_stalled", msg);
     }
 
     public JsonObject GetSnapshot() => new()

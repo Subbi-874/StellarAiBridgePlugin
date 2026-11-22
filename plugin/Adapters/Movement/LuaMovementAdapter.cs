@@ -830,10 +830,8 @@ return {{ ok = true, method = 'AsyncReqSwitchSceneLineByLineId', line_id = targe
             header + SharedSceneRouterLua + "\nreturn routeToScene(targetScene, curSceneId, targetCharId, 0, leaveFirst, tx, ty, tz)\n");
     }
 
-    public JsonObject? FindBestIntraMapWarpRaw(int sceneId, Position3D targetPos, HashSet<int>? excludedTpIds)
+    private static string BuildExcludedTpLua(HashSet<int>? excludedTpIds)
     {
-        if (!_lua.IsReady || sceneId <= 0) return null;
-
         var exclSb = new StringBuilder("local excl = {");
         if (excludedTpIds != null)
         {
@@ -847,10 +845,16 @@ return {{ ok = true, method = 'AsyncReqSwitchSceneLineByLineId', line_id = targe
             }
         }
         exclSb.Append("}\n");
+        return exclSb.ToString();
+    }
+
+    public JsonObject? FindBestIntraMapWarpRaw(int sceneId, Position3D targetPos, HashSet<int>? excludedTpIds)
+    {
+        if (!_lua.IsReady || sceneId <= 0) return null;
 
         string header = string.Create(
             CultureInfo.InvariantCulture,
-            $"local sid = {sceneId}\nlocal tx = {targetPos.X:F2}\nlocal ty = {targetPos.Y:F2}\nlocal tz = {targetPos.Z:F2}\n") + exclSb.ToString();
+            $"local sid = {sceneId}\nlocal tx = {targetPos.X:F2}\nlocal ty = {targetPos.Y:F2}\nlocal tz = {targetPos.Z:F2}\n") + BuildExcludedTpLua(excludedTpIds);
 
         const string body = CollectSceneTransferEntitiesLua + @"
 local TM = Z.TableMgr
@@ -908,6 +912,63 @@ return { found = false }
         var res = _lua.Eval(header + body);
         return res["ok"]?.GetValue<bool>() == true && res["result"] is JsonObject obj && obj["found"]?.GetValue<bool>() == true
             ? obj
+            : null;
+    }
+
+    public JsonArray? ListSceneUnlockedPortalsRaw(int sceneId, HashSet<int>? excludedTpIds = null)
+    {
+        if (!_lua.IsReady || sceneId <= 0) return null;
+
+        string header = string.Create(
+            CultureInfo.InvariantCulture,
+            $"local sid = {sceneId}\n") + BuildExcludedTpLua(excludedTpIds);
+
+        const string body = CollectSceneTransferEntitiesLua + @"
+local TM = Z.TableMgr
+local mapVm = Z.VMMgr.GetVM('map')
+local ttm = TM and TM.GetTable('TransferTableMgr')
+if not mapVm or not mapVm.LoadEntityTableData then return { portals = {} } end
+
+local entries = collectSceneTransferEntities(sid, TM, mapVm)
+local portals = {}
+local seenTp = {}
+for _, item in ipairs(entries) do
+  local e = item.ent
+  local tpId = tonumber(e.TpPointId or 0) or 0
+  if tpId > 0 and not seenTp[tpId] and not excl[tpId] and e.Pos then
+    local unlocked = true
+    if mapVm.CheckTransferPointUnlock then
+      local okU, u = pcall(function() return mapVm.CheckTransferPointUnlock(tpId) end)
+      if okU then unlocked = (u == true) end
+    end
+    if unlocked then
+      seenTp[tpId] = true
+      local px = tonumber(e.Pos.x or e.Pos[1] or 0) or 0
+      local py = tonumber(e.Pos.y or e.Pos[2] or 0) or 0
+      local pz = tonumber(e.Pos.z or e.Pos[3] or 0) or 0
+      local tpName = ''
+      if ttm and ttm.GetRow then
+        pcall(function()
+          local r = ttm.GetRow(tpId, true)
+          if r and r.Name then tpName = tostring(r.Name) end
+        end)
+      end
+      portals[#portals + 1] = {
+        tpId = tpId,
+        name = tpName,
+        x = px,
+        y = py,
+        z = pz,
+        layer = item.layer
+      }
+    end
+  end
+end
+return { portals = portals }
+";
+        var res = _lua.Eval(header + body);
+        return res["ok"]?.GetValue<bool>() == true && res["result"] is JsonObject obj && obj["portals"] is JsonArray arr
+            ? arr
             : null;
     }
 

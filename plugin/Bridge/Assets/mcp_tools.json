@@ -1531,5 +1531,75 @@
       "title": "trim_memoryArguments",
       "type": "object"
     }
+  },
+  {
+    "name": "list_quests",
+    "description": "Lists non-hidden quests sorted top-to-bottom by UI order or prioritized by region, with optional category ('구역 퀘스트', '스토리', '후일담', '가이드 퀘스트', '인연 스토리', '이벤트 퀘스트'), region/map filter, and name query.",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "default": "",
+          "title": "Category",
+          "type": "string"
+        },
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "region": {
+          "default": "",
+          "title": "Region",
+          "type": "string"
+        },
+        "region_only": {
+          "default": false,
+          "title": "Region Only",
+          "type": "boolean"
+        }
+      },
+      "title": "list_questsArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "auto_quest",
+    "description": "Tracks and sequentially runs eligible quests within a category (e.g. '구역 퀘스트', '스토리', '후일담', '가이드 퀘스트'), optional region priority/filter (e.g. '바하마르 고원', '아스테리아 평원', '현재 지역'), or matching query, automatically skipping dialog/cutscenes and moving across maps.",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "default": "",
+          "title": "Category",
+          "type": "string"
+        },
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "region": {
+          "default": "",
+          "title": "Region",
+          "type": "string"
+        },
+        "region_only": {
+          "default": false,
+          "title": "Region Only",
+          "type": "boolean"
+        },
+        "quest_id": {
+          "default": 0,
+          "title": "Quest Id",
+          "type": "integer"
+        },
+        "max_quests": {
+          "default": 0,
+          "title": "Max Quests",
+          "type": "integer"
+        }
+      },
+      "title": "auto_questArguments",
+      "type": "object"
+    }
   }
 ]

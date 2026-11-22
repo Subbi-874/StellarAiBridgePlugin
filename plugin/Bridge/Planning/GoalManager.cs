@@ -68,6 +68,19 @@ public static class GoalHelpers
         "recipe_name",
         "count_mode",
         "allow_monster_farm",
+        "category",
+        "quest_category",
+        "group",
+        "quest",
+        "quest_id",
+        "max_quests",
+        "region",
+        "region_only",
+        "scene",
+        "area",
+        "map",
+        "scene_name",
+        "trigger_text",
     };
 
     private static readonly IReadOnlyDictionary<string, string> BehaviorKindMap =
@@ -80,6 +93,7 @@ public static class GoalHelpers
             ["use_gimmick"] = "use_gimmick",
             ["craft_item"] = "craft_item",
             ["farm_monster_item"] = "farm_monster_item",
+            ["auto_quest"] = "auto_quest",
         };
 
     public static double MonotonicNow()
@@ -233,6 +247,16 @@ public static class GoalHelpers
             GoalStep? single = BuildStepFromJson(act, senderId);
             if (single != null)
                 steps.Add(single);
+        }
+
+        string trigText = JsonNodeHelpers.GetString(trig, "text", "").Trim();
+        if (!string.IsNullOrEmpty(trigText))
+        {
+            foreach (GoalStep st in steps)
+            {
+                if (st.ActionType == "auto_quest" && !st.Params.ContainsKey("trigger_text"))
+                    st.Params["trigger_text"] = trigText;
+            }
         }
 
         bool resumable = JsonNodeHelpers.GetNullableBool(act, "resumable")

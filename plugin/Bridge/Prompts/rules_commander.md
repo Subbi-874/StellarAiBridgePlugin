@@ -37,3 +37,4 @@
     - '~ 총 N개 되게/보유하게 만들어': {"type": "craft_goal", "item": "...", "count": N, "count_mode": "total_target"}
     - '~ N번 / N회 만들어': {"type": "craft_goal", "item": "...", "count": N, "count_mode": "crafts"} (1회 생산량과 무관하게 제작 N회 실행)
     - '생활력/집중력 다 쓸 때까지 만들어': {"type": "craft_goal", "item": "...", "count": 0, "count_mode": "max_focus"}
+24. '구역 퀘스트 해 / 스토리 퀘스트 해 / 후일담 해 / 가이드 퀘스트 밀어 / ○○ 지역 구역 퀘스트 먼저 해 / ○○ 퀘스트 해'처럼 퀘스트 자동 진행 요청이 오면 {"type": "auto_quest", "category": "구역 퀘스트|스토리|후일담|가이드 퀘스트|인연 스토리|이벤트 퀘스트|전체", "region": "<특정 지역/맵 우선 시(예: 바하마르 고원, 아스테리아 평원, 현재 지역) 또는 ''>", "region_only": false, "quest": "<특정 퀘스트명만 요청 시>"}를 넣으세요('○○부터 처리해/○○ 먼저 해'는 region만 지정해 다른 지역보다 먼저 처리하고, '○○ 지역만 해'라고 제한할 때만 "region_only": true 지정; 자동으로 목표에 등록되며 기존 따라가기는 자동 중지되므로 follow_player를 같이 넣지 마세요).

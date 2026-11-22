@@ -20,6 +20,7 @@
             "loadouts",
             "outfits",
             "emotes",
+            "quests",
             "goals",
             "memories",
             "known_users"
@@ -27,7 +28,19 @@
         },
         "query": {
           "type": "string",
-          "description": "선택 검색어 또는 대상 이름/UID (player_location, gatherables, memories 등에 사용)"
+          "description": "선택 검색어 또는 대상 이름/UID (player_location, gatherables, quests, memories 등에 사용)"
+        },
+        "category": {
+          "type": "string",
+          "description": "퀘스트 카테고리 필터 (quests 조회 시: 구역 퀘스트, 스토리, 후일담, 가이드 퀘스트, 인연 스토리, 이벤트 퀘스트, 전체)"
+        },
+        "region": {
+          "type": "string",
+          "description": "퀘스트 지역/맵 필터 또는 우선 정렬 기준 (quests 조회 시: 바하마르 고원, 아스테리아 평원, 아스텔리즈, 현재 지역 등)"
+        },
+        "region_only": {
+          "type": "boolean",
+          "description": "quests 조회 시 region에 해당하는 지역 퀘스트만 반환할지 여부 (기본 false)"
         }
       },
       "required": [
@@ -94,6 +107,7 @@
             "leave_dungeon",
             "seek_monster",
             "use_gimmick",
+            "auto_quest",
             "stop"
           ]
         },
@@ -124,6 +138,26 @@
         "continuous": {
           "type": "boolean",
           "description": "follow_player 지속 추적 여부 (기본 true)"
+        },
+        "category": {
+          "type": "string",
+          "description": "자동 퀘스트 카테고리 (auto_quest용: 구역 퀘스트, 스토리, 후일담, 가이드 퀘스트, 인연 스토리, 이벤트 퀘스트, 전체)"
+        },
+        "region": {
+          "type": "string",
+          "description": "우선 처리할 지역/맵 이름 (auto_quest용, 예: 바하마르 고원, 아스테리아 평원, 아스텔리즈, 현재 지역 — '○○ 지역 먼저 해' 시 지정)"
+        },
+        "region_only": {
+          "type": "boolean",
+          "description": "true면 지정한 region의 퀘스트만 수행, false(기본)면 해당 지역을 최우선 처리 후 나머지 진행 (auto_quest용)"
+        },
+        "quest": {
+          "type": "string",
+          "description": "특정 퀘스트 이름 검색어 (auto_quest용, 비우면 카테고리 위에서부터 순차 진행)"
+        },
+        "max_quests": {
+          "type": "integer",
+          "description": "진행할 최대 퀘스트 개수 (auto_quest용, 0 또는 생략 시 해당 카테고리 모두 순차 진행)"
         }
       },
       "required": [
@@ -450,6 +484,26 @@
               "engage": {
                 "type": "boolean",
                 "description": "전투 여부"
+              },
+              "category": {
+                "type": "string",
+                "description": "퀘스트 카테고리 (auto_quest용)"
+              },
+              "region": {
+                "type": "string",
+                "description": "우선 처리할 지역/맵 이름 (auto_quest용, 예: 바하마르 고원, 아스테리아 평원, 현재 지역)"
+              },
+              "region_only": {
+                "type": "boolean",
+                "description": "true면 지정한 region 퀘스트만 수행, false면 해당 지역 우선 처리 (auto_quest용)"
+              },
+              "quest": {
+                "type": "string",
+                "description": "특정 퀘스트명 (auto_quest용)"
+              },
+              "max_quests": {
+                "type": "integer",
+                "description": "진행할 최대 퀘스트 개수 (auto_quest용)"
               }
             },
             "required": [

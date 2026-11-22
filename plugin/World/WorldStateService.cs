@@ -1047,6 +1047,10 @@ public sealed class WorldStateService : IDisposable
             if (!_services.EntityTransforms.TryGetTransform(id, out var pos, out var yaw))
                 continue;
 
+            var vitals = _services.CombatLookup.GetVitals(id);
+            if (vitals.LeftAoi)
+                continue;
+
             liveIds.Add(id);
             string kind = id.IsPlayer ? "player" : (id.IsMonster ? "monster" : "other");
             if (!string.IsNullOrEmpty(kindFilter) && !string.Equals(kind, kindFilter, StringComparison.OrdinalIgnoreCase))
@@ -1057,20 +1061,23 @@ public sealed class WorldStateService : IDisposable
             float dz = pos.Z - selfPos.Z;
             float dist = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
 
+            var monInfo = (id.IsMonster && _services.GameData.IsAvailable)
+                ? _services.GameData.World.GetMonsterByEntity(id)
+                : null;
             string? name = _services.CombatLookup.GetEntityName(id);
-            if (string.IsNullOrEmpty(name) && id.IsMonster && _services.GameData.IsAvailable)
-                name = _services.GameData.World.GetMonsterByEntity(id)?.Name;
-
-            var vitals = _services.CombatLookup.GetVitals(id);
+            if (string.IsNullOrEmpty(name))
+                name = monInfo?.Name;
 
             items.Add((dist, new JsonObject
             {
                 ["entity_id"] = id.Value,
                 ["char_id"] = id.IsPlayer ? (id.Value >> 16) : 0L,
                 ["kind"] = kind,
+                ["monster_id"] = monInfo?.Id ?? 0,
                 ["name"] = name ?? "",
                 ["hp"] = vitals.Hp,
                 ["max_hp"] = vitals.MaxHp,
+                ["has_hp_observation"] = vitals.HasHpObservation,
                 ["distance"] = MathF.Round(dist, 2),
                 ["yaw"] = MathF.Round(yaw, 1),
                 ["pos"] = PosToJson(pos)

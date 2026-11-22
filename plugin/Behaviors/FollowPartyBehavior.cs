@@ -18,7 +18,7 @@ namespace Stellar.AgyBridge.Behaviors;
 /// 4. Coexists with Auto-Combat via a configurable Combat Tether leash (fights freely inside tether; suppresses AI to sprint when target leaves tether).
 /// 5. Approaches using 3-tier locomotion: Mobility Skill ('E' Phantom Dash) -> Dash-Jump Bunnyhop -> Normal approach.
 /// </summary>
-public sealed class FollowPartyBehavior : IBehavior
+public sealed class FollowPartyBehavior : IBehavior, INavigationRecoverableBehavior
 {
     private const double IntraWarpSamePortalBlockSec = 20.0;
     private const float PostJumpMinWarpCooldownSec = 3.5f;
@@ -1292,6 +1292,34 @@ public sealed class FollowPartyBehavior : IBehavior
         _moveDriver.Uninstall(this);
         _phase = reason;
         IsFinished = true;
+    }
+
+    public bool CanSkipCurrentTarget => false;
+
+    public void FillRecoveryContext(JsonObject context)
+    {
+        context["target_char_id"] = _lockedCharId;
+        context["target_name"] = _lockedName;
+        context["target_scene_id"] = _targetSceneId;
+        context["can_skip_quest"] = false;
+    }
+
+    public void OnNavigationRecoveryCompleted(string recoveryAction)
+    {
+        _settleTimer = 1.0f;
+        _intraMapTpCooldown = MathF.Max(_intraMapTpCooldown, 90.0f);
+        _approachGimmick = null;
+        _gimmickApproachStallTimer = 0f;
+        _gimmickApproachTotalTimer = 0f;
+        _targetTrail.Clear();
+    }
+
+    public bool TrySkipCurrentTargetFromRecovery(string reason) => false;
+
+    public void FailFromNavigationRecovery(string reason)
+    {
+        string msg = string.IsNullOrWhiteSpace(reason) ? "길찾기 정체 복구 실패" : $"길찾기 정체 복구 실패: {reason}";
+        CancelTracking("cancelled_navigation_stalled", msg);
     }
 
     public JsonObject GetSnapshot() => new()

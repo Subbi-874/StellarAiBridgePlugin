@@ -16,7 +16,7 @@ namespace Stellar.AgyBridge.Behaviors;
 /// delegates casting/QTE/reeling to <c>Stellar.AutoFishing</c>, and monitors target catch count
 /// or resource exhaustion before exiting fishing stance cleanly.
 /// </summary>
-public sealed class FishAtSpotBehavior : IBehavior
+public sealed class FishAtSpotBehavior : IBehavior, INavigationRecoverableBehavior
 {
     private const float ApproachTimeoutSec = 180f;
     private const float InteractionArriveDist = 1.35f;
@@ -484,6 +484,31 @@ public sealed class FishAtSpotBehavior : IBehavior
         _autoCombat.SuppressForCatchup = false;
         _phase = reason;
         IsFinished = true;
+    }
+
+    public bool CanSkipCurrentTarget => false;
+
+    public void FillRecoveryContext(JsonObject context)
+    {
+        var sp = CurrentSpot;
+        context["spot_query"] = _spotQuery;
+        context["landmark"] = sp?.Landmark ?? "";
+        context["scene_id"] = sp?.SceneId ?? 0;
+        context["can_skip_quest"] = false;
+    }
+
+    public void OnNavigationRecoveryCompleted(string recoveryAction)
+    {
+        _settleTimer = 1.0f;
+        _intraWarpedOnce = true;
+    }
+
+    public bool TrySkipCurrentTargetFromRecovery(string reason) => false;
+
+    public void FailFromNavigationRecovery(string reason)
+    {
+        string msg = string.IsNullOrWhiteSpace(reason) ? "길찾기 정체 복구 실패" : $"길찾기 정체 복구 실패: {reason}";
+        Fail("navigation_stalled", msg);
     }
 
     public JsonObject GetSnapshot()

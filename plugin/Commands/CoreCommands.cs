@@ -555,6 +555,7 @@ public static class CoreCommands
                 if (p["enable_smart_pathfinding"] != null) config.EnableSmartPathfinding = p["enable_smart_pathfinding"]!.GetValue<bool>();
                 if (p["enable_auto_evade"] != null) config.EnableAutoEvade = p["enable_auto_evade"]!.GetValue<bool>();
                 if (p["enable_auto_camera_guard"] != null) config.EnableAutoCameraGuard = p["enable_auto_camera_guard"]!.GetValue<bool>();
+                if (p["enable_rare_monster_guild_alert"] != null) config.EnableRareMonsterGuildAlert = p["enable_rare_monster_guild_alert"]!.GetValue<bool>();
                 if (p["camera_target_zoom_ratio"] != null) config.CameraTargetZoomRatio = Math.Clamp(p["camera_target_zoom_ratio"]!.GetValue<float>(), 0.50f, 1.0f);
                 if (p["camera_target_vertical"] != null) config.CameraTargetVertical = Math.Clamp(p["camera_target_vertical"]!.GetValue<float>(), 0.45f, 0.96f);
                 if (p["enable_obstacle_jump"] != null) config.EnableObstacleJump = p["enable_obstacle_jump"]!.GetValue<bool>();
@@ -595,6 +596,7 @@ public static class CoreCommands
                 ["enable_smart_pathfinding"] = config.EnableSmartPathfinding,
                 ["enable_auto_evade"] = config.EnableAutoEvade,
                 ["enable_auto_camera_guard"] = config.EnableAutoCameraGuard,
+                ["enable_rare_monster_guild_alert"] = config.EnableRareMonsterGuildAlert,
                 ["camera_target_zoom_ratio"] = config.CameraTargetZoomRatio,
                 ["camera_target_vertical"] = config.CameraTargetVertical,
                 ["enable_obstacle_jump"] = config.EnableObstacleJump,

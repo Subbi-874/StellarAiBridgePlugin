@@ -1184,6 +1184,36 @@ public sealed class BridgeRpcDispatcher
                     ["unload_assets"] = HasNonNull(args, "unload_assets") ? JsonNodeHelpers.GetBool(args, "unload_assets", true) : true,
                 }, ct: ct).ConfigureAwait(false);
 
+            case "list_quests":
+                return await DispatchMcpRpc("list_quests", new JsonObject
+                {
+                    ["category"] = JsonNodeHelpers.GetString(args, "category", ""),
+                    ["query"] = JsonNodeHelpers.GetString(args, "query", ""),
+                    ["region"] = JsonNodeHelpers.GetFirstString(args, "region", "scene", "area", "map"),
+                    ["region_only"] = JsonNodeHelpers.GetBool(args, "region_only", false),
+                }, ct: ct).ConfigureAwait(false);
+
+            case "auto_quest":
+            {
+                var p = new JsonObject
+                {
+                    ["category"] = JsonNodeHelpers.GetString(args, "category", ""),
+                    ["query"] = JsonNodeHelpers.GetFirstString(args, "query", "quest"),
+                };
+                string region = JsonNodeHelpers.GetFirstString(args, "region", "scene", "area", "map");
+                if (!string.IsNullOrEmpty(region))
+                    p["region"] = region;
+                if (JsonNodeHelpers.GetBool(args, "region_only", false))
+                    p["region_only"] = true;
+                int qid = JsonNodeHelpers.GetInt(args, "quest_id", 0);
+                if (qid > 0)
+                    p["quest_id"] = qid;
+                int maxQ = JsonNodeHelpers.GetInt(args, "max_quests", 0);
+                if (maxQ > 0)
+                    p["max_quests"] = maxQ;
+                return await DispatchMcpRpc("auto_quest", p, ct: ct).ConfigureAwait(false);
+            }
+
             default:
                 throw new KeyNotFoundException($"Unknown MCP tool: {toolName}");
         }
@@ -1369,7 +1399,7 @@ public sealed class BridgeRpcDispatcher
                         ["serverInfo"] = new JsonObject
                         {
                             ["name"] = "stellar-agy-bridge",
-                            ["version"] = "1.1.0",
+                            ["version"] = BridgeRuntimeConfig.PluginVersion,
                         },
                         ["instructions"] = McpInstructions,
                     });

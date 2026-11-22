@@ -91,6 +91,13 @@ public static class TaskEventFormatter
             return ("monster", !string.IsNullOrEmpty(detail) ? detail : BridgeI18n.T("task_monster_arrived", langCode));
         }
 
+        if (evName is "auto_quest_completed" or "auto_quest_failed")
+        {
+            string detail = JsonNodeHelpers.GetString(data, "detail", "");
+            string fallback = BridgeI18n.T(evName == "auto_quest_completed" ? "task_quest_done" : "task_quest_failed", langCode);
+            return ("quest", !string.IsNullOrEmpty(detail) ? detail : fallback);
+        }
+
         {
             string detail = JsonNodeHelpers.GetString(data, "detail", "");
             return ("monster", !string.IsNullOrEmpty(detail) ? detail : BridgeI18n.T("task_monster_failed", langCode));
@@ -117,15 +124,25 @@ public static class ConsultDecisionParser
     private static readonly string[] WrapperKeys =
         { "structured_output", "reply", "response", "result", "text", "output" };
 
-    public static ConsultDecision? Parse(string? raw)
+    internal static JsonObject? UnwrapEnvelopeObject(string? raw, params string[] expectedKeys)
     {
         JsonObject? obj = UnwrapJsonObject(raw);
         if (obj == null)
             return null;
 
+        static bool HasExpectedKey(JsonObject cand, string[] keys)
+        {
+            foreach (string k in keys)
+            {
+                if (cand.ContainsKey(k))
+                    return true;
+            }
+            return false;
+        }
+
         foreach (string key in WrapperKeys)
         {
-            if (obj.ContainsKey("action"))
+            if (HasExpectedKey(obj, expectedKeys))
                 break;
             if (!obj.TryGetPropertyValue(key, out JsonNode? inner) || inner == null)
                 continue;
@@ -144,7 +161,7 @@ public static class ConsultDecisionParser
             }
         }
 
-        if (!obj.ContainsKey("action"))
+        if (!HasExpectedKey(obj, expectedKeys))
         {
             JsonArray? choices = JsonNodeHelpers.GetArray(obj, "choices");
             if (choices != null && choices.Count > 0 && choices[0] is JsonObject c0)
@@ -160,7 +177,7 @@ public static class ConsultDecisionParser
             }
 
             JsonArray? gemCands = JsonNodeHelpers.GetArray(obj, "candidates");
-            if (!obj.ContainsKey("action") && gemCands != null && gemCands.Count > 0 && gemCands[0] is JsonObject g0)
+            if (!HasExpectedKey(obj, expectedKeys) && gemCands != null && gemCands.Count > 0 && gemCands[0] is JsonObject g0)
             {
                 JsonObject? contentObj = JsonNodeHelpers.GetObject(g0, "content");
                 JsonArray? parts = JsonNodeHelpers.GetArray(contentObj, "parts");
@@ -185,6 +202,15 @@ public static class ConsultDecisionParser
                 }
             }
         }
+
+        return obj;
+    }
+
+    public static ConsultDecision? Parse(string? raw)
+    {
+        JsonObject? obj = UnwrapEnvelopeObject(raw, "action");
+        if (obj == null)
+            return null;
 
         string action = JsonNodeHelpers.GetString(obj, "action", "").Trim().ToLowerInvariant();
         string replyText = JsonNodeHelpers.GetString(obj, "reply_text", "").Trim();
@@ -509,6 +535,14 @@ public sealed class GoalEventRouter
             return cnt > 0 ? $"{spot}에서 낚시 {cnt}마리 목표 완료" : $"{goal.Title} 완료";
         }
 
+        if (goal.Kind == "auto_quest" || (curStep != null && curStep.ActionType == "auto_quest"))
+        {
+            string d = JsonNodeHelpers.GetString(data, "detail", "");
+            if (!string.IsNullOrEmpty(d))
+                return d;
+            return $"'{goal.Title}' 완료!";
+        }
+
         return $"목표 '{goal.Title}' 완료";
     }
 
@@ -776,6 +810,26 @@ public sealed class GoalEventRouter
         step.LastError = fact;
         step.Status = "failed";
 
+        if (phase is "navigation_stalled" or "cancelled_navigation_stalled"
+            || goal.Metadata.ContainsKey("nav_stall_abort_reply"))
+        {
+            string abortReply = PopMetadataString(goal.Metadata, "nav_stall_abort_reply");
+            ScheduleDecision stallAbortDec = agent.Goals.FailOrAbortActiveGoal(fact, abort: true);
+            agent.Budget.ResetGoal(goal.GoalId);
+            return new RouteDirective
+            {
+                Kind = "abort_and_announce",
+                Goal = goal,
+                PromotedGoal = stallAbortDec.ActiveGoal,
+                Fact = !string.IsNullOrEmpty(abortReply) ? abortReply : fact,
+                FactAlreadyRendered = !string.IsNullOrEmpty(abortReply),
+                FailureSignature = sig,
+                Channel = goal.Channel,
+                RequesterUid = goal.RequesterUid,
+                HandledGoalEvent = true,
+            };
+        }
+
         if (goal.FailurePolicy == FailurePolicy.Abort)
         {
             ScheduleDecision dec = agent.Goals.FailOrAbortActiveGoal(fact, abort: true);
@@ -836,6 +890,7 @@ public sealed class GoalEventRouter
             Channel = goal.Channel,
             RequesterUid = goal.RequesterUid,
             HandledGoalEvent = true,
+            EventContext = BuildConsultEventContext(payload),
         };
     }
 
@@ -1036,12 +1091,54 @@ public sealed class GoalEventRouter
         return null;
     }
 
+    private static readonly string[] ConsultDiagnosticKeys =
+    {
+        "phase", "detail", "category", "query",
+        "active_quest_id", "active_quest_name", "active_step_id", "active_step_tips",
+        "active_goal_kind", "active_raw_goal_type",
+        "block_reason", "blocked_quest_id", "blocked_quest_name",
+        "blocked_scene_id", "blocked_scene_name",
+        "completed_count", "skipped_count", "skipped_quests",
+    };
+
+    private static JsonObject? BuildConsultEventContext(JsonObject payload)
+    {
+        JsonObject? snap = JsonNodeHelpers.GetObject(payload, "snapshot");
+        var ctx = new JsonObject();
+
+        foreach (string key in ConsultDiagnosticKeys)
+        {
+            JsonNode? node = null;
+            if (!payload.TryGetPropertyValue(key, out node) || node == null)
+                snap?.TryGetPropertyValue(key, out node);
+            if (node == null)
+                continue;
+
+            if (node is JsonValue jv && jv.TryGetValue(out string? s) && string.IsNullOrEmpty(s))
+                continue;
+            if (node is JsonArray arr && arr.Count == 0)
+                continue;
+
+            ctx[key] = JsonNodeHelpers.DeepClone(node);
+        }
+
+        return ctx.Count > 0 ? ctx : null;
+    }
+
     private static bool PopMetadataBool(JsonObject meta, string key)
     {
         if (!meta.TryGetPropertyValue(key, out JsonNode? node))
             return false;
         meta.Remove(key);
         return JsonNodeHelpers.IsTruthy(node);
+    }
+
+    private static string PopMetadataString(JsonObject meta, string key)
+    {
+        if (!meta.TryGetPropertyValue(key, out JsonNode? node))
+            return "";
+        meta.Remove(key);
+        return JsonNodeHelpers.AsString(node, "").Trim();
     }
 
     private static string FirstNonEmpty(params string[] values)

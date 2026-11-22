@@ -1528,4 +1528,208 @@ return gids
         }
         return false;
     }
+
+    // ─────────────────────── Hypertext Position Share ───────────────────────
+
+    public string? StartSharePositionInChatCoroutine(
+        int channelType,
+        string beforeDesc,
+        string afterDesc,
+        int sceneId,
+        int lineId,
+        int posX,
+        int posY,
+        int posZ,
+        int mapLayerId = -1,
+        long targetCharId = 0L)
+    {
+        if (!_lua.IsReady || !_guard.IsLuaWorldReady || channelType <= 0 || sceneId <= 0)
+            return null;
+
+        string header = string.Create(
+            CultureInfo.InvariantCulture,
+            $@"local chanType = {channelType}
+local beforeText = {LuaLiteral.Quote(beforeDesc ?? "")}
+local afterText = {LuaLiteral.Quote(afterDesc ?? "")}
+local sId = {sceneId}
+local lId = {lineId}
+local px = {posX}
+local py = {posY}
+local pz = {posZ}
+local layerId = {mapLayerId}
+local targetId = {targetCharId}
+");
+
+        const string body = @"
+local wpOk, wp = pcall(require, 'zproxy.world_proxy')
+if not wpOk or type(wp) ~= 'table' or type(wp.ShareObjectInChat) ~= 'function' then
+  return { ok = false, error = 'world_proxy.ShareObjectInChat unavailable' }
+end
+
+if lId <= 0 then
+  local ld = Z.DataMgr and Z.DataMgr.Get and Z.DataMgr.Get('sceneline_data')
+  lId = tonumber(ld and ld.PlayerLineId or 0) or 0
+end
+if layerId < 0 then
+  layerId = math.floor(tonumber((Z.MiniMapManager and Z.MiniMapManager.CurLayerId) or 0) or 0)
+end
+
+local objType = (Z.PbEnum and Z.PbEnum('ShareObjectType', 'ShareObjectTypePosition')) or 8
+local cs = Z.CancelSource.Rent()
+local req = {
+  channelType = chanType,
+  objectType = objType,
+  beforeDesc = beforeText,
+  afterDesc = afterText,
+  targetCharId = targetId,
+  paramList = { sId, lId, px, py, pz, layerId }
+}
+local ok, ret = pcall(function() return wp.ShareObjectInChat(req, cs:CreateToken()) end)
+cs:Recycle()
+
+local ec = 0
+if type(ret) == 'table' then
+  ec = tonumber(ret.errCode or 0) or 0
+elseif type(ret) == 'number' then
+  ec = ret
+end
+
+return {
+  ok = (ok and ec == 0),
+  err_code = ec,
+  error = (not ok and tostring(ret)) or (ec ~= 0 and ('errCode=' .. tostring(ec))) or nil
+}
+";
+        return _lua.StartCoroutineRpc(header + body);
+    }
+
+    public JsonObject PollCoroutineRpc(string reqId, bool clearWhenDone = true)
+        => _lua.PollCoroutineRpc(reqId, clearWhenDone);
+
+    public IReadOnlyList<SharedPositionMessage> ReadRecentSharedPositionMessages(
+        int channelType,
+        long afterMsgId,
+        int maxScan = 12)
+    {
+        if (!_lua.IsReady || !_guard.IsLuaWorldReady || channelType <= 0)
+            return Array.Empty<SharedPositionMessage>();
+
+        int clampedScan = Math.Clamp(maxScan, 1, 30);
+        string script = string.Create(
+            CultureInfo.InvariantCulture,
+            $@"
+local chanType = {channelType}
+local afterId = {afterMsgId}
+local limit = {clampedScan}
+local chatData = Z.DataMgr and Z.DataMgr.Get and Z.DataMgr.Get('chat_main_data')
+if not chatData or not chatData.GetChannelQueueByChannelId then return {{}} end
+local okQ, recs = pcall(function() return chatData:GetChannelQueueByChannelId(chanType) end)
+if not okQ or type(recs) ~= 'table' or #recs == 0 then return {{}} end
+
+local wpOk, wp = pcall(require, 'zproxy.world_proxy')
+local pb = nil
+if wpOk and type(wp) == 'table' and type(wp.ShareObjectInChat) == 'function' and debug and debug.getupvalue then
+  for u = 1, 20 do
+    local un, uv = debug.getupvalue(wp.ShareObjectInChat, u)
+    if not un then break end
+    if un == 'pb' then pb = uv break end
+  end
+end
+if not pb or type(pb.decode) ~= 'function' then return {{}} end
+
+local out = {{}}
+local startIdx = math.max(1, #recs - limit + 1)
+for i = startIdx, #recs do
+  local raw = recs[i] and recs[i].ChitChatMsg
+  if type(raw) == 'table' then
+    local mid = tonumber(raw.msgId or 0) or 0
+    if mid > afterId then
+      local mi = raw.msgInfo
+      local ch = mi and mi.chatHypertext
+      if type(mi) == 'table' and tonumber(mi.msgType or 0) == 6 and type(ch) == 'table' and tonumber(ch.configId or 0) == 3000002 and type(ch.hypertextContents) == 'table' then
+        local beforeTxt = ''
+        local afterTxt = ''
+        local sId, lId, px, py, pz, layerId = 0, 0, 0, 0, 0, 0
+        local strSlot = 0
+        local hasPos = false
+        for _, item in ipairs(ch.hypertextContents) do
+          if type(item) == 'table' then
+            local itype = tonumber(item.type or 0) or 0
+            local b = item.bytesContent or ''
+            if itype == 7 then
+              strSlot = strSlot + 1
+              local txt = ''
+              if #b > 0 then
+                local okD, dec = pcall(pb.decode, '.zproto.PlaceHolderStr', b)
+                if okD and type(dec) == 'table' and dec.text ~= nil then
+                  txt = tostring(dec.text)
+                end
+              end
+              if strSlot == 1 then beforeTxt = txt else afterTxt = txt end
+            elseif itype == 13 and #b > 0 then
+              local okD, dec = pcall(pb.decode, '.zproto.PlaceHolderScenePosition', b)
+              if okD and type(dec) == 'table' then
+                sId = tonumber(dec.SceneId or 0) or 0
+                lId = tonumber(dec.LineId or 0) or 0
+                px = tonumber(dec.PositionX or 0) or 0
+                py = tonumber(dec.PositionY or 0) or 0
+                pz = tonumber(dec.PositionZ or 0) or 0
+                layerId = tonumber(dec.MapLayerId or 0) or 0
+                hasPos = sId > 0
+              end
+            end
+          end
+        end
+        if hasPos then
+          local senderId = raw.sendCharInfo and tonumber(raw.sendCharInfo.charID or 0) or 0
+          out[#out + 1] = {{
+            msg_id = mid,
+            sender_id = senderId,
+            before_text = beforeTxt,
+            after_text = afterTxt,
+            scene_id = sId,
+            line_id = lId,
+            x = px,
+            y = py,
+            z = pz,
+            layer = layerId
+          }}
+        end
+      end
+    end
+  end
+end
+return out
+");
+
+        var ev = _lua.Eval(script);
+        if (ev["ok"]?.GetValue<bool>() != true || ev["result"] is not JsonArray arr || arr.Count == 0)
+            return Array.Empty<SharedPositionMessage>();
+
+        var result = new List<SharedPositionMessage>(arr.Count);
+        foreach (var node in arr)
+        {
+            if (node is not JsonObject obj)
+                continue;
+
+            long msgId = Bridge.Core.JsonNodeHelpers.GetLong(obj, "msg_id", 0L);
+            int sId = Bridge.Core.JsonNodeHelpers.GetInt(obj, "scene_id", 0);
+            if (msgId <= 0L || sId <= 0)
+                continue;
+
+            result.Add(new SharedPositionMessage(
+                MsgId: msgId,
+                SenderId: Bridge.Core.JsonNodeHelpers.GetLong(obj, "sender_id", 0L),
+                BeforeText: Bridge.Core.JsonNodeHelpers.GetString(obj, "before_text", ""),
+                AfterText: Bridge.Core.JsonNodeHelpers.GetString(obj, "after_text", ""),
+                SceneId: sId,
+                LineId: Bridge.Core.JsonNodeHelpers.GetInt(obj, "line_id", 0),
+                X: Bridge.Core.JsonNodeHelpers.GetInt(obj, "x", 0),
+                Y: Bridge.Core.JsonNodeHelpers.GetInt(obj, "y", 0),
+                Z: Bridge.Core.JsonNodeHelpers.GetInt(obj, "z", 0),
+                MapLayerId: Bridge.Core.JsonNodeHelpers.GetInt(obj, "layer", 0)));
+        }
+
+        return result;
+    }
 }

@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace Stellar.AgyBridge.Behaviors;
 
-public sealed class MoveToBehavior : IBehavior
+public sealed class MoveToBehavior : IBehavior, INavigationRecoverableBehavior
 {
     private readonly IPluginServices _services;
     private readonly WorldStateService _world;
@@ -112,6 +112,22 @@ public sealed class MoveToBehavior : IBehavior
         _phase = reason;
         IsFinished = true;
     }
+
+    public bool CanSkipCurrentTarget => false;
+
+    public void FillRecoveryContext(JsonObject context)
+    {
+        context["can_skip_quest"] = false;
+    }
+
+    public void OnNavigationRecoveryCompleted(string recoveryAction)
+    {
+        _elapsed = 0f;
+    }
+
+    public bool TrySkipCurrentTargetFromRecovery(string reason) => false;
+
+    public void FailFromNavigationRecovery(string reason) => Stop("navigation_stalled");
 
     public JsonObject GetSnapshot() => new()
     {

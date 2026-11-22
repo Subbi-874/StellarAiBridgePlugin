@@ -243,7 +243,23 @@ public sealed class TraversalGimmickService
             break;
         }
         if (pick == null) return false;
+        return TryActivateCandidate(pick, out triggeredLabel, out triggeredUuid);
+    }
 
+    /// <summary>
+    /// Attempts to activate a specific discovered gimmick candidate, dismounting if needed
+    /// and initializing traversal flight tracking when activation succeeds.
+    /// </summary>
+    public bool TryActivateCandidate(
+        TraversalGimmickCandidate pick,
+        out string triggeredLabel,
+        out long triggeredUuid)
+    {
+        triggeredLabel = "";
+        triggeredUuid = 0L;
+        if (!_movement.IsLuaReady) return false;
+
+        double now = Environment.TickCount64 * 0.001;
         if (_mount.IsRiding())
             _mount.Dismount();
 

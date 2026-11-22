@@ -18,7 +18,7 @@ namespace Stellar.AgyBridge.Behaviors;
 ///  3. Drive there with the standard locomotion stack; on arrival, if a live matching monster is observed nearby,
 ///     close in on it. Emits <c>monster_seek_arrived</c> / <c>monster_seek_failed</c> bridge events.
 /// </summary>
-public sealed class SeekMonsterBehavior : IBehavior
+public sealed class SeekMonsterBehavior : IBehavior, INavigationRecoverableBehavior
 {
     private const float OverallTimeoutSec = 240f;
     private const float LiveMonsterScanRadius = 60f;
@@ -384,6 +384,29 @@ public sealed class SeekMonsterBehavior : IBehavior
         _autoCombat.SuppressForCatchup = false;
         _phase = reason;
         IsFinished = true;
+    }
+
+    public bool CanSkipCurrentTarget => false;
+
+    public void FillRecoveryContext(JsonObject context)
+    {
+        context["monster_name"] = _monsterName;
+        context["target_scene_id"] = _targetSceneId;
+        context["can_skip_quest"] = false;
+    }
+
+    public void OnNavigationRecoveryCompleted(string recoveryAction)
+    {
+        _settleTimer = 1.0f;
+        _intraWarpedOnce = true;
+    }
+
+    public bool TrySkipCurrentTargetFromRecovery(string reason) => false;
+
+    public void FailFromNavigationRecovery(string reason)
+    {
+        string msg = string.IsNullOrWhiteSpace(reason) ? "길찾기 정체 복구 실패" : $"길찾기 정체 복구 실패: {reason}";
+        Fail("navigation_stalled", msg);
     }
 
     public JsonObject GetSnapshot() => new()

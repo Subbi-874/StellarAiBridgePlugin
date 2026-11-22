@@ -7,16 +7,25 @@ namespace Stellar.AgyBridge.Behaviors;
 
 public sealed class BehaviorRunner : IDisposable
 {
-    private readonly IPluginServices _services;
-    private readonly PlayerMoveDriver _moveDriver;
+    private readonly IPluginServices? _services;
+    private readonly Action? _forceStopMove;
+    private INavigationStallRecoveryHook? _stallRecovery;
     private IBehavior? _current;
     private string _lastFinishedSummary = "idle";
 
     public BehaviorRunner(IPluginServices services, PlayerMoveDriver moveDriver)
+        : this(services, moveDriver != null ? (Action)moveDriver.ForceStopAll : null)
+    {
+    }
+
+    public BehaviorRunner(IPluginServices? services, Action? forceStopMove)
     {
         _services = services;
-        _moveDriver = moveDriver;
+        _forceStopMove = forceStopMove;
     }
+
+    public void AttachStallRecovery(INavigationStallRecoveryHook recovery)
+        => _stallRecovery = recovery;
 
     public IBehavior? Current => _current;
     public event Action<string, string, JsonObject>? BehaviorFinished;
@@ -29,7 +38,7 @@ public sealed class BehaviorRunner : IDisposable
         }
         catch (Exception ex)
         {
-            _services.Log.Warning($"[AgyBridge][Behavior] BehaviorFinished listener error: {ex.Message}");
+            _services?.Log.Warning($"[AgyBridge][Behavior] BehaviorFinished listener error: {ex.Message}");
         }
     }
 
@@ -46,15 +55,18 @@ public sealed class BehaviorRunner : IDisposable
 
         _current = behavior;
         _current.Start();
-        _services.Log.Info($"[AgyBridge][Behavior] Started {behavior.Kind}");
+        _stallRecovery?.NotifyBehaviorChanged(_current);
+        _services?.Log.Info($"[AgyBridge][Behavior] Started {behavior.Kind}");
         return _current.GetSnapshot();
     }
 
     public JsonObject StopCurrent(string reason = "user_stop")
     {
+        _stallRecovery?.CancelActiveRecovery();
         if (_current == null)
         {
-            _moveDriver.ForceStopAll();
+            _stallRecovery?.NotifyBehaviorChanged(null);
+            _forceStopMove?.Invoke();
             return new JsonObject
             {
                 ["active"] = false,
@@ -65,10 +77,11 @@ public sealed class BehaviorRunner : IDisposable
 
         var prev = _current;
         _current = null;
+        _stallRecovery?.NotifyBehaviorChanged(null);
         try { prev.Stop(reason); } catch { }
-        _moveDriver.ForceStopAll();
+        _forceStopMove?.Invoke();
         _lastFinishedSummary = $"{prev.Kind}:{reason}";
-        _services.Log.Info($"[AgyBridge][Behavior] Stopped {prev.Kind} ({reason})");
+        _services?.Log.Info($"[AgyBridge][Behavior] Stopped {prev.Kind} ({reason})");
         var snap = prev.GetSnapshot();
         RaiseFinished(prev.Kind, reason, snap);
         return snap;
@@ -80,11 +93,22 @@ public sealed class BehaviorRunner : IDisposable
 
         try
         {
-            _current.Tick(deltaTime);
+            bool suppressBehaviorTick = false;
+            if (_stallRecovery != null)
+                _stallRecovery.TryTick(deltaTime, _current, out suppressBehaviorTick);
+
+            if (!suppressBehaviorTick && _current != null && !_current.IsFinished)
+            {
+                _current.Tick(deltaTime);
+                if (_current != null && !_current.IsFinished)
+                    _stallRecovery?.PostBehaviorTick(deltaTime, _current);
+            }
+
             if (_current != null && _current.IsFinished)
             {
                 var prev = _current;
                 _current = null;
+                _stallRecovery?.NotifyBehaviorChanged(null);
                 var snap = prev.GetSnapshot();
                 string phase = snap["phase"]?.GetValue<string>() ?? "done";
                 _lastFinishedSummary = $"{prev.Kind}:{phase}";
@@ -93,7 +117,7 @@ public sealed class BehaviorRunner : IDisposable
         }
         catch (Exception ex)
         {
-            _services.Log.Warning($"[AgyBridge][Behavior] Tick exception in {_current?.Kind}: {ex}");
+            _services?.Log.Warning($"[AgyBridge][Behavior] Tick exception in {_current?.Kind}: {ex}");
             StopCurrent("exception");
         }
     }
@@ -104,6 +128,8 @@ public sealed class BehaviorRunner : IDisposable
         {
             var snap = _current.GetSnapshot();
             snap["active"] = true;
+            if (_stallRecovery?.IsActive == true)
+                snap["nav_recovery"] = _stallRecovery.BuildStatusJson();
             return snap;
         }
 

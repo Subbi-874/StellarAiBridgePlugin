@@ -396,6 +396,35 @@ public sealed class ActionExecutor
             parameters["target_count"] = Math.Max(1, tc);
             onClearKinds?.Invoke(new[] { "follow", "fish" });
         }
+        else if (atype == "auto_quest")
+        {
+            method = "auto_quest";
+            defaultErr = "자동 퀘스트를 시작하지 못했어요";
+            string cat = JsonNodeHelpers.GetFirstString(act, "quest_category", "category", "group");
+            string q = JsonNodeHelpers.GetFirstString(act, "quest", "query", "name");
+            string region = JsonNodeHelpers.GetFirstString(act, "region", "scene", "area", "map", "scene_name");
+            string triggerText = JsonNodeHelpers.GetFirstString(act, "trigger_text");
+            if (string.IsNullOrEmpty(triggerText))
+                triggerText = JsonNodeHelpers.GetString(trig, "text", "").Trim();
+            bool regionOnly = JsonNodeHelpers.GetBool(act, "region_only", false);
+            int qid = JsonNodeHelpers.GetInt(act, "quest_id", 0);
+            int maxQ = Math.Max(0, JsonNodeHelpers.GetInt(act, "max_quests", 0));
+            if (!string.IsNullOrEmpty(cat))
+                parameters["category"] = cat;
+            if (!string.IsNullOrEmpty(q))
+                parameters["query"] = q;
+            if (!string.IsNullOrEmpty(region))
+                parameters["region"] = region;
+            if (!string.IsNullOrEmpty(triggerText))
+                parameters["trigger_text"] = triggerText;
+            if (regionOnly)
+                parameters["region_only"] = true;
+            if (qid > 0)
+                parameters["quest_id"] = qid;
+            if (maxQ > 0)
+                parameters["max_quests"] = maxQ;
+            onClearKinds?.Invoke(new[] { "follow", "fish" });
+        }
         else
         {
             method = "seek_monster";
@@ -464,6 +493,8 @@ public sealed class ActionExecutor
             onRemember?.Invoke("fish");
         else if (atype == "use_gimmick")
             onRemember?.Invoke("gimmick");
+        else if (atype == "auto_quest")
+            onRemember?.Invoke("quest");
 
         JsonObject? info = BridgeConstants.InfoActions.Contains(atype)
             ? new JsonObject
