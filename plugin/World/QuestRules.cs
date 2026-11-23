@@ -1014,4 +1014,76 @@ public static class QuestRules
         }
         return new string(buf[..len]);
     }
+
+    /// <summary>
+    /// Returns the retry cooldown after triggering an in-game quest interaction.
+    /// Channeled gather/operate prompts need ~2.8s so re-triggering or walking does not cancel the cast bar.
+    /// </summary>
+    public static float ComputeQuestInteractRetryCooldown(QuestGoalKind goalKind, string? interactLabel)
+    {
+        if (goalKind == QuestGoalKind.InteractOperate)
+            return 2.80f;
+
+        string lbl = (interactLabel ?? "").Trim();
+        if (lbl.Length > 0)
+        {
+            string low = lbl.ToLowerInvariant();
+            if (lbl.Contains("채집", StringComparison.Ordinal)
+                || lbl.Contains("채취", StringComparison.Ordinal)
+                || lbl.Contains("수집", StringComparison.Ordinal)
+                || lbl.Contains("조사", StringComparison.Ordinal)
+                || lbl.Contains("해제", StringComparison.Ordinal)
+                || lbl.Contains("해체", StringComparison.Ordinal)
+                || lbl.Contains("수리", StringComparison.Ordinal)
+                || lbl.Contains("작동", StringComparison.Ordinal)
+                || lbl.Contains("조작", StringComparison.Ordinal)
+                || low.Contains("gather", StringComparison.Ordinal)
+                || low.Contains("collect", StringComparison.Ordinal)
+                || low.Contains("investigate", StringComparison.Ordinal))
+            {
+                return 2.80f;
+            }
+        }
+
+        return 1.20f;
+    }
+
+    /// <summary>
+    /// Determines whether the character should remain stationary while waiting for a triggered quest interaction
+    /// to complete, instead of walking closer and cancelling a channeled gather/operate cast bar.
+    /// </summary>
+    public static bool ShouldHoldStillForQuestInteract(
+        bool hasMatchingInteract,
+        bool huggingTarget,
+        bool isInteractingPhase,
+        int consecutiveTries,
+        QuestGoalKind goalKind)
+    {
+        if (huggingTarget)
+            return true;
+
+        if (!isInteractingPhase)
+            return false;
+
+        if (hasMatchingInteract)
+        {
+            int maxHoldTries = goalKind == QuestGoalKind.InteractOperate ? 4 : 3;
+            return consecutiveTries <= maxHoldTries;
+        }
+
+        return consecutiveTries < 2;
+    }
+
+    /// <summary>
+    /// Prevents search-area sweep from walking over an active interactable object and prematurely marking it
+    /// visited/blocked while a matching in-range prompt is actively being interacted with.
+    /// </summary>
+    public static bool ShouldDeferSearchAreaSweepForActiveInteract(
+        bool hasMatchingInteract,
+        bool isInteractingPhase,
+        int consecutiveTries,
+        QuestGoalKind goalKind)
+        => hasMatchingInteract
+           && (isInteractingPhase || goalKind == QuestGoalKind.InteractOperate)
+           && consecutiveTries < 5;
 }

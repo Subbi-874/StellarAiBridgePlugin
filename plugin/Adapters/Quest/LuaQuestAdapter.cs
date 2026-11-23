@@ -430,27 +430,30 @@ if idata and idata.GetData then
     for _, e in pairs(list) do
       hasInter = true
       pcall(function()
-        local uuid = tonumber(e.GetUuid and e:GetUuid() or 0) or 0
+        local rawU = e.GetUuid and e:GetUuid() or nil
+        local rawC = e.GetInteractionCfgId and e:GetInteractionCfgId() or 0
+        local rawS = e.GetSeatGroupIndex and e:GetSeatGroupIndex() or 0
+        local uuid = tonumber(rawU or 0) or 0
         local entryEntId = tonumber(e.entityId_ or 0) or 0
         local entryEntCfgId = tonumber(e.entityCfgId_ or 0) or 0
-        local icfg = tonumber(e.GetInteractionCfgId and e:GetInteractionCfgId() or 0) or 0
-        local seat = tonumber(e.GetSeatGroupIndex and e:GetSeatGroupIndex() or 0) or 0
+        local icfg = tonumber(rawC or 0) or 0
+        local seat = tonumber(rawS or 0) or 0
         local txt = tostring(e.GetContentStr and e:GetContentStr() or '')
         if txt ~= '' and not interLabelSeen[txt] and #interLabels < 5 then
           interLabelSeen[txt] = true
           interLabels[#interLabels + 1] = txt
         end
         local condOk = true
-        if Z.InteractionMgr and Z.InteractionMgr.CheckCondition then
-          pcall(function() condOk = Z.InteractionMgr:CheckCondition(uuid, icfg, seat, false) end)
+        if Z.InteractionMgr and Z.InteractionMgr.CheckCondition and rawU ~= nil then
+          pcall(function() condOk = Z.InteractionMgr:CheckCondition(rawU, rawC, rawS, false) end)
         end
         local entPos = nil
         local tableUid = 0
         local cfgUid = 0
         local cfgVal = 0
-        if uuid > 0 and Z.EntityMgr then
+        if rawU ~= nil and uuid > 0 and Z.EntityMgr then
           local ent = nil
-          pcall(function() ent = Z.EntityMgr:GetEntity(uuid) end)
+          pcall(function() ent = Z.EntityMgr:GetEntity(rawU) end)
           if ent then
             if Z.PbAttrEnum then
               pcall(function()
@@ -776,13 +779,19 @@ end
 
 local best = nil
 local bestScore = -999
+local checkedCount = 0
 for _, e in pairs(list) do
-  local u = tonumber(e.GetUuid and e:GetUuid() or 0) or 0
+  checkedCount = checkedCount + 1
+  local rawU = e.GetUuid and e:GetUuid() or nil
+  local rawC = e.GetInteractionCfgId and e:GetInteractionCfgId() or 0
+  local rawS = e.GetSeatGroupIndex and e:GetSeatGroupIndex() or 0
+  local rawT = e.GetTemplateId and e:GetTemplateId() or 0
+  local u = tonumber(rawU or 0) or 0
   local entryEntId = tonumber(e.entityId_ or 0) or 0
   local entryEntCfgId = tonumber(e.entityCfgId_ or 0) or 0
-  local c = tonumber(e.GetInteractionCfgId and e:GetInteractionCfgId() or 0) or 0
-  local s = tonumber(e.GetSeatGroupIndex and e:GetSeatGroupIndex() or 0) or 0
-  local t = tonumber(e.GetTemplateId and e:GetTemplateId() or 0) or 0
+  local c = tonumber(rawC or 0) or 0
+  local s = tonumber(rawS or 0) or 0
+  local t = tonumber(rawT or 0) or 0
   local txt = ''
   pcall(function() txt = tostring(e:GetContentStr() or '') end)
 
@@ -791,9 +800,9 @@ for _, e in pairs(list) do
   local entCfgId = 0
   local hasEntPos = false
   local distToGoal = nil
-  if Z.EntityMgr and u > 0 then
+  if Z.EntityMgr and rawU ~= nil and u > 0 then
     local ent = nil
-    pcall(function() ent = Z.EntityMgr:GetEntity(u) end)
+    pcall(function() ent = Z.EntityMgr:GetEntity(rawU) end)
     if ent then
       if Z.PbAttrEnum then
         pcall(function()
@@ -836,39 +845,52 @@ for _, e in pairs(list) do
   local exactUidMatch = (targetUid > 0 and (u == targetUid or entTableUid == targetUid or entCfgUid == targetUid))
   local exactCfgMatch = (targetCfgId >= 1000 and entCfgId == targetCfgId)
   local nearGoal = (distToGoal ~= nil and distToGoal <= 3.5)
+  local isGoodWord = containsAny(txt, GOOD_WORDS)
   local hardBad = (not exactUidMatch) and containsAny(txt, HARD_BAD_WORDS)
   local ctxBad = (not exactUidMatch) and (not nearGoal) and isContextBlocked(txt, questCtx)
   if not hardBad and not ctxBad then
     local condOk = true
-    pcall(function() condOk = Z.InteractionMgr:CheckCondition(u, c, s, false) end)
+    if rawU ~= nil then
+      pcall(function() condOk = Z.InteractionMgr:CheckCondition(rawU, rawC, rawS, false) end)
+    end
     if condOk ~= false then
       local score = 0
       if exactUidMatch then score = score + 100 end
       if nearGoal then score = score + 90 end
       if exactCfgMatch then score = score + 80 end
-      if containsAny(txt, GOOD_WORDS) then score = score + 30 end
+      if isGoodWord then score = score + 30 end
       if not hasEntPos then score = score + 15 end
-      if (not exactUidMatch) and distToGoal ~= nil and distToGoal > 4.5 then score = score - 40 end
-      if gKind == 'talk' and (txt:find('대화', 1, true) or txt:lower():find('talk', 1, true)) then
+      if (not exactUidMatch) and (not exactCfgMatch) and distToGoal ~= nil and distToGoal > 4.5 then
+        score = score - (isGoodWord and 15 or 40)
+      end
+      local txtLow = txt:lower()
+      if gKind == 'talk' and (txt:find('대화', 1, true) or txtLow:find('talk', 1, true)) then
         score = score + 20
-      elseif gKind == 'interactoperate' and (txt:find('조사', 1, true) or txt:find('수집', 1, true) or txt:find('열기', 1, true) or txt:find('사용', 1, true)) then
+      elseif gKind == 'interactoperate' and (
+          txt:find('조사', 1, true) or txt:find('수집', 1, true) or txt:find('채집', 1, true)
+          or txt:find('채취', 1, true) or txt:find('뽑기', 1, true) or txt:find('뜯기', 1, true)
+          or txt:find('열기', 1, true) or txt:find('사용', 1, true) or txt:find('작동', 1, true)
+          or txt:find('조작', 1, true) or txt:find('확인', 1, true) or txt:find('줍기', 1, true)
+          or txt:find('해제', 1, true) or txt:find('해체', 1, true) or txt:find('수리', 1, true)
+          or txtLow:find('gather', 1, true) or txtLow:find('collect', 1, true)
+          or txtLow:find('inspect', 1, true) or txtLow:find('investigate', 1, true)) then
         score = score + 20
-      elseif (gKind == 'reacharea' or gKind == 'killmonster') and (txt:find('조사', 1, true) or exactUidMatch) then
+      elseif (gKind == 'reacharea' or gKind == 'killmonster') and (txt:find('조사', 1, true) or txt:find('채집', 1, true) or exactUidMatch) then
         score = score + 20
       end
       if score > bestScore then
         bestScore = score
-        best = {{ u = u, c = c, t = t, s = s, txt = txt, score = score }}
+        best = {{ rawU = rawU, rawC = rawC, rawT = rawT, rawS = rawS, u = u, c = c, t = t, s = s, txt = txt, score = score }}
       end
     end
   end
 end
 
 if not best or bestScore < 0 then
-  return {{ ok = false, error = 'no_matching_interaction' }}
+  return {{ ok = false, error = 'no_matching_interaction', best_score = bestScore, checked = checkedCount }}
 end
 
-local okB, errB = pcall(function() Z.InteractionMgr:BeginInteraction(best.u, best.c, best.t, best.s) end)
+local okB, errB = pcall(function() Z.InteractionMgr:BeginInteraction(best.rawU, best.rawC, best.rawT, best.rawS) end)
 return {{
   ok = okB,
   uuid = best.u,

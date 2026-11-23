@@ -285,7 +285,7 @@ public sealed class LocomotionBoostController
         int sceneType = _movement.GetSceneType(sceneId);
         var zoneProfile = LocomotionRules.GetZoneProfile(sceneType);
         bool isWallClimbingNow = _lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb;
-        bool isGlidingOrFlowingNow = _lastActorState is ActorStateFlow or ActorStateGlide;
+        bool isAirborneDescentNow = _lastActorState is ActorStateFall or ActorStateFlow or ActorStateGlide;
 
         Vector3 steerTarget = PathNavigator.ComputeSteerTarget(
             dt,
@@ -296,7 +296,7 @@ public sealed class LocomotionBoostController
             allowLedgeClimb,
             zoneProfile,
             isWallClimbingNow,
-            isGlidingOrFlowingNow);
+            isAirborneDescentNow);
 
         float navDx = steerTarget.x - localPos.x;
         float navDz = steerTarget.z - localPos.z;
@@ -315,7 +315,8 @@ public sealed class LocomotionBoostController
         float effectiveClimbGoalDy = PathNavigator.IsClimbingIntermediateRidge
             ? MathF.Max(goalDy, 3.0f)
             : (hasCornerAhead && legDy > 0.5f ? MathF.Max(goalDy, legDy) : goalDy);
-        bool wantUpwardClimb = effectiveClimbGoalDy > 0.5f && (PathNavigator.IsWallClimbAhead || (isWallClimbingNow && !PathNavigator.IsDetouring));
+        bool wantUpwardClimb = (effectiveClimbGoalDy > 0.5f && PathNavigator.IsWallClimbAhead)
+            || (isWallClimbingNow && !PathNavigator.IsDetouring && effectiveClimbGoalDy > -1.0f);
 
         bool wantWallYawAlign = useBoost && wantUpwardClimb;
         bool wallCameraAligned = true;
@@ -385,7 +386,9 @@ public sealed class LocomotionBoostController
         {
             float pedalMovedSq = (localPos.x - _pedalWallAnchorPos.x) * (localPos.x - _pedalWallAnchorPos.x)
                                + (localPos.z - _pedalWallAnchorPos.z) * (localPos.z - _pedalWallAnchorPos.z);
-            if (_pedalWallUnwantedTimer <= 0f || pedalMovedSq >= 1.25f * 1.25f)
+            float pedalRiseY = localPos.y - _pedalWallAnchorPos.y;
+            if (_pedalWallUnwantedTimer <= 0f
+                || LocomotionRules.IsPedalWallMakingProgress(pedalMovedSq, pedalRiseY, effectiveClimbGoalDy))
             {
                 _pedalWallAnchorPos = localPos;
                 _pedalWallUnwantedTimer = dt;
@@ -462,7 +465,7 @@ public sealed class LocomotionBoostController
             return _activeBoostMode;
         }
 
-        if (isClimbingAfterTick && PathNavigator.IsWallClimbAhead && !PathNavigator.IsDetouring && (goalPos.y > localPos.y + 0.5f))
+        if (isClimbingAfterTick && PathNavigator.IsWallClimbAhead && !PathNavigator.IsDetouring && effectiveClimbGoalDy > -1.0f)
         {
             Vector3 hint = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
             moveDriver.TryDriveRawStick(owner, new Vector2(0f, 1.0f), hint);
@@ -559,10 +562,10 @@ public sealed class LocomotionBoostController
 
         UpdateStaminaAndState(dt);
 
-        // Priority Gate A: Stamina Conservation (>= 600 floor), EXCEPT active upward cliff climbing finishes to the top
+        // Priority Gate A: Stamina Conservation (>= 600 floor), EXCEPT active upward cliff climbing finishes over the lip
         bool activeUpwardClimb = (_lastActorState == ActorStatePedalWall || _lastActorState == ActorStateClimb)
             && !isDetouring
-            && goalDy > 0.5f;
+            && goalDy > -1.0f;
         if (_conservingStamina && !activeUpwardClimb)
         {
             CancelBoostForStaminaConserve();

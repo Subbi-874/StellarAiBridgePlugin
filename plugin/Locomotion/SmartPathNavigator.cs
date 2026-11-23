@@ -372,7 +372,7 @@ public sealed class SmartPathNavigator
         bool allowLedgeClimb = false,
         SceneMovementProfile? zoneProfile = null,
         bool isWallClimbingNow = false,
-        bool isGlidingOrFlowingNow = false)
+        bool isAirborneDescentNow = false)
     {
         var profile = zoneProfile ?? LocomotionRules.GetZoneProfile(1);
         _activeProfile = profile;
@@ -471,7 +471,8 @@ public sealed class SmartPathNavigator
             out string? corridorLabel,
             out bool isDropOffStep,
             out bool isDropOffVault,
-            isWallClimbingNow: isWallClimbingNow);
+            isWallClimbingNow: isWallClimbingNow,
+            isAirborneDescentNow: isAirborneDescentNow);
 
         Vector3 toDesired = desiredPt - localPos;
         toDesired.y = 0f;
@@ -506,7 +507,7 @@ public sealed class SmartPathNavigator
                 isDropOffVault,
                 profile,
                 isWallClimbingNow,
-                isGlidingOrFlowingNow);
+                isAirborneDescentNow);
         }
 
         return ComputeBlindFallbackSteer(dt, localPos, desiredPt, wantDir, usingCorridor, corridorLabel);
@@ -676,7 +677,7 @@ public sealed class SmartPathNavigator
                 && (localPos.y - gy) >= 1.5f
                 && gy >= goalPos.y - 4.0f)
             {
-                dropTarget = distToGoal <= 10.0f ? goalPos : new Vector3(p.x, gy, p.z);
+                dropTarget = distToGoal <= 10.0f ? goalPos : new Vector3(goalPos.x, gy, goalPos.z);
                 return true;
             }
         }
@@ -880,9 +881,10 @@ public sealed class SmartPathNavigator
         Vector3 chosenTarget,
         bool localGrounded,
         bool allowSafeDrop = false,
-        float maxDropDepth = 3.8f)
+        float maxDropDepth = 3.8f,
+        bool isWallClimbingNow = false)
     {
-        if (!localGrounded || !_sensor.IsReady)
+        if (!localGrounded || isWallClimbingNow || !_sensor.IsReady)
             return chosenTarget;
 
         Vector3 outDir = chosenTarget - localPos;
@@ -916,7 +918,7 @@ public sealed class SmartPathNavigator
         bool isDropOffVault,
         SceneMovementProfile profile,
         bool isWallClimbingNow,
-        bool isGlidingOrFlowingNow = false)
+        bool isAirborneDescentNow = false)
     {
         IsDropVaultAhead = false;
         bool allowSafeDrop = ShouldAllowSafeDrop(localPos, desiredPt, goalPos, isDropOffStep, out float maxDropDepth);
@@ -935,28 +937,43 @@ public sealed class SmartPathNavigator
             _escapeHoldTimer = MathF.Max(0f, _escapeHoldTimer - dt);
 
         bool localGrounded = _sensor.HasGroundNear(localPos);
+        bool tightGrounded = _sensor.HasGroundNear(localPos, downDepth: 1.05f);
 
-        // Continue committed jump / cliff-drop trajectory until landed safely so NavMesh/ledge checks never reverse mid-air
+        // Continue committed jump / cliff-drop trajectory until actually landed so NavMesh/ledge checks never reverse mid-air
         if (_airCommitTimer > 0f)
         {
-            _airCommitTimer -= dt;
+            _airCommitTimer = MathF.Max(0f, _airCommitTimer - dt);
             _airCommitElapsed += dt;
             float flatDistTarget = HorizontalDist(localPos, _airCommitTarget);
             float flatProg = HorizontalDist(localPos, _airCommitStartPos);
-            bool landedAndDone = localGrounded && _airCommitElapsed >= 0.35f && (
-                flatDistTarget <= 1.4f
-                || (_airCommitMode == "cliff_drop" && localPos.y <= _airCommitTarget.y + 2.0f)
-                || (_airCommitMode == "gap_jump" && flatProg >= MathF.Max(1.6f, _airCommitGapDist * 0.55f)));
             bool hitTallWall = _airCommitElapsed >= 0.35f && _sensor.IsTallWallAhead(localPos, _airCommitDir, 1.25f);
-            if (_airCommitTimer <= 0f || landedAndDone || hitTallWall)
+            bool finishCommit = LocomotionRules.ShouldFinishAirCommit(
+                _airCommitMode,
+                _airCommitTimer,
+                _airCommitElapsed,
+                tightGrounded,
+                isAirborneDescentNow,
+                hitTallWall,
+                flatDistTarget,
+                flatProg,
+                localPos.y,
+                _airCommitTarget.y,
+                _airCommitGapDist);
+
+            if (finishCommit)
             {
                 string finishedMode = _airCommitMode;
+                bool landedGap = tightGrounded && !isAirborneDescentNow && !hitTallWall && finishedMode == "gap_jump";
                 ClearAirCommit();
-                if (landedAndDone && finishedMode == "gap_jump")
+                if (landedGap)
                     _postGapLandSettleTimer = 0.16f;
             }
             else
             {
+                // Keep commit active while genuinely airborne during a long cliff drop so ResolveDesiredWaypoint skips NavMesh
+                if (_airCommitMode == "cliff_drop" && _airCommitTimer <= 0f)
+                    _airCommitTimer = 0.25f;
+
                 IsDetouring = false;
                 IsWallAhead = false;
                 IsClimbableStepAhead = false;
@@ -968,7 +985,15 @@ public sealed class SmartPathNavigator
                 GapJumpDistance = _airCommitGapDist;
                 GapJumpHeightDelta = _airCommitGapDy;
                 ActiveNavMode = $"air_{_airCommitMode}";
-                return flatDistTarget >= 0.8f ? _airCommitTarget : (localPos + _airCommitDir * 4.0f);
+
+                Position3D airTarget = LocomotionRules.ComputeAirCommitSteerTarget(
+                    _airCommitMode,
+                    new Position3D(localPos.x, localPos.y, localPos.z),
+                    new Position3D(_airCommitTarget.x, _airCommitTarget.y, _airCommitTarget.z),
+                    _airCommitDir.x,
+                    _airCommitDir.z,
+                    new Position3D(goalPos.x, goalPos.y, goalPos.z));
+                return new Vector3(airTarget.X, airTarget.Y, airTarget.Z);
             }
         }
 
@@ -1024,29 +1049,26 @@ public sealed class SmartPathNavigator
             }
         }
 
-        // Catch unplanned falls when jumping off a cliff after the leader
+        // Catch unplanned falls and keep airborne descent/glide free of ground NavMesh/wall-follow jitter
         float goalHorizDist = HorizontalDist(localPos, goalPos);
         Vector3 flatGoalRaw = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
         Vector3 flatGoalDir = flatGoalRaw.sqrMagnitude > 1e-4f ? flatGoalRaw.normalized : wantDir;
         bool blockingRidgeToLowerGoal = HasBlockingRidgeTowardDistantLowerGoal(localPos, goalPos, goalHorizDist);
-        if (!localGrounded
+        if ((isAirborneDescentNow || !localGrounded)
+            && !tightGrounded
             && !isWallClimbingNow
-            && !_detourActive
-            && !blockingRidgeToLowerGoal
-            && _postWallDetachTimer <= 0f
-            && (localPos.y - goalPos.y) >= 1.8f
-            && goalHorizDist <= (profile.CanFlowGlide ? 55.0f : 35.0f))
+            && flatGoalRaw.sqrMagnitude > 1e-4f)
         {
-            if (flatGoalRaw.sqrMagnitude > 1e-4f)
+            if (!_detourActive
+                && !blockingRidgeToLowerGoal
+                && _postWallDetachTimer <= 0f
+                && (localPos.y - goalPos.y) >= 1.8f)
             {
-                float capDist = profile.CanFlowGlide ? 32.0f : 22.0f;
-                float airClearCheck = goalHorizDist > capDist
-                    ? MathF.Min(goalHorizDist, 14.0f)
-                    : MathF.Min(goalHorizDist, 4.8f);
-                if (!_sensor.IsTallWallAhead(localPos, flatGoalDir, MathF.Min(airClearCheck, 6.0f))
+                float airClearCheck = MathF.Min(goalHorizDist, 8.0f);
+                if (!_sensor.IsTallWallAhead(localPos, flatGoalDir, MathF.Min(airClearCheck, 5.0f))
                     && ProbeCorridorClearance(localPos, flatGoalDir, airClearCheck, 0.36f, checkGround: false) >= airClearCheck - 0.20f)
                 {
-                    float dropDur = Math.Clamp((localPos.y - goalPos.y) * 0.22f + 2.2f, 3.2f, 8.5f);
+                    float dropDur = Math.Clamp((localPos.y - goalPos.y) * 0.22f + 2.2f, 3.2f, 10.0f);
                     BeginAirCommit(localPos, goalPos, flatGoalDir, "cliff_drop", dropDur, MathF.Min(goalHorizDist, 8.0f), goalPos.y - localPos.y);
                     IsDetouring = false;
                     IsWallAhead = false;
@@ -1055,6 +1077,32 @@ public sealed class SmartPathNavigator
                     ActiveNavMode = "air_cliff_drop";
                     return goalPos;
                 }
+            }
+
+            if (isAirborneDescentNow)
+            {
+                if (_detourActive)
+                    ClearDetourState();
+
+                float chk = MathF.Min(goalHorizDist, 4.5f);
+                bool airForwardClear = !_sensor.IsTallWallAhead(localPos, flatGoalDir, MathF.Min(chk, 4.0f))
+                    && ProbeCorridorClearance(localPos, flatGoalDir, chk, 0.36f, checkGround: false) >= chk - 0.15f;
+
+                IsDetouring = false;
+                IsWallAhead = false;
+                IsClimbableStepAhead = false;
+                IsDropVaultAhead = false;
+                IsCliffAhead = false;
+
+                if (airForwardClear)
+                {
+                    ActiveNavMode = "air_glide_straight";
+                    return goalPos;
+                }
+
+                Vector3 openAirDir = PickBestOpenAirHeading(localPos, flatGoalDir);
+                ActiveNavMode = "air_avoid_wall";
+                return localPos + openAirDir * 8.0f;
             }
         }
 
@@ -1066,7 +1114,7 @@ public sealed class SmartPathNavigator
             && allowSafeDrop
             && TryDetectDirectCliffDrop(localPos, goalPos, maxDropDepth, out Vector3 directDropDest, out Vector3 directDropVec, out bool directDropNeedsVault))
         {
-            float dropDur = Math.Clamp((localPos.y - goalPos.y) * 0.22f + 2.2f, 3.0f, 8.5f);
+            float dropDur = Math.Clamp((localPos.y - goalPos.y) * 0.22f + 2.2f, 3.0f, 10.0f);
             BeginAirCommit(localPos, directDropDest, directDropVec, "cliff_drop", dropDur, MathF.Min(goalHorizDist, 8.0f), directDropDest.y - localPos.y);
             IsDetouring = false;
             IsWallAhead = false;
@@ -1077,7 +1125,7 @@ public sealed class SmartPathNavigator
             return directDropDest;
         }
 
-        if (isGlidingOrFlowingNow && _detourActive)
+        if (isAirborneDescentNow && _detourActive)
         {
             Vector3 flatToGoal = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
             if (flatToGoal.sqrMagnitude >= 1e-4f)
@@ -1108,7 +1156,7 @@ public sealed class SmartPathNavigator
             IsWallAhead = true;
             IsClimbableStepAhead = false;
             ActiveNavMode = $"corner_escape(stage{_cornerEscapeStage})";
-            return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.5f, localGrounded, allowSafeDrop, maxDropDepth);
+            return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.5f, localGrounded, allowSafeDrop, maxDropDepth, isWallClimbingNow);
         }
 
         if (!_detourActive && !isWallClimbingNow && _airCommitTimer <= 0f)
@@ -1199,7 +1247,7 @@ public sealed class SmartPathNavigator
                     if (clearDir.sqrMagnitude < 1e-4f)
                         clearDir = wantDir;
                     ActiveNavMode = "clearing_corner";
-                    return ApplyRimHoldIfNeeded(localPos, localPos + clearDir * 5.0f, localGrounded, allowSafeDrop, maxDropDepth);
+                    return ApplyRimHoldIfNeeded(localPos, localPos + clearDir * 5.0f, localGrounded, allowSafeDrop, maxDropDepth, isWallClimbingNow);
                 }
 
                 ClearDetourState();
@@ -1238,7 +1286,7 @@ public sealed class SmartPathNavigator
                 : (usingCorridor
                     ? (corridorLabel ?? $"navmesh({_wpIndex + 1}/{_waypoints.Count})")
                     : (lowBlocked ? "step_up" : "direct"));
-            return ApplyRimHoldIfNeeded(localPos, desiredPt, localGrounded, allowSafeDrop, maxDropDepth);
+            return ApplyRimHoldIfNeeded(localPos, desiredPt, localGrounded, allowSafeDrop, maxDropDepth, isWallClimbingNow);
         }
 
         // Before wall-following around an air gap, check if we can jump directly to a verified landing stone (one stone at a time)
@@ -1275,19 +1323,26 @@ public sealed class SmartPathNavigator
 
         if (!_detourActive || isWallClimbingNow || _wallClimbAttemptTimer > 0f || canReenterClimbFromDetour)
         {
-            if (isWallClimbingNow && (goalDyUp > 0.5f || ridgeClimbAllowed) && _wallClimbRejectTimer <= 0f)
+            if (isWallClimbingNow && (goalDyUp > -1.0f || ridgeClimbAllowed) && profile.CanWallClimb)
             {
-                bool straightUpBlocked = _sensor.HasOverheadCeiling(localPos, wantDir, verticalOnly: true);
+                bool tightCeilingBlocked = _sensor.HasOverheadCeiling(localPos, wantDir, checkHeight: 2.6f, verticalOnly: true);
                 if (_wallClimbAttemptTimer <= 0f)
                     _wallClimbPeakY = localPos.y;
                 _wallClimbAttemptTimer += dt;
-                if (localPos.y >= _wallClimbPeakY + 0.75f)
+                if (localPos.y >= _wallClimbPeakY + 0.55f)
                 {
                     _wallClimbPeakY = localPos.y;
                     _wallClimbAttemptTimer = 0.05f;
+                    _wallClimbRejectTimer = 0f;
                 }
 
-                if (!straightUpBlocked && _wallClimbAttemptTimer < 3.0f)
+                if (LocomotionRules.ShouldKeepActiveWallClimb(
+                    isWallClimbingNow,
+                    goalDyUp,
+                    ridgeClimbAllowed,
+                    profile.CanWallClimb,
+                    _wallClimbAttemptTimer,
+                    tightCeilingBlocked))
                 {
                     if (_detourActive)
                         ClearDetourState();
@@ -1454,7 +1509,7 @@ public sealed class SmartPathNavigator
             if (_escapeHoldTimer > 0f && _committedSteerDir.sqrMagnitude > 0.25f)
             {
                 ActiveNavMode = $"corner_escape(stage{_cornerEscapeStage})";
-                return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.5f, localGrounded, allowSafeDrop, maxDropDepth);
+                return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.5f, localGrounded, allowSafeDrop, maxDropDepth, isWallClimbingNow);
             }
 
             _travelHeading = StepCorridorHeading(localPos, wantDir, localGrounded, allowSafeDrop, maxDropDepth);
@@ -1471,7 +1526,7 @@ public sealed class SmartPathNavigator
         ActiveNavMode = usingCorridor
             ? $"{corridorPrefix}({relYaw:+0;-0}deg,{_travelledPathMeters:F1}m)"
             : $"wall_follow({relYaw:+0;-0}deg,{_travelledPathMeters:F1}m)";
-        return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.0f, localGrounded, allowSafeDrop, maxDropDepth);
+        return ApplyRimHoldIfNeeded(localPos, localPos + _committedSteerDir * 5.0f, localGrounded, allowSafeDrop, maxDropDepth, isWallClimbingNow);
     }
 
     private bool CanExitDetourToDirect(
@@ -1909,6 +1964,26 @@ public sealed class SmartPathNavigator
         return desiredPt;
     }
 
+    private Vector3 PickBestOpenAirHeading(Vector3 localPos, Vector3 wantDir)
+    {
+        float[] airOffsets = { 30f, -30f, 60f, -60f, 90f, -90f, 125f, -125f, 160f, -160f, 180f };
+        Vector3 bestDir = wantDir;
+        float bestScore = float.NegativeInfinity;
+        for (int i = 0; i < airOffsets.Length; i++)
+        {
+            float yaw = airOffsets[i];
+            Vector3 cand = RotateY(wantDir, yaw);
+            float clear = ProbeCorridorClearance(localPos, cand, 8.0f, 0.36f, checkGround: false);
+            float score = clear * 1.15f + MathF.Cos(yaw * Deg2Rad) * 1.25f;
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestDir = cand;
+            }
+        }
+        return bestDir.sqrMagnitude > 1e-4f ? bestDir.normalized : wantDir;
+    }
+
     // ───────── Layer 1 (NavMesh) + Layer 1.5 (2.5D Physics A*) ─────────
 
     private Vector3 ResolveDesiredWaypoint(
@@ -1921,7 +1996,8 @@ public sealed class SmartPathNavigator
         out string? corridorLabel,
         out bool isDropOffStep,
         out bool isDropOffVault,
-        bool isWallClimbingNow = false)
+        bool isWallClimbingNow = false,
+        bool isAirborneDescentNow = false)
     {
         usingCorridor = false;
         corridorLabel = null;
@@ -1940,6 +2016,14 @@ public sealed class SmartPathNavigator
             isDropOffStep = _airCommitMode == "cliff_drop";
             HasIntermediateWaypoint = false;
             return _airCommitTarget;
+        }
+
+        // While genuinely airborne (falling/floating/gliding >1.25m above ground), skip ground NavMesh/A*
+        // so cliff-surface projections never pull the character back toward the ledge mid-flight.
+        if (isAirborneDescentNow && !isWallClimbingNow && _sensor.IsReady && !_sensor.HasGroundNear(localPos, downDepth: 1.25f))
+        {
+            HasIntermediateWaypoint = false;
+            return goalPos;
         }
 
         float distToGoal = HorizontalDist(localPos, goalPos);
@@ -1973,32 +2057,32 @@ public sealed class SmartPathNavigator
 
         bool directClimbReady = false;
         Vector3 flatClimbDir = Vector3.zero;
-        bool climbingUpNow = isWallClimbingNow && (goalPos.y - localPos.y) > 0.5f;
+        bool climbingUpNow = isWallClimbingNow && (goalPos.y - localPos.y) > -1.0f;
         if (_sensor.IsReady
             && _activeProfile.CanWallClimb
-            && _wallClimbRejectTimer <= 0f
-            && !(_detourActive && _travelledPathMeters >= 12.0f)
-            && (climbingUpNow || ((goalPos.y - localPos.y) >= 2.0f && distToGoal <= 35.0f)))
+            && (climbingUpNow
+                || (_wallClimbRejectTimer <= 0f
+                    && !(_detourActive && _travelledPathMeters >= 12.0f)
+                    && (goalPos.y - localPos.y) >= 2.0f
+                    && distToGoal <= 35.0f)))
         {
             Vector3 toClimbGoal = new(goalPos.x - localPos.x, 0f, goalPos.z - localPos.z);
             if (toClimbGoal.sqrMagnitude >= 1e-4f)
             {
                 flatClimbDir = toClimbGoal.normalized;
-                if (!_sensor.HasOverheadCeiling(localPos, flatClimbDir))
+                if (climbingUpNow)
                 {
-                    if (climbingUpNow)
-                    {
+                    if (!_sensor.HasOverheadCeiling(localPos, flatClimbDir, checkHeight: 2.6f, verticalOnly: true))
                         directClimbReady = true;
-                    }
-                    else
-                    {
-                        float lookDist = Math.Clamp(distToGoal, 1.5f, 8.0f);
-                        float climbWallClear = ProbeCorridorClearance(localPos, flatClimbDir, lookDist, 0.36f, checkGround: false);
-                        bool safeApproachGround = climbWallClear <= 1.25f
-                            || _sensor.HasGroundNear(localPos + flatClimbDir * MathF.Min(climbWallClear * 0.5f, 1.25f), downDepth: 2.2f);
-                        if (safeApproachGround && climbWallClear < lookDist - 0.15f)
-                            directClimbReady = true;
-                    }
+                }
+                else if (!_sensor.HasOverheadCeiling(localPos, flatClimbDir))
+                {
+                    float lookDist = Math.Clamp(distToGoal, 1.5f, 8.0f);
+                    float climbWallClear = ProbeCorridorClearance(localPos, flatClimbDir, lookDist, 0.36f, checkGround: false);
+                    bool safeApproachGround = climbWallClear <= 1.25f
+                        || _sensor.HasGroundNear(localPos + flatClimbDir * MathF.Min(climbWallClear * 0.5f, 1.25f), downDepth: 2.2f);
+                    if (safeApproachGround && climbWallClear < lookDist - 0.15f)
+                        directClimbReady = true;
                 }
             }
         }

@@ -87,6 +87,7 @@ public sealed class AutoQuestBehavior : IBehavior, INavigationRecoverableBehavio
     private float _hudSyncCooldown;
     private float _hudSyncProbeCooldown;
     private int _interactConsecutiveTries;
+    private long _lastInteractFailLogMs;
     private int _teleportAttempts;
     private int _lastAttemptFromSceneId;
     private int _intraWarpedStepId;
@@ -1341,7 +1342,17 @@ public sealed class AutoQuestBehavior : IBehavior, INavigationRecoverableBehavio
         QuestRuntimeState st,
         QuestGoalInfo goal)
     {
-        if (goal.Kind == QuestGoalKind.InteractOperate && _activeSearchCandidate != null && TryTickSearchAreaSweep(dt, mySceneId, localPos, st, goal, immediateSweep: true))
+        bool isInteractingPhase = string.Equals(_phase, "interacting", StringComparison.Ordinal);
+        bool deferSearchSweep = QuestRules.ShouldDeferSearchAreaSweepForActiveInteract(
+            st.HasMatchingInteract,
+            isInteractingPhase,
+            _interactConsecutiveTries,
+            goal.Kind);
+
+        if (goal.Kind == QuestGoalKind.InteractOperate
+            && !deferSearchSweep
+            && _activeSearchCandidate != null
+            && TryTickSearchAreaSweep(dt, mySceneId, localPos, st, goal, immediateSweep: true))
             return;
 
         if (horizDist > 3.6f)
@@ -1362,7 +1373,7 @@ public sealed class AutoQuestBehavior : IBehavior, INavigationRecoverableBehavio
                 _interactCooldown = 0.6f;
                 if (huggingTarget)
                 {
-                    if (goal.Kind == QuestGoalKind.InteractOperate && TryTickSearchAreaSweep(dt, mySceneId, localPos, st, goal))
+                    if (goal.Kind == QuestGoalKind.InteractOperate && !deferSearchSweep && TryTickSearchAreaSweep(dt, mySceneId, localPos, st, goal))
                         return;
                     _boost.Reset();
                     _moveDriver.Stop(this);
@@ -1371,9 +1382,14 @@ public sealed class AutoQuestBehavior : IBehavior, INavigationRecoverableBehavio
                     return;
                 }
             }
-            else if (huggingTarget || (string.Equals(_phase, "interacting", StringComparison.Ordinal) && _interactConsecutiveTries < 2))
+            else if (QuestRules.ShouldHoldStillForQuestInteract(
+                st.HasMatchingInteract,
+                huggingTarget,
+                isInteractingPhase,
+                _interactConsecutiveTries,
+                goal.Kind))
             {
-                if (goal.Kind == QuestGoalKind.InteractOperate && huggingTarget && TryTickSearchAreaSweep(dt, mySceneId, localPos, st, goal))
+                if (goal.Kind == QuestGoalKind.InteractOperate && huggingTarget && !deferSearchSweep && TryTickSearchAreaSweep(dt, mySceneId, localPos, st, goal))
                     return;
                 _boost.Reset();
                 _moveDriver.Stop(this);
@@ -1503,6 +1519,14 @@ public sealed class AutoQuestBehavior : IBehavior, INavigationRecoverableBehavio
         float cAbsDy = MathF.Abs(cdy);
         float cDist3D = MathF.Sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
 
+        if (st.HasMatchingInteract && _interactCooldown > 0f && string.Equals(_phase, "interacting", StringComparison.Ordinal))
+        {
+            _boost.Reset();
+            _moveDriver.Stop(this);
+            if (_mount.IsRiding()) _mount.Dismount();
+            return true;
+        }
+
         if (st.HasMatchingInteract && _interactCooldown <= 0f)
         {
             bool isZoneCand = string.Equals(cand.EntityType, "Zone", StringComparison.Ordinal);
@@ -1589,16 +1613,22 @@ public sealed class AutoQuestBehavior : IBehavior, INavigationRecoverableBehavio
         if (res["ok"]?.GetValue<bool>() != true)
         {
             string err = res["error"]?.GetValue<string>() ?? "unknown";
-            if (!string.Equals(err, "no_interaction_data", StringComparison.Ordinal))
-                _services.Log.Debug($"[AgyBridge][AutoQuest] TryInteractForQuest failed (uid={effectiveUid}, cfg={targetCfgId}, labels='{st.InRangeInteractLabels}'): {err}");
+            long nowMs = Environment.TickCount64;
+            if (!string.Equals(err, "no_interaction_data", StringComparison.Ordinal) && nowMs - _lastInteractFailLogMs >= 3000L)
+            {
+                _lastInteractFailLogMs = nowMs;
+                int bestScore = res["best_score"]?.GetValue<int>() ?? -999;
+                int checkedCnt = res["checked"]?.GetValue<int>() ?? 0;
+                _services.Log.Warning($"[AgyBridge][AutoQuest] TryInteractForQuest failed (q=#{_activeQuestId}, uid={effectiveUid}, cfg={targetCfgId}, kind={goal.Kind}, labels='{st.InRangeInteractLabels}', checked={checkedCnt}, bestScore={bestScore}): {err}");
+            }
             return false;
         }
 
         _interactConsecutiveTries++;
         _boost.Reset();
         _moveDriver.Stop(this);
-        _interactCooldown = InteractIntervalSec;
         string lbl = res["label"]?.GetValue<string>() ?? "";
+        _interactCooldown = QuestRules.ComputeQuestInteractRetryCooldown(goal.Kind, lbl);
         _phase = "interacting";
         _detail = !string.IsNullOrEmpty(lbl)
             ? $"[{_activeQuestName}] '{lbl}' 상호작용 시도 ({goal.CurCount}/{goal.TargetCount})"

@@ -252,4 +252,141 @@ public static class LocomotionRules
 
         return true;
     }
+
+    public const float MaxAirborneCliffDropCommitSec = 18.0f;
+
+    /// <summary>
+    /// Determines whether an active airborne commit (<c>cliff_drop</c> or <c>gap_jump</c>) should finish.
+    /// <c>cliff_drop</c> stays committed while genuinely airborne (up to <see cref="MaxAirborneCliffDropCommitSec"/>)
+    /// and only finishes on actual tight ground contact (not a 3.8m cliff-slope proximity hit).
+    /// </summary>
+    public static bool ShouldFinishAirCommit(
+        string commitMode,
+        float commitTimerRemaining,
+        float commitElapsedSec,
+        bool tightGrounded,
+        bool isAirborneDescentState,
+        bool hitTallWall,
+        float flatDistToTarget,
+        float flatProgressFromStart,
+        float localY,
+        float targetY,
+        float gapDist)
+    {
+        if (commitElapsedSec >= 0.35f && hitTallWall)
+            return true;
+
+        bool trulyLanded = tightGrounded && !isAirborneDescentState;
+
+        if (string.Equals(commitMode, "cliff_drop", StringComparison.Ordinal))
+        {
+            if (commitElapsedSec >= MaxAirborneCliffDropCommitSec)
+                return true;
+
+            if (trulyLanded && commitElapsedSec >= 0.35f)
+            {
+                return flatDistToTarget <= 1.4f
+                    || localY <= targetY + 2.0f
+                    || commitTimerRemaining <= 0f;
+            }
+
+            // Still airborne: do NOT drop back to ground NavMesh/wall-follow just because the initial estimate expired.
+            return false;
+        }
+
+        if (commitTimerRemaining <= 0f)
+            return true;
+
+        if (trulyLanded && commitElapsedSec >= 0.35f)
+        {
+            return flatDistToTarget <= 1.4f
+                || flatProgressFromStart >= MathF.Max(1.6f, gapDist * 0.55f);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Computes the mid-air horizontal steer target for an active <c>cliff_drop</c> or <c>gap_jump</c> commit.
+    /// Prevents boomerang reversals when the character flies past a near-rim drop probe point.
+    /// </summary>
+    public static Position3D ComputeAirCommitSteerTarget(
+        string commitMode,
+        Position3D localPos,
+        Position3D commitTarget,
+        float commitDirX,
+        float commitDirZ,
+        Position3D goalPos)
+    {
+        float dirLen = MathF.Sqrt(commitDirX * commitDirX + commitDirZ * commitDirZ);
+        float cDirX = dirLen > 1e-4f ? commitDirX / dirLen : 0f;
+        float cDirZ = dirLen > 1e-4f ? commitDirZ / dirLen : 1f;
+
+        float toTargetX = commitTarget.X - localPos.X;
+        float toTargetZ = commitTarget.Z - localPos.Z;
+        float flatDistTarget = MathF.Sqrt(toTargetX * toTargetX + toTargetZ * toTargetZ);
+        float targetForwardDot = flatDistTarget > 1e-4f
+            ? ((toTargetX * cDirX + toTargetZ * cDirZ) / flatDistTarget)
+            : 0f;
+
+        if (string.Equals(commitMode, "cliff_drop", StringComparison.Ordinal))
+        {
+            float toGoalX = goalPos.X - localPos.X;
+            float toGoalZ = goalPos.Z - localPos.Z;
+            float goalDist = MathF.Sqrt(toGoalX * toGoalX + toGoalZ * toGoalZ);
+            if (goalDist <= 0.8f)
+                return goalPos;
+
+            float goalForwardDot = (toGoalX * cDirX + toGoalZ * cDirZ) / goalDist;
+            if (goalDist > 8.0f && goalForwardDot >= 0.45f)
+                return goalPos;
+
+            if (flatDistTarget >= 1.2f && targetForwardDot >= 0.35f)
+                return commitTarget;
+
+            if (goalDist > 1.2f && goalForwardDot >= 0.35f)
+                return goalPos;
+
+            return new Position3D(localPos.X + cDirX * 12.0f, commitTarget.Y, localPos.Z + cDirZ * 12.0f);
+        }
+
+        // gap_jump: steer accurately onto the landing stone while it is still ahead, then keep moving forward.
+        if (flatDistTarget >= 0.8f && targetForwardDot > 0.0f)
+            return commitTarget;
+
+        return new Position3D(localPos.X + cDirX * 4.0f, commitTarget.Y, localPos.Z + cDirZ * 4.0f);
+    }
+
+    /// <summary>
+    /// Returns true while an already-climbing character (<c>ActorStatePedalWall</c> or <c>ActorStateClimb</c>)
+    /// should finish ascending to and over the cliff lip instead of being interrupted into detour/detach.
+    /// </summary>
+    public static bool ShouldKeepActiveWallClimb(
+        bool isWallClimbingNow,
+        float goalDyUp,
+        bool ridgeClimbAllowed,
+        bool canWallClimb,
+        float climbStallSec,
+        bool tightCeilingBlocked)
+    {
+        if (!isWallClimbingNow || !canWallClimb)
+            return false;
+
+        if (!(goalDyUp > -1.0f || ridgeClimbAllowed))
+            return false;
+
+        float maxStallSec = tightCeilingBlocked ? 1.2f : 3.0f;
+        return climbStallSec < maxStallSec;
+    }
+
+    /// <summary>
+    /// Counts either horizontal travel (&gt;=1.25m) or vertical upward climb (&gt;=0.75m when goal is not well below)
+    /// as real progress during <c>ActorStatePedalWall</c>, preventing mid-climb force-detach bounces.
+    /// </summary>
+    public static bool IsPedalWallMakingProgress(
+        float movedHorizSq,
+        float riseY,
+        float effectiveClimbGoalDy)
+        => movedHorizSq >= 1.25f * 1.25f
+           || (effectiveClimbGoalDy > -1.0f && riseY >= 0.75f);
 }
