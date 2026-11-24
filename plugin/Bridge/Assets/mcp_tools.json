@@ -349,6 +349,26 @@
     }
   },
   {
+    "name": "list_activities",
+    "description": "Lists timed/casual attractions and event booth NPCs (such as Meteor Island / 유성도 limited-time events like '레이저 회전', '물고기 폭주', etc.) along with their NPC name, scene coordinates, and whether each activity is currently open.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "open_only": {
+          "default": false,
+          "title": "Open Only",
+          "type": "boolean"
+        }
+      },
+      "title": "list_activitiesArguments",
+      "type": "object"
+    }
+  },
+  {
     "name": "teleport_to_place",
     "description": "\nImmediately enters or teleports to a destination by name, alias, or ID:\n- Guild Hall: '길드 홈', '길드홀', '길드 이벤트 센터'\n- Personal Home: '마이홈', '내 집', '가든 주택'\n- Exit current hub: '나가기', '퇴장'\n- Any map or warp point name: '아스텔리즈', '개척국', '타륜 주점', '아스테리아 평원', '바하마르 고원', etc.\n",
     "inputSchema": {
@@ -1599,6 +1619,46 @@
         }
       },
       "title": "auto_questArguments",
+      "type": "object"
+    }
+  },
+  {
+    "name": "auto_interact",
+    "description": "Repeatedly presses eligible in-range [F] interaction prompts until stopped, count reached, or duration elapses. When 'activity' (or 'activity_id') is provided (e.g. '레이저 회전', '유성도 한정'), dynamically locates the NPC, navigates to them across maps/portals, and keeps re-entering until stopped.",
+    "inputSchema": {
+      "properties": {
+        "activity": {
+          "default": "",
+          "title": "Activity",
+          "type": "string"
+        },
+        "activity_id": {
+          "default": 0,
+          "title": "Activity Id",
+          "type": "integer"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "interval_sec": {
+          "default": 0.8,
+          "title": "Interval Sec",
+          "type": "number"
+        },
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "duration_sec": {
+          "default": 0.0,
+          "title": "Duration Sec",
+          "type": "number"
+        }
+      },
+      "title": "auto_interactArguments",
       "type": "object"
     }
   }

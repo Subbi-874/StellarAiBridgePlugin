@@ -93,7 +93,7 @@
   },
   {
     "name": "move_or_navigate",
-    "description": "캐릭터 이동 및 위치 제어(대상 따라가기, 거점 순간이동, 채널 이동, 던전 퇴장, 몬스터 찾기, 이동 기믹 사용, 모든 행동 중지)를 실행합니다.",
+    "description": "캐릭터 이동 및 위치 제어(대상 따라가기, 거점 순간이동, 채널 이동, 던전 퇴장, 몬스터 찾기, 이동 기믹 사용, 제자리 [F] 상호작용 연타, 모든 행동 중지)를 실행합니다.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -107,6 +107,7 @@
             "leave_dungeon",
             "seek_monster",
             "use_gimmick",
+            "auto_interact",
             "auto_quest",
             "stop"
           ]
@@ -134,6 +135,30 @@
         "gimmick": {
           "type": "string",
           "description": "사용할 이동 기믹 이름/키워드 (use_gimmick용)"
+        },
+        "activity": {
+          "type": "string",
+          "description": "유성도 한정 컨텐츠/게임 부스 이름 또는 NPC 이름 (auto_interact용, 예: '레이저 회전', '물고기 폭주', '유성도 한정' — 지정 시 해당 NPC 앞으로 이동해 중단 시까지 계속 상호작용 재입장)"
+        },
+        "activity_id": {
+          "type": "integer",
+          "description": "컨텐츠 숫자 ID (auto_interact용, 선택)"
+        },
+        "label": {
+          "type": "string",
+          "description": "반복 누를 [F] 상호작용 버튼 필터 키워드 (auto_interact용, 예: 입장·참여·시작, 비우면 일반 상호작용 모두)"
+        },
+        "interval_sec": {
+          "type": "number",
+          "description": "상호작용 재시도 간격(초, auto_interact용, 기본 0.8)"
+        },
+        "count": {
+          "type": "integer",
+          "description": "반복 횟수 (auto_interact용, 0 또는 생략 시 멈출 때까지 무한 연타)"
+        },
+        "duration_sec": {
+          "type": "number",
+          "description": "최대 지속 시간(초, auto_interact용, 0이면 무제한)"
         },
         "continuous": {
           "type": "boolean",

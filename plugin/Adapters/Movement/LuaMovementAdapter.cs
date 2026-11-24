@@ -1364,6 +1364,239 @@ return { ok = false, error = 'Prompt left range before activation' }
         return ev["ok"]?.GetValue<bool>() == true && ev["result"] is JsonObject ro ? ro : null;
     }
 
+    public JsonObject? TryTriggerInRangeInteraction(string? labelFilter)
+    {
+        if (!_lua.IsReady) return null;
+
+        string filter = (labelFilter ?? "").Trim();
+        string header = $"local filterRaw = {LuaLiteral.Quote(filter)}\n";
+        var ev = _lua.Eval(header + @"
+if not Z.InteractionMgr then return { ok = false, reason = 'interaction_mgr_unavailable' } end
+local idata = Z.DataMgr and Z.DataMgr.Get('interaction_data')
+local list = idata and idata.GetData and idata:GetData()
+if type(list) ~= 'table' then return { ok = false, reason = 'interaction_data_empty' } end
+
+local BLOCKED_WORDS = {
+  '나가기', '퇴장', '포기', 'exit', 'leave', 'abandon', '退出', '諦め',
+  '앉기', '상점', '교환', '낚시', 'sit', 'shop', 'store', 'exchange', 'fish', '座る', 'ショップ', '釣り'
+}
+local function isBlockedWord(low)
+  for _, w in ipairs(BLOCKED_WORDS) do
+    if low:find(w, 1, true) then return true end
+  end
+  return false
+end
+
+local filterLow = tostring(filterRaw or ''):lower()
+for _, e in pairs(list) do
+  local rawU = e.GetUuid and e:GetUuid() or nil
+  local rawC = e.GetInteractionCfgId and e:GetInteractionCfgId() or 0
+  local rawT = e.GetTemplateId and e:GetTemplateId() or 0
+  local rawS = e.GetSeatGroupIndex and e:GetSeatGroupIndex() or 0
+  local txt = ''
+  pcall(function() txt = tostring(e:GetContentStr() or '') end)
+  local low = txt:lower()
+
+  local matches = false
+  if filterLow ~= '' then
+    matches = (low:find(filterLow, 1, true) ~= nil)
+  else
+    matches = not isBlockedWord(low)
+  end
+
+  if matches and rawU ~= nil then
+    local condOk = true
+    pcall(function() condOk = Z.InteractionMgr:CheckCondition(rawU, rawC, rawS, false) end)
+    if condOk ~= false then
+      local okB, errB = pcall(function() Z.InteractionMgr:BeginInteraction(rawU, rawC, rawT, rawS) end)
+      return {
+        ok = okB,
+        label = txt,
+        uuid = tonumber(rawU or 0) or 0,
+        cfg_id = tonumber(rawC or 0) or 0,
+        error = okB and nil or tostring(errB)
+      }
+    end
+  end
+end
+return { ok = false, reason = 'no_prompt_in_range' }
+");
+        return ev["ok"]?.GetValue<bool>() == true && ev["result"] is JsonObject ro
+            ? ro
+            : new JsonObject { ["ok"] = false, ["reason"] = "lua_eval_failed" };
+    }
+
+    public JsonObject ListTimedActivitiesRaw(string? queryFilter = null, bool openOnly = false)
+    {
+        if (!_lua.IsReady)
+            return new JsonObject { ["ok"] = false, ["error"] = "Lua not ready" };
+
+        string qf = (queryFilter ?? "").Trim();
+        string header =
+            $"local qRaw = {LuaLiteral.Quote(qf)}\n"
+            + $"local openOnly = {(openOnly ? "true" : "false")}\n";
+
+        var ev = _lua.Eval(header + @"
+local sat = Z.TableMgr and Z.TableMgr.GetTable('SeasonActTableMgr')
+if not sat or not sat.GetDatas then
+  return { ok = false, error = 'SeasonActTableMgr unavailable' }
+end
+
+local npcGlobal = Z.TableMgr.GetTable('NpcEntityGlobalTableMgr')
+local soGlobal = Z.TableMgr.GetTable('SceneObjectEntityGlobalTableMgr')
+local npcTbl = Z.TableMgr.GetTable('NpcTableMgr')
+local soTbl = Z.TableMgr.GetTable('SceneObjectTableMgr')
+local sceneTbl = Z.TableMgr.GetTable('SceneTableMgr')
+local off = (Z.ConstValue and Z.ConstValue.GlobalLevelIdOffset) or 10000000
+
+local function norm(s)
+  return tostring(s or ''):lower():gsub('[%s%p·・]+', '')
+end
+local qNorm = norm(qRaw)
+
+local function stripHtml(s)
+  return tostring(s or ''):gsub('<br>', ' '):gsub('<[^>]+>', ''):gsub('%s+', ' '):match('^%s*(.-)%s*$') or ''
+end
+
+local items = {}
+for id, row in pairs(sat.GetDatas()) do
+  local funcType = tonumber(row.FunctionType or 0) or 0
+  local qjt = tonumber(row.QuickJumpType or 0) or 0
+  local qjp = row.QuickJumpParam
+  if funcType == 4 and qjt == 1 and type(qjp) == 'table' then
+    local sid = tonumber(qjp[1] or 0) or 0
+    local eid = tonumber(qjp[3] or 0) or 0
+    if sid > 0 and eid > 0 then
+      local gkey = sid * off + eid
+      local entKind = 'none'
+      local entCfgId = 0
+      local entName = ''
+      local ex, ey, ez = 0, 0, 0
+      local hasPos = false
+
+      local nrow = npcGlobal and (npcGlobal.GetRow(gkey, true) or npcGlobal.GetRow(eid, true)) or nil
+      if nrow then
+        entKind = 'npc_global'
+        pcall(function()
+          local p = nrow.Position
+          if p then
+            ex, ey, ez = tonumber(p[1] or 0) or 0, tonumber(p[2] or 0) or 0, tonumber(p[3] or 0) or 0
+            hasPos = (math.abs(ex) > 0.001 or math.abs(ez) > 0.001)
+          end
+        end)
+        pcall(function() entCfgId = tonumber(nrow.Id or 0) or 0 end)
+        if entCfgId > 0 and npcTbl then
+          pcall(function()
+            local nr = npcTbl.GetRow(entCfgId, true)
+            if nr and nr.Name then entName = tostring(nr.Name) end
+          end)
+        end
+      end
+
+      if not hasPos and soGlobal then
+        local srow = soGlobal.GetRow(gkey, true) or soGlobal.GetRow(eid, true)
+        if srow then
+          entKind = 'scene_obj_global'
+          pcall(function()
+            local p = srow.Position
+            if p then
+              ex, ey, ez = tonumber(p[1] or 0) or 0, tonumber(p[2] or 0) or 0, tonumber(p[3] or 0) or 0
+              hasPos = (math.abs(ex) > 0.001 or math.abs(ez) > 0.001)
+            end
+          end)
+          pcall(function() entCfgId = tonumber(srow.Id or 0) or 0 end)
+          if entCfgId > 0 and soTbl then
+            pcall(function()
+              local sr = soTbl.GetRow(entCfgId, true)
+              if sr and sr.Name then entName = tostring(sr.Name) end
+            end)
+          end
+        end
+      end
+
+      if hasPos then
+        local actName = tostring(row.Name or '')
+        local actTag = tostring(row.ActTag or '')
+        local actType = tonumber(row.ActType or 0) or 0
+        local openTimer = tonumber(row.OpenTimerId or 0) or 0
+        local isTimed = (openTimer > 0)
+        local isInTime = true
+        local leftSec = 0
+
+        if isTimed and Z.TimeTools then
+          if Z.TimeTools.CheckIsInTimeByTimeId then
+            local okT, resT = pcall(function() return Z.TimeTools.CheckIsInTimeByTimeId(openTimer) end)
+            if okT then isInTime = (resT == true) end
+          end
+          if isInTime and Z.TimeTools.GetLeftTimeByTimerId then
+            local okL, resL = pcall(function() return Z.TimeTools.GetLeftTimeByTimerId(openTimer) end)
+            if okL and type(resL) == 'number' and resL > 0 then leftSec = math.floor(resL) end
+          end
+        end
+
+        local sceneName = ''
+        if sceneTbl then
+          pcall(function()
+            local sr = sceneTbl.GetRow(sid, true)
+            if sr and sr.Name then sceneName = tostring(sr.Name) end
+          end)
+        end
+
+        local matchesFilter = true
+        if qNorm ~= '' then
+          matchesFilter = norm(actName):find(qNorm, 1, true) ~= nil
+            or norm(entName):find(qNorm, 1, true) ~= nil
+            or norm(actTag):find(qNorm, 1, true) ~= nil
+            or norm(sceneName):find(qNorm, 1, true) ~= nil
+        end
+
+        if matchesFilter and (not openOnly or isInTime) then
+          items[#items + 1] = {
+            id = tonumber(id) or 0,
+            name = actName,
+            act_tag = actTag,
+            act_type = actType,
+            scene_id = sid,
+            scene_name = sceneName,
+            npc_name = entName,
+            npc_cfg_id = entCfgId,
+            ent_kind = entKind,
+            x = ex,
+            y = ey,
+            z = ez,
+            open_timer = openTimer,
+            is_timed = isTimed,
+            is_in_time = isInTime,
+            left_sec = leftSec,
+            schedule_desc = stripHtml(row.OtherDes)
+          }
+        end
+      end
+    end
+  end
+end
+
+local function rankGroup(a)
+  if a.is_in_time and a.act_type == 3 then return 1 end
+  if a.is_in_time and a.is_timed then return 2 end
+  if a.is_in_time then return 3 end
+  if a.act_type == 3 then return 4 end
+  return 5
+end
+
+table.sort(items, function(a, b)
+  local ra, rb = rankGroup(a), rankGroup(b)
+  if ra ~= rb then return ra < rb end
+  return a.id < b.id
+end)
+
+return { ok = true, activities = items }
+");
+        return ev["ok"]?.GetValue<bool>() == true && ev["result"] is JsonObject ro
+            ? ro
+            : new JsonObject { ["ok"] = false, ["error"] = ev["error"]?.GetValue<string>() ?? "lua_eval_failed" };
+    }
+
     private const string SharedGimmickScanLua = @"
 local itbl = Z.TableMgr and Z.TableMgr.GetTable('InteractiveTableMgr')
 local iov = Z.TableMgr and Z.TableMgr.GetTable('InteractionOverrideTableMgr')

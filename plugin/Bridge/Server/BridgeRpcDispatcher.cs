@@ -748,6 +748,13 @@ public sealed class BridgeRpcDispatcher
                     ["query"] = JsonNodeHelpers.GetString(args, "query", ""),
                 }, ct: ct).ConfigureAwait(false);
 
+            case "list_activities":
+                return await DispatchMcpRpc("list_activities", new JsonObject
+                {
+                    ["query"] = JsonNodeHelpers.GetFirstString(args, "query", "filter", "name"),
+                    ["open_only"] = JsonNodeHelpers.GetBool(args, "open_only", false),
+                }, ct: ct).ConfigureAwait(false);
+
             case "teleport_to_place":
                 return await ToolTeleportToPlaceAsync(
                     JsonNodeHelpers.GetString(args, "destination", ""),
@@ -1163,6 +1170,30 @@ public sealed class BridgeRpcDispatcher
                 {
                     ["gimmick"] = JsonNodeHelpers.GetFirstString(args, "query", "gimmick"),
                 }, ct: ct).ConfigureAwait(false);
+
+            case "auto_interact":
+            {
+                var p = new JsonObject
+                {
+                    ["interval_sec"] = HasNonNull(args, "interval_sec") ? JsonNodeHelpers.GetDouble(args, "interval_sec", 0.8) : 0.8,
+                };
+                string activity = JsonNodeHelpers.GetFirstString(args, "activity", "content", "npc", "target", "query", "name");
+                if (!string.IsNullOrEmpty(activity))
+                    p["activity"] = activity;
+                int actId = JsonNodeHelpers.GetInt(args, "activity_id", 0);
+                if (actId > 0)
+                    p["activity_id"] = actId;
+                string label = JsonNodeHelpers.GetFirstString(args, "label", "interaction_name");
+                if (!string.IsNullOrEmpty(label))
+                    p["label"] = label;
+                int cnt = JsonNodeHelpers.GetInt(args, "count", 0);
+                if (cnt > 0)
+                    p["count"] = cnt;
+                double dur = JsonNodeHelpers.GetDouble(args, "duration_sec", 0.0);
+                if (dur > 0)
+                    p["duration_sec"] = dur;
+                return await DispatchMcpRpc("auto_interact", p, ct: ct).ConfigureAwait(false);
+            }
 
             case "set_eco_mode":
             {

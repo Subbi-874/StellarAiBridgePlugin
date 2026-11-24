@@ -246,6 +246,76 @@ public static class ExtendedCommands
             return res;
         });
 
+        Open("list_activities", p =>
+        {
+            string query = FirstStr(p, "query", "filter", "name", "activity");
+            bool openOnly = JsonNodeHelpers.GetBool(p, "open_only", false);
+            var list = traversal.ListTimedActivities(string.IsNullOrEmpty(query) ? null : query, openOnly);
+            var arr = new JsonArray();
+            foreach (var a in list)
+            {
+                arr.Add(new JsonObject
+                {
+                    ["id"] = a.ActivityId,
+                    ["name"] = a.Name,
+                    ["act_tag"] = a.ActTag,
+                    ["act_type"] = a.ActType,
+                    ["scene_id"] = a.SceneId,
+                    ["scene_name"] = a.SceneName,
+                    ["npc_name"] = a.NpcName,
+                    ["npc_cfg_id"] = a.NpcCfgId,
+                    ["is_timed"] = a.IsTimed,
+                    ["is_in_time"] = a.IsInTime,
+                    ["left_sec"] = a.LeftSec,
+                    ["schedule_desc"] = a.ScheduleDesc,
+                    ["pos"] = new JsonObject
+                    {
+                        ["x"] = MathF.Round(a.Position.X, 2),
+                        ["y"] = MathF.Round(a.Position.Y, 2),
+                        ["z"] = MathF.Round(a.Position.Z, 2),
+                    }
+                });
+            }
+            return new JsonObject { ["ok"] = true, ["activities"] = arr };
+        });
+
+        Gated("auto_interact", FeaturePolicyKeys.FollowMove, p =>
+        {
+            string activity = FirstStr(p, "activity", "content", "npc", "target", "query", "name");
+            int activityId = JsonNodeHelpers.GetInt(p, "activity_id", 0);
+            string label = FirstStr(p, "label", "interaction_name");
+            float intervalSec = (float)JsonNodeHelpers.GetDouble(p, "interval_sec", 0.8);
+            int count = JsonNodeHelpers.GetInt(p, "count", 0);
+            if (count <= 0)
+                count = JsonNodeHelpers.GetInt(p, "target_count", 0);
+            float durationSec = (float)JsonNodeHelpers.GetDouble(p, "duration_sec", 0.0);
+
+            var behavior = new AutoInteractBehavior(
+                services,
+                config,
+                world,
+                navigator,
+                autoCombat,
+                moveDriver,
+                boost,
+                traversal,
+                activity,
+                activityId,
+                label,
+                intervalSec,
+                count,
+                durationSec);
+
+            var snap = behaviors.StartBehavior(behavior);
+            onUiStateChanged?.Invoke();
+            bool failedAtStart = snap["finished"]?.GetValue<bool>() == true
+                && snap["phase"]?.GetValue<string>() == "failed";
+            var res = new JsonObject { ["ok"] = !failedAtStart, ["behavior"] = snap };
+            if (failedAtStart)
+                res["error"] = snap["detail"]?.GetValue<string>() ?? "activity_not_found";
+            return res;
+        });
+
         // 15. Inventory counting, multi-domain recipe lookup/export, crafting, and monster-drop farming
         Open("get_item_count", p =>
         {

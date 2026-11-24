@@ -543,6 +543,15 @@ public sealed class GoalEventRouter
             return $"'{goal.Title}' 완료!";
         }
 
+        if (goal.Kind == "auto_interact" || (curStep != null && curStep.ActionType == "auto_interact"))
+        {
+            string d = JsonNodeHelpers.GetString(data, "detail", "");
+            if (!string.IsNullOrEmpty(d))
+                return d;
+            int cnt = JsonNodeHelpers.GetInt(data, "trigger_count", 0);
+            return cnt > 0 ? $"'{goal.Title}' 완료 ({cnt}회)" : $"'{goal.Title}' 완료!";
+        }
+
         return $"목표 '{goal.Title}' 완료";
     }
 

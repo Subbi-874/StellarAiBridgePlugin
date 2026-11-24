@@ -81,6 +81,9 @@ public static class GoalHelpers
         "map",
         "scene_name",
         "trigger_text",
+        "label",
+        "interval_sec",
+        "duration_sec",
     };
 
     private static readonly IReadOnlyDictionary<string, string> BehaviorKindMap =
@@ -91,6 +94,7 @@ public static class GoalHelpers
             ["fish"] = "fish_at_spot",
             ["seek_monster"] = "seek_monster",
             ["use_gimmick"] = "use_gimmick",
+            ["auto_interact"] = "auto_interact",
             ["craft_item"] = "craft_item",
             ["farm_monster_item"] = "farm_monster_item",
             ["auto_quest"] = "auto_quest",
@@ -200,6 +204,12 @@ public static class GoalHelpers
                 : 1;
             parameters["count"] = targetCount;
         }
+        else if (atype == "auto_interact" && rawCount != null)
+        {
+            targetCount = JsonNodeHelpers.TryGetInt(rawCount, out int parsed)
+                ? Math.Max(0, parsed)
+                : 0;
+        }
 
         bool continuous;
         bool? rawCont = JsonNodeHelpers.GetNullableBool(raw, "continuous");
@@ -209,6 +219,8 @@ public static class GoalHelpers
             continuous = JsonNodeHelpers.GetNullableBool(parameters, "continuous") ?? true;
         else if (atype is "fish" or "gather_resource")
             continuous = targetCount == 0;
+        else if (atype == "auto_interact")
+            continuous = targetCount == 0 && JsonNodeHelpers.GetDouble(parameters, "duration_sec", 0.0) <= 0.0;
         else
             continuous = false;
 

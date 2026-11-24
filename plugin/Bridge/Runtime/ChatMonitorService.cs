@@ -215,6 +215,27 @@ public sealed class ChatMonitorService
             }
             title = maxQ > 0 ? $"{scope} 최대 {maxQ}개 자동 진행" : $"{scope} 자동 진행";
         }
+        else if (atype == "auto_interact")
+        {
+            string activity = FirstNonEmpty(
+                JsonNodeHelpers.GetString(act, "activity", ""),
+                JsonNodeHelpers.GetString(act, "content", ""),
+                JsonNodeHelpers.GetString(act, "npc", ""),
+                JsonNodeHelpers.GetString(act, "target", ""),
+                JsonNodeHelpers.GetString(act, "query", ""),
+                JsonNodeHelpers.GetString(act, "name", "")).Trim();
+            string label = FirstNonEmpty(
+                JsonNodeHelpers.GetString(act, "label", ""),
+                JsonNodeHelpers.GetString(act, "interaction_name", "")).Trim();
+            int cnt = Math.Max(0, JsonNodeHelpers.GetInt(act, "count", JsonNodeHelpers.GetInt(act, "target_count", 0)));
+            if (!string.IsNullOrEmpty(activity))
+                title = cnt > 0 ? $"'{activity}' {cnt}회 참여" : $"'{activity}' 반복 참여";
+            else
+            {
+                string prefix = !string.IsNullOrEmpty(label) ? $"'{label}' " : "";
+                title = cnt > 0 ? $"{prefix}상호작용 {cnt}회 실행" : $"{prefix}상호작용 연타";
+            }
+        }
         else
         {
             return null;
@@ -3157,6 +3178,7 @@ public sealed class ChatMonitorService
             "seek_monster" => "monster",
             "fish" or "fish_at_spot" => "fish",
             "use_gimmick" => "gimmick",
+            "auto_interact" => "interact",
             _ => behKind,
         };
 

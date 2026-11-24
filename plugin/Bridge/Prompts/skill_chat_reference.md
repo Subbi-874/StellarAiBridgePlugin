@@ -28,7 +28,7 @@
    - **전투 중 추적 최우선**: 대상이 `15m` 이상 멀어졌거나 다른 씬/다른 채널이면 전투 중이어도 자동전투를 즉시 일시 중지(`SuppressForCatchup`)해 합류·채널 전환을 최우선 수행합니다(`GetLuaIsInCombat` 실전투 판별, 채널 전환 전 교전 대기 최대 `6초`).
    - **스태미나 절약 · 익사 방지 · 모서리 우회**: 스태미나가 `50%` 이하(`<= 50%`)면 대시·점프·이동 스킬을 중단하고 일반 이동만 수행하며(수영 중 연타 억제), 장애물 우회(`detour`) 시 코너를 완전히 돌아나올 때까지 각도를 유지하고 벽 점프를 억제합니다.
    - **시점 자동 복구 (`enable_auto_camera_guard`)**: 궁극기 연출 종료·워프·채널 전환·로딩 후 자동전투/추적 시 최대 줌아웃 및 위에서 내려다보는 부감 각도로 시점을 자동 복구합니다.
-   - `teleport_to_place`, `leave_dungeon`, `seek_monster`, `switch_channel`, `use_gimmick`, `fish`, `gather_resource`를 실행하면 브릿지가 진행 중이던 `follow_player`를 자동 중지하므로 이런 단독 이동 지시에 `follow_player`를 함께 넣지 마세요.
+   - `teleport_to_place`, `leave_dungeon`, `seek_monster`, `switch_channel`, `use_gimmick`, `auto_interact`, `fish`, `gather_resource`를 실행하면 브릿지가 진행 중이던 `follow_player`를 자동 중지하므로 이런 단독 이동 지시에 `follow_player`를 함께 넣지 마세요.
 6. **유저 위치 조회 2단계 응답 (`query_player_location`)**: 1차에서는 `actions: [{"type": "query_player_location", "target": "..."}]`, `reply_text`는 `<persona>` 말투에 맞춰 확인 중이라는 짧은 한마디만 작성하고, 조회 결과(`<action_results>`)가 재전달되면 그 사실만으로 최종 답변(`actions: []`)을 작성하세요.
 7. **프리셋 · 몬스터 추적 · 저스트 회피 우선 모드 · 감정표현 vs 내장 스티커**:
    - **직업/스킬 프리셋(`switch_loadout`)**: 번호(1~), 프리셋명, 직업명으로 전환.
@@ -37,7 +37,7 @@
    - **저스트 회피 우선 & 보스 붉은 섬광 회피 (`auto_evade`)**: 자동전투가 켜져 있을 때 일반 평타/일반 탄막(`BulletStage`)은 무시하고 불필요한 이동키 회피를 억제하며, 바닥 위험 장판 폭발 직전(`~82%` 이상 또는 잔여 `0.19초` 이하) 및 보스 붉은 섬광 전조(`ZUISkillWarning`/붉은 섬광 이펙트) 타이밍에 맞춰 회피키 대시(`Rush`)로 **저스트 회피**합니다. 녹색 회복 장판과 파티 분담/집합 장판(`"분담"`, `"[집합]"`, 아군 화살표 추적)은 회피에서 제외합니다.
    - **감정표현 vs 내장 스티커**: `play_emote`는 `[보유 감정표현 목록]`의 해금 3D 모션만 사용(미보유 시 `actions` 제외 후 안내). 2D 그림 이모티콘은 최상위 `"sticker"` 필드(`greet`, `thanks`, `thumbsup`, `cheer`, `heart`, `laugh`, `cute`, `ok`, `think`, `sorry`, `sad`, `random`)를 사용합니다.
 
-## 3. JSON `actions` 규격 명세 (31종)
+## 3. JSON `actions` 규격 명세 (32종)
 1. **유저 따라가기 (`follow_player`)**: `{"type": "follow_player", "target": "<숫자 UID 우선 또는 닉네임>", "continuous": true}` (`false`면 1회 접근 후 정지)
 2. **자동전투 (`set_auto_combat`)**: `{"type": "set_auto_combat", "enable": true | false}`
 3. **이동/추적/채집/낚시 즉시 정지 (`stop`)**: `{"type": "stop"}`
@@ -77,4 +77,5 @@
 29. **기능 활성(ON/OFF) · 관리자 잠금 설정 (`set_feature_policy`)**: `{"type": "set_feature_policy", "key": "<기능키 또는 따라가기|자동전투|채집|낚시|제작|기억|월챗|일반|파티|길드|귓속말 등>", "enabled": true | false, "admin_only": true | false}` — `enabled` 변경은 해당 기능이 잠겨 있지 않으면 일반 유저도 가능, `admin_only` 설정·해제 및 잠긴 기능 변경은 **관리자만** 가능.
 30. **지정 채널 채팅/귓속말 발신 (`send_chat`)**: `{"type": "send_chat", "channel": "party | guild | say | world | whisper", "text": "<보낼 텍스트>", "target_char_id": 0}` — 일반 대답이 아닌 다른 채널(예: 관리자가 "월챗으로 ~라고 외쳐")로 메시지를 보낼 때 사용 (`world`/`say`는 기본 관리자 잠금).
 31. **자동 퀘스트 진행 (`auto_quest`)**: `{"type": "auto_quest", "category": "구역 퀘스트 | 스토리 | 후일담 | 가이드 퀘스트 | 인연 스토리 | 이벤트 퀘스트 | 전체", "region": "<특정 지역/맵명 또는 '현재 지역' 또는 ''>", "region_only": false, "quest": "<특정 퀘스트명 또는 ''>", "max_quests": 0}` — 요청 시 자동으로 목표(`set_goal`)로 등록되며 진행 가능한 퀘스트를 순서대로 자동 처리합니다(`"region"` 지정 시 해당 지역·맵 퀘스트를 최우선 정렬하며, `"region_only": true`이면 해당 지역 퀘스트만 실행; 맵/워프 이동, NPC 대화·컷신 스킵, 조사/상호작용, 몬스터 처치; 사진·통찰·시간/선행조건 잠금 퀘스트는 자동 건너뛰기).
+32. **지속 [F] 상호작용 · 한정 컨텐츠 NPC 추적 재입장 (`auto_interact`)**: `{"type": "auto_interact", "activity": "<컨텐츠명/NPC명 또는 '유성도 한정' 또는 ''>", "activity_id": 0, "label": "<버튼 키워드 또는 ''>", "interval_sec": 0.8, "count": 0, "duration_sec": 0}` — `activity`를 지정하면 게임 테이블에서 해당 컨텐츠 NPC와 오픈 여부를 동적으로 찾아 이동·접근한 뒤 `[F]`로 계속 입장·재입장하며(로딩·인스턴스 진행·사망 부활 후에도 중단 전까지 자동 복귀), `activity`가 비어 있으면 제자리 사거리 내 `[F]`를 반복 클릭합니다(`count: 0` 및 `duration_sec: 0`이면 멈출 때까지 무한 실행, 자동으로 목표에 등록됨).
 </skill_reference>

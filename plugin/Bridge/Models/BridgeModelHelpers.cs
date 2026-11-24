@@ -29,16 +29,21 @@ public sealed partial class UserRecord
 
 public sealed partial class MemoryEntry
 {
+    public string SourceName { get; set; } = "";
+    public string SubjectName { get; set; } = "";
+
     public JsonObject ToJson() => new()
     {
         ["memory_id"] = MemoryId,
         ["bot_char_id"] = BotCharId,
         ["subject_uid"] = SubjectUid,
+        ["subject_name"] = SubjectName,
         ["category"] = Category,
         ["mem_key"] = MemKey,
         ["content"] = Content,
         ["authority_tier"] = AuthorityTier,
         ["source_uid"] = SourceUid,
+        ["source_name"] = SourceName,
         ["created_at"] = CreatedAt,
         ["updated_at"] = UpdatedAt,
     };
@@ -46,6 +51,8 @@ public sealed partial class MemoryEntry
 
 public sealed partial class BotEventRecord
 {
+    public string RelatedName { get; set; } = "";
+
     public JsonObject ToJson() => new()
     {
         ["event_id"] = EventId,
@@ -55,6 +62,7 @@ public sealed partial class BotEventRecord
         ["outcome"] = Outcome,
         ["authority_tier"] = AuthorityTier,
         ["related_uid"] = RelatedUid,
+        ["related_name"] = RelatedName,
         ["created_at"] = CreatedAt,
     };
 }
@@ -89,15 +97,33 @@ public sealed partial class MemoryContextBundle
         {
             hasPrintableMemory = true;
             string tierLabel = TierLabels.TryGetValue(mem.AuthorityTier, out string? mapped) ? mapped : mem.AuthorityTier;
-            string subj = mem.SubjectUid > 0 ? $" (대상UID:{mem.SubjectUid})" : "";
-            lines.Add($"- [기억|{tierLabel}|{mem.Category}] {mem.MemKey}: {mem.Content}{subj}");
+            var metaParts = new List<string>(2);
+            if (mem.SubjectUid > 0)
+            {
+                metaParts.Add(!string.IsNullOrEmpty(mem.SubjectName)
+                    ? $"대상:{mem.SubjectName}(UID:{mem.SubjectUid})"
+                    : $"대상UID:{mem.SubjectUid}");
+            }
+            if (mem.SourceUid > 0)
+            {
+                metaParts.Add(!string.IsNullOrEmpty(mem.SourceName)
+                    ? $"출처:{mem.SourceName}(UID:{mem.SourceUid})"
+                    : $"출처UID:{mem.SourceUid}");
+            }
+            string meta = metaParts.Count > 0 ? $" ({string.Join(", ", metaParts)})" : "";
+            lines.Add($"- [기억|{tierLabel}|{mem.Category}] {mem.MemKey}: {mem.Content}{meta}");
         }
 
         foreach (BotEventRecord ev in RecentEvents)
         {
             string hhmm = FormatLocalHhMm(ev.CreatedAt);
             string timePart = string.IsNullOrEmpty(hhmm) ? "" : $"{hhmm}|";
-            lines.Add($"- [최근사건|{timePart}{ev.Outcome}] {ev.Summary}");
+            string rel = ev.RelatedUid > 0
+                ? (!string.IsNullOrEmpty(ev.RelatedName)
+                    ? $" (관련:{ev.RelatedName}/UID:{ev.RelatedUid})"
+                    : $" (관련UID:{ev.RelatedUid})")
+                : "";
+            lines.Add($"- [최근사건|{timePart}{ev.Outcome}] {ev.Summary}{rel}");
         }
 
         if (hasPrintableMemory)

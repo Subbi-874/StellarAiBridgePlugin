@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 using System.Text.Json.Nodes;
 using Stellar.Abstractions.Domain;
 using Stellar.Abstractions.Services;
@@ -7,6 +9,23 @@ using Stellar.AgyBridge.Adapters.Movement;
 using UnityEngine;
 
 namespace Stellar.AgyBridge.World;
+
+public sealed record TimedActivityEntry(
+    int ActivityId,
+    string Name,
+    string ActTag,
+    int ActType,
+    int SceneId,
+    string SceneName,
+    string NpcName,
+    int NpcCfgId,
+    string EntKind,
+    Position3D Position,
+    int OpenTimerId,
+    bool IsTimed,
+    bool IsInTime,
+    int LeftSec,
+    string ScheduleDesc);
 
 public sealed record TraversalGimmickCandidate(
     long Uuid,
@@ -247,6 +266,33 @@ public sealed class TraversalGimmickService
     }
 
     /// <summary>
+    /// Triggers the first eligible in-range <c>[F]</c> interaction prompt matching <paramref name="labelFilter"/>
+    /// (or any non-exit/non-blocked prompt when empty), returning true when <c>BeginInteraction</c> succeeded.
+    /// </summary>
+    public bool TryTriggerInRangeInteraction(string? labelFilter, out string label, out string reason)
+    {
+        label = "";
+        reason = "";
+        if (!_movement.IsLuaReady)
+        {
+            reason = "lua_not_ready";
+            return false;
+        }
+
+        JsonObject? res = _movement.TryTriggerInRangeInteraction(labelFilter);
+        if (res?["ok"]?.GetValue<bool>() == true)
+        {
+            label = res["label"]?.GetValue<string>() ?? "";
+            return true;
+        }
+
+        reason = res?["reason"]?.GetValue<string>()
+              ?? res?["error"]?.GetValue<string>()
+              ?? "no_prompt_in_range";
+        return false;
+    }
+
+    /// <summary>
     /// Attempts to activate a specific discovered gimmick candidate, dismounting if needed
     /// and initializing traversal flight tracking when activation succeeds.
     /// </summary>
@@ -372,5 +418,187 @@ public sealed class TraversalGimmickService
 
         candidate = hasTargetDir ? bestForward : (bestForward ?? bestAny);
         return candidate != null;
+    }
+
+    public int GetSceneType(int sceneId) => _movement.GetSceneType(sceneId);
+
+    public List<TimedActivityEntry> ListTimedActivities(string? queryFilter = null, bool openOnly = false)
+    {
+        var list = new List<TimedActivityEntry>();
+        if (!_movement.IsLuaReady)
+            return list;
+
+        JsonObject res = _movement.ListTimedActivitiesRaw(queryFilter, openOnly);
+        if (res["ok"]?.GetValue<bool>() != true || res["activities"] is not JsonArray arr)
+            return list;
+
+        foreach (JsonNode? n in arr)
+        {
+            if (n is not JsonObject o)
+                continue;
+            int id = o["id"]?.GetValue<int>() ?? 0;
+            int sceneId = o["scene_id"]?.GetValue<int>() ?? 0;
+            if (id <= 0 || sceneId <= 0)
+                continue;
+
+            float x = (float)(o["x"]?.GetValue<double>() ?? 0.0);
+            float y = (float)(o["y"]?.GetValue<double>() ?? 0.0);
+            float z = (float)(o["z"]?.GetValue<double>() ?? 0.0);
+            list.Add(new TimedActivityEntry(
+                id,
+                o["name"]?.GetValue<string>() ?? $"Activity#{id}",
+                o["act_tag"]?.GetValue<string>() ?? "",
+                o["act_type"]?.GetValue<int>() ?? 0,
+                sceneId,
+                o["scene_name"]?.GetValue<string>() ?? "",
+                o["npc_name"]?.GetValue<string>() ?? "",
+                o["npc_cfg_id"]?.GetValue<int>() ?? 0,
+                o["ent_kind"]?.GetValue<string>() ?? "none",
+                new Position3D(x, y, z),
+                o["open_timer"]?.GetValue<int>() ?? 0,
+                o["is_timed"]?.GetValue<bool>() ?? false,
+                o["is_in_time"]?.GetValue<bool>() ?? false,
+                o["left_sec"]?.GetValue<int>() ?? 0,
+                o["schedule_desc"]?.GetValue<string>() ?? ""));
+        }
+
+        return list;
+    }
+
+    public TimedActivityEntry? ResolveTimedActivity(
+        string? query,
+        int activityId,
+        out string error,
+        out List<TimedActivityEntry> openMatches)
+    {
+        error = "";
+        openMatches = new List<TimedActivityEntry>();
+
+        if (!_movement.IsLuaReady)
+        {
+            error = "게임 Lua가 아직 준비되지 않았어요.";
+            return null;
+        }
+
+        List<TimedActivityEntry> all = ListTimedActivities(null, openOnly: false);
+        if (all.Count == 0)
+        {
+            error = "컨텐츠 NPC 정보를 불러오지 못했어요.";
+            return null;
+        }
+
+        openMatches = all.Where(a => a.IsInTime).ToList();
+
+        if (activityId > 0)
+        {
+            TimedActivityEntry? byId = all.FirstOrDefault(a => a.ActivityId == activityId);
+            if (byId != null)
+                return byId;
+            error = $"ID #{activityId} 컨텐츠를 찾지 못했어요.";
+            return null;
+        }
+
+        string qNorm = NormalizeActivityToken(query);
+        if (string.IsNullOrEmpty(qNorm))
+        {
+            error = "찾을 컨텐츠나 NPC 이름이 비어 있어요.";
+            return null;
+        }
+
+        static int RankEntry(TimedActivityEntry a)
+        {
+            int score = 0;
+            if (a.IsInTime) score += 100;
+            if (a.ActType == 3) score += 20;
+            else if (a.IsTimed) score += 10;
+            if (a.SceneId == 11) score += 5;
+            return score;
+        }
+
+        // 1. Exact Name or NpcName match
+        var exact = all
+            .Where(a => NormalizeActivityToken(a.Name) == qNorm || NormalizeActivityToken(a.NpcName) == qNorm)
+            .OrderByDescending(RankEntry)
+            .ThenBy(a => a.ActivityId)
+            .FirstOrDefault();
+        if (exact != null)
+            return exact;
+
+        // 2. Substring match on Name or NpcName
+        var sub = all
+            .Where(a =>
+            {
+                string nn = NormalizeActivityToken(a.Name);
+                string npc = NormalizeActivityToken(a.NpcName);
+                return (!string.IsNullOrEmpty(nn) && (nn.Contains(qNorm, StringComparison.Ordinal) || qNorm.Contains(nn, StringComparison.Ordinal)))
+                    || (!string.IsNullOrEmpty(npc) && (npc.Contains(qNorm, StringComparison.Ordinal) || qNorm.Contains(npc, StringComparison.Ordinal)));
+            })
+            .OrderByDescending(RankEntry)
+            .ThenBy(a => a.ActivityId)
+            .FirstOrDefault();
+        if (sub != null)
+            return sub;
+
+        // 3. Broad / scene / category query (e.g. "유성도 한정", "한정 컨텐츠", "게임 부스")
+        bool isBroadKeyword = qNorm.Contains("한정", StringComparison.Ordinal)
+            || qNorm.Contains("부스", StringComparison.Ordinal)
+            || qNorm.Contains("놀이", StringComparison.Ordinal)
+            || qNorm.Contains("이벤트", StringComparison.Ordinal)
+            || qNorm.Contains("미니게임", StringComparison.Ordinal)
+            || qNorm.Contains("컨텐츠", StringComparison.Ordinal)
+            || qNorm.Contains("콘텐츠", StringComparison.Ordinal);
+
+        var scoped = all
+            .Where(a =>
+            {
+                string sn = NormalizeActivityToken(a.SceneName);
+                string tg = NormalizeActivityToken(a.ActTag);
+                return (!string.IsNullOrEmpty(sn) && (sn.Contains(qNorm, StringComparison.Ordinal) || qNorm.Contains(sn, StringComparison.Ordinal)))
+                    || (!string.IsNullOrEmpty(tg) && (tg.Contains(qNorm, StringComparison.Ordinal) || qNorm.Contains(tg, StringComparison.Ordinal)))
+                    || isBroadKeyword;
+            })
+            .ToList();
+
+        if (scoped.Count > 0)
+        {
+            var openScoped = scoped
+                .Where(a => a.IsInTime && (a.ActType == 3 || a.IsTimed))
+                .OrderByDescending(RankEntry)
+                .ThenBy(a => a.ActivityId)
+                .FirstOrDefault()
+                ?? scoped
+                    .Where(a => a.IsInTime)
+                    .OrderByDescending(RankEntry)
+                    .ThenBy(a => a.ActivityId)
+                    .FirstOrDefault();
+
+            if (openScoped != null)
+                return openScoped;
+
+            string closedNames = string.Join(", ", scoped.Where(a => a.ActType == 3 || a.IsTimed).Take(5).Select(a => a.Name));
+            error = string.IsNullOrEmpty(closedNames)
+                ? $"'{query}' 조건에 맞는 진행 중인 컨텐츠가 없어요."
+                : $"지금 열려 있는 한정 컨텐츠가 없어요 (대상: {closedNames}).";
+            return null;
+        }
+
+        string openList = string.Join(", ", openMatches.Take(6).Select(a => string.IsNullOrEmpty(a.NpcName) ? a.Name : $"{a.Name}({a.NpcName})"));
+        error = string.IsNullOrEmpty(openList)
+            ? $"'{query}' 이름의 컨텐츠/NPC를 찾지 못했어요."
+            : $"'{query}' 컨텐츠를 찾지 못했어요. 현재 진행 중: {openList}";
+        return null;
+    }
+
+    private static string NormalizeActivityToken(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return "";
+        var sb = new StringBuilder(raw.Length);
+        foreach (char ch in raw.Trim().ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(ch))
+                sb.Append(ch);
+        }
+        return sb.ToString();
     }
 }

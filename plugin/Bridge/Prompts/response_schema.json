@@ -44,6 +44,7 @@
               "fish",
               "leave_dungeon",
               "use_gimmick",
+              "auto_interact",
               "set_goal",
               "cancel_goal",
               "list_goals",
@@ -197,6 +198,21 @@
           },
           "gimmick": {
             "type": "string"
+          },
+          "activity": {
+            "type": "string"
+          },
+          "activity_id": {
+            "type": "integer"
+          },
+          "label": {
+            "type": "string"
+          },
+          "interval_sec": {
+            "type": "number"
+          },
+          "duration_sec": {
+            "type": "number"
           },
           "title": {
             "type": "string"

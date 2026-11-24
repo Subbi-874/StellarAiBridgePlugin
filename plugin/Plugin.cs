@@ -274,7 +274,7 @@ public sealed class Plugin : IStellarPlugin
         }
         else if (key == FeaturePolicyKeys.FollowMove && !policy.Enabled)
         {
-            if (_behaviors.Current is FollowPartyBehavior or MoveToBehavior or SeekMonsterBehavior or UseGimmickBehavior or FarmMonsterItemBehavior or AutoQuestBehavior)
+            if (_behaviors.Current is FollowPartyBehavior or MoveToBehavior or SeekMonsterBehavior or UseGimmickBehavior or FarmMonsterItemBehavior or AutoQuestBehavior or AutoInteractBehavior)
                 _behaviors.StopCurrent("policy_disabled");
         }
         else if (key == FeaturePolicyKeys.AutoQuest && !policy.Enabled)

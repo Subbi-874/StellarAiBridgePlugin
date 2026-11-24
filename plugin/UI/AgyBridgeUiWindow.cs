@@ -104,6 +104,10 @@ public sealed class AgyBridgeUiWindow : IDisposable
     private readonly EcoModeService _ecoMode;
 
     private int _questCategoryIdx = 1; // default: 구역 퀘스트
+    private IReadOnlyList<TimedActivityEntry> _timedActivities = Array.Empty<TimedActivityEntry>();
+    private IReadOnlyList<string> _autoInteractTargetLabels = Array.Empty<string>();
+    private int _autoInteractTargetIdx;
+    private long _lastTimedActivitiesPollMs;
 
     private IWindowControl? _window;
     private IWindowControl? _adminWindow;
@@ -229,6 +233,51 @@ public sealed class AgyBridgeUiWindow : IDisposable
             T("ctrl.quest.cat.bond"),
             T("ctrl.quest.cat.event")
         };
+        RebuildTimedActivityLabels();
+    }
+
+    private void RebuildTimedActivityLabels()
+    {
+        int prevId = (_autoInteractTargetIdx > 0 && _autoInteractTargetIdx - 1 < _timedActivities.Count)
+            ? _timedActivities[_autoInteractTargetIdx - 1].ActivityId
+            : 0;
+
+        var labels = new List<string>(_timedActivities.Count + 1)
+        {
+            T("control.auto_interact.inplace")
+        };
+
+        int nextIdx = 0;
+        for (int i = 0; i < _timedActivities.Count; i++)
+        {
+            TimedActivityEntry a = _timedActivities[i];
+            if (prevId > 0 && a.ActivityId == prevId)
+                nextIdx = i + 1;
+
+            string badge = a.IsInTime
+                ? (a.IsTimed ? T("control.auto_interact.badge_open") : T("control.auto_interact.badge_always"))
+                : T("control.auto_interact.badge_closed");
+            string npcPart = string.IsNullOrEmpty(a.NpcName) ? "" : $" ({a.NpcName})";
+            labels.Add($"{badge} {a.Name}{npcPart}");
+        }
+
+        _autoInteractTargetLabels = labels;
+        _autoInteractTargetIdx = Math.Clamp(nextIdx, 0, Math.Max(0, labels.Count - 1));
+    }
+
+    private void RefreshTimedActivities(bool force = false)
+    {
+        if (_services.ClientState.Phase != GamePhase.World || !_services.PlayerState.IsAvailable)
+            return;
+
+        long now = Environment.TickCount64;
+        if (!force && _timedActivities.Count > 0 && now - _lastTimedActivitiesPollMs < 30_000)
+            return;
+
+        _lastTimedActivitiesPollMs = now;
+        _timedActivities = _traversal.ListTimedActivities();
+        RebuildTimedActivityLabels();
+        _window?.MarkDirty();
     }
 
     private void OnLanguageChanged()
@@ -369,6 +418,10 @@ public sealed class AgyBridgeUiWindow : IDisposable
         if (!_adminExpandedOnce && _adminWindow is { IsShown: true })
         {
             TryExpandAdminWindowOnce();
+        }
+        if (_window is { IsShown: true } && _activeTab == "control")
+        {
+            RefreshTimedActivities(force: false);
         }
 
         if (!_llmTextDirty) return;
@@ -1197,7 +1250,102 @@ public sealed class AgyBridgeUiWindow : IDisposable
                         null,
                         122f,
                         null)
-                }, 6f, RowJustify.Left)
+                }, 6f, RowJustify.Left),
+                new RowElement(new HudElement[]
+                {
+                    new DropdownElement(
+                        () => Math.Clamp(_autoInteractTargetIdx, 0, Math.Max(0, _autoInteractTargetLabels.Count - 1)),
+                        () => _autoInteractTargetLabels,
+                        idx =>
+                        {
+                            if (idx >= 0 && idx < _autoInteractTargetLabels.Count)
+                            {
+                                _autoInteractTargetIdx = idx;
+                                MarkDirty();
+                            }
+                        },
+                        220f),
+                    new ButtonElement(
+                        () => T("control.auto_interact.refresh"),
+                        () =>
+                        {
+                            RefreshTimedActivities(force: true);
+                            MarkDirty();
+                        },
+                        null,
+                        MenuButtonStyle.Glass,
+                        null,
+                        34f,
+                        null),
+                    new ButtonElement(
+                        () => _behaviors.Current is AutoInteractBehavior
+                            ? T("control.btn.auto_interact_stop")
+                            : T("control.btn.auto_interact_start"),
+                        () =>
+                        {
+                            if (_behaviors.Current is AutoInteractBehavior)
+                            {
+                                _behaviors.StopCurrent("ui_auto_interact_stop");
+                                MarkDirty();
+                                return;
+                            }
+                            if (!_config.CheckFeatureExecution(FeaturePolicyKeys.FollowMove, out string err, asAdmin: true))
+                            {
+                                _services.Notifications.Notify(err, NotificationKind.Warning, 3.0f);
+                                return;
+                            }
+
+                            AutoInteractBehavior behavior;
+                            int selIdx = _autoInteractTargetIdx;
+                            if (selIdx > 0 && selIdx - 1 < _timedActivities.Count)
+                            {
+                                TimedActivityEntry chosen = _timedActivities[selIdx - 1];
+                                behavior = new AutoInteractBehavior(
+                                    _services,
+                                    _config,
+                                    _world,
+                                    _navigator,
+                                    _autoCombat,
+                                    _moveDriver,
+                                    _boost,
+                                    _traversal,
+                                    chosen.Name,
+                                    chosen.ActivityId);
+                            }
+                            else
+                            {
+                                behavior = new AutoInteractBehavior(_services, _world, _traversal);
+                            }
+
+                            var snap = _behaviors.StartBehavior(behavior);
+                            if (snap["finished"]?.GetValue<bool>() == true
+                                && snap["phase"]?.GetValue<string>() == "failed")
+                            {
+                                _services.Notifications.Notify(
+                                    snap["detail"]?.GetValue<string>() ?? "상호작용 시작 실패",
+                                    NotificationKind.Warning,
+                                    3.0f);
+                            }
+                            MarkDirty();
+                        },
+                        () => _config.IsFeatureEnabled(FeaturePolicyKeys.FollowMove),
+                        MenuButtonStyle.Outline,
+                        () => _behaviors.Current is AutoInteractBehavior,
+                        148f,
+                        null)
+                }, 6f, RowJustify.Left),
+                new TextElement(
+                    () =>
+                    {
+                        if (_behaviors.Current is AutoInteractBehavior ai)
+                            return ai.GetSnapshot()["detail"]?.GetValue<string>() ?? "";
+                        return T("control.auto_interact.hint");
+                    },
+                    () => _behaviors.Current is AutoInteractBehavior ? SuccessColor : MutedColor,
+                    false,
+                    0f,
+                    TextAlign.Left,
+                    true)
             });
 
         var followTabsRow = BuildCategoryTabRow(
@@ -2654,6 +2802,17 @@ public sealed class AgyBridgeUiWindow : IDisposable
             string lbl = snap["gimmick_label"]?.GetValue<string>() ?? T("behavior.gimmick_default");
             string phase = snap["phase"]?.GetValue<string>() ?? "";
             return TF("behavior.gimmick_fmt", lbl, phase);
+        }
+        if (kind == "auto_interact")
+        {
+            string lbl = snap["last_label"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrEmpty(lbl))
+                lbl = snap["label_filter"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrEmpty(lbl))
+                lbl = T("behavior.interact_default");
+            int cnt = snap["trigger_count"]?.GetValue<int>() ?? 0;
+            string phase = snap["phase"]?.GetValue<string>() ?? "";
+            return TF("behavior.interact_fmt", lbl, cnt, phase);
         }
         if (kind == "auto_quest")
         {

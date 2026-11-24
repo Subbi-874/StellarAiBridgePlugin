@@ -402,10 +402,9 @@ public sealed class SqliteMemoryStore : IMemoryStore
                 PruneBotMemoriesLocked(db, botCharId);
 
                 using NativeSqliteStmt sel = db.Prepare(
-                    "SELECT id, bot_char_id, subject_uid, category, mem_key, content, " +
-                    "       authority_tier, source_uid, created_at, updated_at " +
-                    "FROM bot_memories " +
-                    "WHERE bot_char_id = ?1 AND subject_uid = ?2 AND category = ?3 AND mem_key = ?4;");
+                    $"SELECT {MemoryColumnsSql("m")} " +
+                    $"FROM bot_memories m {MemoryUserJoinsSql("m")} " +
+                    "WHERE m.bot_char_id = ?1 AND m.subject_uid = ?2 AND m.category = ?3 AND m.mem_key = ?4;");
                 sel.BindInt64(1, botCharId);
                 sel.BindInt64(2, subj);
                 sel.BindText(3, normCat);
@@ -510,7 +509,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
             {
                 var plainArgs = new List<object?>(baseArgs) { (long)lim };
                 using NativeSqliteStmt stmt = db.Prepare(
-                    $"SELECT {MemoryColumnsSql("m")} FROM bot_memories m WHERE {baseWhere} " +
+                    $"SELECT {MemoryColumnsSql("m")} FROM bot_memories m {MemoryUserJoinsSql("m")} WHERE {baseWhere} " +
                     "ORDER BY m.updated_at DESC, m.id DESC LIMIT ?;");
                 BindParameters(stmt, plainArgs);
                 var plainList = new List<MemoryEntry>();
@@ -533,6 +532,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
                         $"SELECT {MemoryColumnsSql("m")} " +
                         "FROM bot_memories_fts f " +
                         "JOIN bot_memories m ON m.id = f.rowid " +
+                        $"{MemoryUserJoinsSql("m")} " +
                         $"WHERE bot_memories_fts MATCH ? AND {baseWhere} " +
                         "ORDER BY bm25(bot_memories_fts), m.updated_at DESC " +
                         "LIMIT ?;");
@@ -554,13 +554,15 @@ public sealed class SqliteMemoryStore : IMemoryStore
             foreach (string tok in keywords)
             {
                 string pat = $"%{MemoryStoreHelpers.EscapeLikePattern(tok)}%";
-                likeParts.Add("(m.mem_key LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\')");
+                likeParts.Add("(m.mem_key LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\' OR src_u.current_name LIKE ? ESCAPE '\\' OR subj_u.current_name LIKE ? ESCAPE '\\')");
+                likeArgs.Add(pat);
+                likeArgs.Add(pat);
                 likeArgs.Add(pat);
                 likeArgs.Add(pat);
             }
             likeArgs.Add((long)(lim * 2));
 
-            string likeSql = $"SELECT {MemoryColumnsSql("m")} FROM bot_memories m " +
+            string likeSql = $"SELECT {MemoryColumnsSql("m")} FROM bot_memories m {MemoryUserJoinsSql("m")} " +
                 $"WHERE {baseWhere} AND ({string.Join(" OR ", likeParts)}) " +
                 "ORDER BY m.updated_at DESC, m.id DESC LIMIT ?;";
             using (NativeSqliteStmt likeStmt = db.Prepare(likeSql))
@@ -631,8 +633,8 @@ public sealed class SqliteMemoryStore : IMemoryStore
                 PruneBotEventsLocked(db, botCharId);
 
                 using NativeSqliteStmt sel = db.Prepare(
-                    "SELECT id, bot_char_id, event_type, summary, outcome, authority_tier, related_uid, created_at " +
-                    "FROM bot_events WHERE id = ?1;");
+                    $"SELECT {EventColumnsSql("e")} " +
+                    $"FROM bot_events e {EventUserJoinsSql("e")} WHERE e.id = ?1;");
                 sel.BindInt64(1, newId);
                 if (sel.StepRow())
                     record = ReadEventRow(sel);
@@ -651,8 +653,8 @@ public sealed class SqliteMemoryStore : IMemoryStore
         {
             NativeSqliteDb db = EnsureOpenDb();
             using NativeSqliteStmt stmt = db.Prepare(
-                "SELECT id, bot_char_id, event_type, summary, outcome, authority_tier, related_uid, created_at " +
-                "FROM bot_events WHERE bot_char_id = ?1 ORDER BY id DESC LIMIT ?2;");
+                $"SELECT {EventColumnsSql("e")} " +
+                $"FROM bot_events e {EventUserJoinsSql("e")} WHERE e.bot_char_id = ?1 ORDER BY e.id DESC LIMIT ?2;");
             stmt.BindInt64(1, botCharId);
             stmt.BindInt64(2, lim);
             var list = new List<BotEventRecord>();
@@ -1089,7 +1091,19 @@ public sealed class SqliteMemoryStore : IMemoryStore
 
     private static string MemoryColumnsSql(string alias) =>
         $"{alias}.id, {alias}.bot_char_id, {alias}.subject_uid, {alias}.category, {alias}.mem_key, " +
-        $"{alias}.content, {alias}.authority_tier, {alias}.source_uid, {alias}.created_at, {alias}.updated_at";
+        $"{alias}.content, {alias}.authority_tier, {alias}.source_uid, {alias}.created_at, {alias}.updated_at, " +
+        "COALESCE(src_u.current_name, ''), COALESCE(subj_u.current_name, '')";
+
+    private static string MemoryUserJoinsSql(string alias) =>
+        $"LEFT JOIN users src_u ON src_u.uid = {alias}.source_uid " +
+        $"LEFT JOIN users subj_u ON subj_u.uid = {alias}.subject_uid";
+
+    private static string EventColumnsSql(string alias) =>
+        $"{alias}.id, {alias}.bot_char_id, {alias}.event_type, {alias}.summary, {alias}.outcome, " +
+        $"{alias}.authority_tier, {alias}.related_uid, {alias}.created_at, COALESCE(rel_u.current_name, '')";
+
+    private static string EventUserJoinsSql(string alias) =>
+        $"LEFT JOIN users rel_u ON rel_u.uid = {alias}.related_uid";
 
     private static MemoryEntry ReadMemoryRow(NativeSqliteStmt stmt) => new()
     {
@@ -1103,6 +1117,8 @@ public sealed class SqliteMemoryStore : IMemoryStore
         SourceUid = stmt.GetInt64(7),
         CreatedAt = stmt.GetText(8),
         UpdatedAt = stmt.GetText(9),
+        SourceName = stmt.GetText(10),
+        SubjectName = stmt.GetText(11),
     };
 
     private static BotEventRecord ReadEventRow(NativeSqliteStmt stmt) => new()
@@ -1115,6 +1131,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
         AuthorityTier = stmt.GetText(5),
         RelatedUid = stmt.GetInt64(6),
         CreatedAt = stmt.GetText(7),
+        RelatedName = stmt.GetText(8),
     };
 
     private static void BindParameters(NativeSqliteStmt stmt, IReadOnlyList<object?> args)

@@ -49,6 +49,7 @@ public static class BridgeConstants
 
     public static IReadOnlySet<string> GoalFeedbackEvents { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
+        "auto_interact_completed",
         "auto_quest_completed",
         "auto_quest_failed",
         "behavior_finished",
@@ -74,6 +75,7 @@ public static class BridgeConstants
 
     public static IReadOnlySet<string> SuccessEvents { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
+        "auto_interact_completed",
         "auto_quest_completed",
         "craft_completed",
         "fishing_completed",
@@ -125,6 +127,7 @@ public static class BridgeConstants
     public static IReadOnlySet<string> ExtendedActionTypes { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         "accept_interaction",
+        "auto_interact",
         "auto_quest",
         "craft_item",
         "enter_dungeon",
@@ -165,6 +168,7 @@ public static class BridgeConstants
 
     public static IReadOnlySet<string> StandaloneLongActions { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
+        "auto_interact",
         "auto_quest",
         "craft_item",
         "farm_monster_item",
@@ -251,6 +255,7 @@ public static class BridgeConstants
         ["craft_item"] = "auto_craft",
         ["craft_goal"] = "auto_craft",
         ["farm_monster_item"] = "follow_move",
+        ["auto_interact"] = "follow_move",
         ["auto_quest"] = "auto_quest",
         ["remember"] = "memory_manage",
         ["forget"] = "memory_manage",
@@ -311,6 +316,7 @@ public static class BridgeConstants
         ["craft_failed"] = new[] { "craft_item" },
         ["monster_farm_completed"] = new[] { "farm_monster_item" },
         ["monster_farm_failed"] = new[] { "farm_monster_item" },
+        ["auto_interact_completed"] = new[] { "auto_interact" },
         ["auto_quest_completed"] = new[] { "auto_quest" },
         ["auto_quest_failed"] = new[] { "auto_quest" },
     };

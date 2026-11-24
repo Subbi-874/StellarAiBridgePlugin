@@ -364,6 +364,32 @@ public sealed class ActionExecutor
             parameters["gimmick"] = gimmick;
             onClearKinds?.Invoke(new[] { "follow", "fish" });
         }
+        else if (atype == "auto_interact")
+        {
+            method = "auto_interact";
+            defaultErr = "상호작용 반복을 시작하지 못했어요";
+            string activity = JsonNodeHelpers.GetFirstString(act, "activity", "content", "npc", "target", "query", "name");
+            int activityId = JsonNodeHelpers.GetInt(act, "activity_id", 0);
+            string label = JsonNodeHelpers.GetFirstString(act, "label", "interaction_name");
+            if (!string.IsNullOrEmpty(activity))
+                parameters["activity"] = activity;
+            if (activityId > 0)
+                parameters["activity_id"] = activityId;
+            if (!string.IsNullOrEmpty(label))
+                parameters["label"] = label;
+            double intervalSec = JsonNodeHelpers.GetDouble(act, "interval_sec", 0.8);
+            if (intervalSec > 0)
+                parameters["interval_sec"] = intervalSec;
+            int count = JsonNodeHelpers.GetInt(act, "count", 0);
+            if (count <= 0)
+                count = JsonNodeHelpers.GetInt(act, "target_count", 0);
+            if (count > 0)
+                parameters["count"] = count;
+            double durationSec = JsonNodeHelpers.GetDouble(act, "duration_sec", 0.0);
+            if (durationSec > 0)
+                parameters["duration_sec"] = durationSec;
+            onClearKinds?.Invoke(new[] { "follow", "fish" });
+        }
         else if (atype == "craft_item")
         {
             method = "craft_item";
@@ -495,6 +521,8 @@ public sealed class ActionExecutor
             onRemember?.Invoke("gimmick");
         else if (atype == "auto_quest")
             onRemember?.Invoke("quest");
+        else if (atype == "auto_interact")
+            onRemember?.Invoke("interact");
 
         JsonObject? info = BridgeConstants.InfoActions.Contains(atype)
             ? new JsonObject

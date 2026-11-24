@@ -39,6 +39,8 @@ public interface IMovementAdapter : ICapabilityProbe
     int ReadPlayerActorState();
     JsonObject? ScanNearbyGimmicksRaw(string trimmedFilter, float maxRadius, Position3D localPos);
     JsonObject? TryBeginGimmickInteraction(long wantUuid, int wantCfg, int wantSeat);
+    JsonObject? TryTriggerInRangeInteraction(string? labelFilter);
+    JsonObject ListTimedActivitiesRaw(string? queryFilter = null, bool openOnly = false);
 
     // ─── Mobility Skills & Native Metrics ───
     JsonObject? QueryReadyMobilitySkillSlot(int explicitSlot, string nameHint);
